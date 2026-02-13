@@ -42,6 +42,15 @@ void onBrightnessChange(int change) {
     settings.save();
 }
 
+void onWiFiConfig(String ssid, String pass) {
+    settings.wifiSSID = ssid;
+    settings.wifiPass = pass;
+    settings.save();
+    network.setCredentials(ssid, pass);
+    display.showStatus("Connecting...");
+    network.connect();
+}
+
 void setup() {
   Serial.begin(115200);
   unsigned long start = millis();
@@ -64,6 +73,7 @@ void setup() {
   display.setBrightness(settings.brightness);
   display.setVolumeCallback(onVolumeChange);
   display.setBrightnessCallback(onBrightnessChange);
+  display.setWiFiConfigCallback(onWiFiConfig);
 
   // Check for touch calibration status
   if (settings.calibration.isValid) {
@@ -77,9 +87,33 @@ void setup() {
 
   display.showBootLogo(); // Show the logo immediately
   delay(3000); // Wait 3 seconds so we can see the logo
-  display.showStatus("Initializing...");
 
-  network.connect();
+  // WiFi Connection Logic
+  if (settings.wifiSSID == "" || settings.wifiSSID == "YOUR_WIFI_SSID") {
+      display.showWiFiConfig();
+      while (!network.isConnected()) {
+          lv_timer_handler();
+          delay(5);
+      }
+  } else {
+      int attempts = 0;
+      while (attempts < 5) {
+          display.showStatus(("Connecting to WiFi (" + String(attempts + 1) + "/5)...").c_str());
+          network.connect();
+          if (network.isConnected()) break;
+          attempts++;
+      }
+
+      if (!network.isConnected()) {
+          display.showWiFiError("WiFi Connection Failed after 5 attempts.");
+          while (!network.isConnected()) {
+              lv_timer_handler();
+              delay(5);
+          }
+      }
+  }
+
+  display.showMainUI();
   display.showStatus("WiFi Connected!");
   
   // Initialize Speech Recognition (I2S)
@@ -131,10 +165,12 @@ void loop() {
       inputBuffer.trim();
       if (inputBuffer.length() > 0) {
         if (inputBuffer == "/settings") {
+        if (inputBuffer == "/settings" || inputBuffer == "/config" || inputBuffer == "/setup" || inputBuffer == "/confgi") {
           Serial.println("\n--- Current Settings ---");
           Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
           Serial.printf("RSSI:       %d dBm\n", network.getSignalStrength());
           Serial.printf("WiFi SSID:  %s\n", settings.wifiSSID.c_str());
+          Serial.printf("WiFi Pass:  %s\n", settings.wifiPass.c_str());
           Serial.printf("API URL:    %s\n", settings.apiUrl.c_str());
           Serial.printf("LLM Model:  %s\n", settings.llmModel.c_str());
           Serial.printf("Volume:     %d / 21\n", settings.volume);

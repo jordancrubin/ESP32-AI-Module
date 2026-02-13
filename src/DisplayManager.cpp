@@ -2,6 +2,7 @@
 #include <Fonts/FreeSans12pt7b.h>
 #include <TJpg_Decoder.h>
 #include "BootLogo.h"
+#include <WiFi.h>
 
 // GPIO 38 conflicts with the PSRAM bus on S3 modules, causing audio distortion.
 // GPIO 4 is a safe pin for PWM backlight control.
@@ -43,6 +44,7 @@ bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) 
 
 VolumeCallback DisplayManager::volumeCb = nullptr;
 BrightnessCallback DisplayManager::brightnessCb = nullptr;
+WiFiConfigCallback DisplayManager::wifiCb = nullptr;
 
 // LVGL Flush Callback
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
@@ -71,7 +73,8 @@ void DisplayManager::begin(TouchCalibration cal) {
     delay(100);
 
     // Initialize Backlight PWM
-    ledcAttach(TFT_BL, 5000, 8);
+    // Lowering frequency to 200Hz reduces electrical noise (EMI) that causes audio distortion.
+    ledcAttach(TFT_BL, 200, 8);
     ledcWrite(TFT_BL, 255); // Default to full brightness
 
     gfx->setFont(&FreeSans12pt7b);
@@ -109,6 +112,12 @@ void DisplayManager::begin(TouchCalibration cal) {
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = my_touchpad_read;
     lv_indev_drv_register(&indev_drv);
+
+    showMainUI();
+}
+
+void DisplayManager::showMainUI() {
+    lv_obj_clean(lv_scr_act());
 
     // Create a basic label for status
     statusLabel = lv_label_create(lv_scr_act());
@@ -217,6 +226,80 @@ void DisplayManager::showThinking(bool active) {
             lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
         }
     }
+}
+
+void DisplayManager::setWiFiConfigCallback(WiFiConfigCallback cb) {
+    wifiCb = cb;
+}
+
+void DisplayManager::showWiFiConfig() {
+    lv_obj_clean(lv_scr_act());
+    
+    lv_obj_t * label = lv_label_create(lv_scr_act());
+    lv_label_set_text(label, "WiFi Configuration");
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
+
+    wifi_dd = lv_dropdown_create(lv_scr_act());
+    lv_obj_set_width(wifi_dd, 200);
+    lv_obj_align(wifi_dd, LV_ALIGN_TOP_MID, 0, 40);
+    lv_dropdown_set_text(wifi_dd, "Scanning...");
+
+    wifi_ta = lv_textarea_create(lv_scr_act());
+    lv_textarea_set_one_line(wifi_ta, true);
+    lv_textarea_set_password_mode(wifi_ta, true);
+    lv_textarea_set_placeholder_text(wifi_ta, "Password");
+    lv_obj_set_width(wifi_ta, 200);
+    lv_obj_align(wifi_ta, LV_ALIGN_TOP_MID, 0, 80);
+
+    lv_obj_t * kb = lv_keyboard_create(lv_scr_act());
+    lv_keyboard_set_textarea(kb, wifi_ta);
+    lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_event_cb(wifi_ta, [](lv_event_t* e){
+        lv_obj_t* kb = (lv_obj_t*)lv_event_get_user_data(e);
+        lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    }, LV_EVENT_FOCUSED, kb);
+
+    lv_obj_t * btn = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btn, 100, 40);
+    lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_t * btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, "Connect");
+    lv_obj_add_event_cb(btn, wifiConfigEventHandler, LV_EVENT_CLICKED, this);
+
+    int n = WiFi.scanNetworks();
+    String opts = "";
+    for (int i = 0; i < n; i++) {
+        opts += WiFi.SSID(i);
+        if (i < n - 1) opts += "\n";
+    }
+    lv_dropdown_set_options(wifi_dd, opts.c_str());
+}
+
+void DisplayManager::showWiFiError(const char* message) {
+    lv_obj_clean(lv_scr_act());
+    lv_obj_t * label = lv_label_create(lv_scr_act());
+    lv_label_set_text(label, message);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, -40);
+
+    lv_obj_t * btn = lv_btn_create(lv_scr_act());
+    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_t * btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, "Configure WiFi");
+    lv_obj_add_event_cb(btn, wifiRetryHandler, LV_EVENT_CLICKED, NULL);
+}
+
+void DisplayManager::wifiConfigEventHandler(lv_event_t * e) {
+    DisplayManager* dm = (DisplayManager*)lv_event_get_user_data(e);
+    if (dm && wifiCb) {
+        char ssid[64];
+        lv_dropdown_get_selected_str(dm->wifi_dd, ssid, sizeof(ssid));
+        wifiCb(String(ssid), String(lv_textarea_get_text(dm->wifi_ta)));
+    }
+}
+
+void DisplayManager::wifiRetryHandler(lv_event_t * e) {
+    static_dm->showWiFiConfig();
 }
 
 void DisplayManager::setBrightness(int level) {

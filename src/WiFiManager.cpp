@@ -15,11 +15,18 @@ void WiFiManager::connect() {
     WiFi.setSleep(false); // Disable WiFi sleep to prevent audio crackling
     WiFi.begin(_ssid, _password);
 
-    while (WiFi.status() != WL_CONNECTED) {
+    unsigned long start = millis();
+    // Timeout after 15 seconds
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
         delay(500);
         Serial.print(".");
     }
     
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("\nWiFi Connection Timeout.");
+        return;
+    }
+
     Serial.println("\nWiFi Connected!");
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
