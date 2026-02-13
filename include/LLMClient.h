@@ -1,0 +1,26 @@
+#pragma once
+#include <Arduino.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include "WiFiManager.h"
+
+typedef void (*ProgressCallback)(int percent, float speed);
+
+class LLMClient {
+public:
+    LLMClient(const char* apiUrl, const char* apiKey, const char* model);
+    void setConfig(String apiUrl, String apiKey, String model);
+    String sendPrompt(String prompt, WiFiManager& netMgr);
+    String getModels(WiFiManager& netMgr);
+    void clearHistory();
+    void setSystemPrompt(const char* prompt);
+    bool downloadTTS(String text, WiFiManager& netMgr, uint8_t** outBuffer, size_t* outSize, ProgressCallback cb = nullptr);
+
+private:
+    String _apiUrl;
+    String _apiKey;
+    String _model;
+    JsonDocument _historyDoc;
+    JsonArray _history;
+    char* _systemPrompt;
+};
