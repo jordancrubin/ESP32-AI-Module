@@ -165,7 +165,6 @@ void loop() {
       inputBuffer.trim();
       if (inputBuffer.length() > 0) {
         if (inputBuffer == "/settings") {
-        if (inputBuffer == "/settings" || inputBuffer == "/config" || inputBuffer == "/setup" || inputBuffer == "/confgi") {
           Serial.println("\n--- Current Settings ---");
           Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
           Serial.printf("RSSI:       %d dBm\n", network.getSignalStrength());
