@@ -29,6 +29,17 @@ void onVolumeChange(int change) {
     // Play a tone that changes pitch with the volume level
     int freq = 220 + (settings.volume * 30); 
     speaker.playTone(freq, 100); 
+    settings.save();
+}
+
+void onBrightnessChange(int change) {
+    settings.brightness += change;
+    if (settings.brightness < 0) settings.brightness = 0;
+    if (settings.brightness > 255) settings.brightness = 255;
+    
+    Serial.printf("Brightness: %d\n", settings.brightness);
+    display.setBrightness(settings.brightness);
+    settings.save();
 }
 
 void setup() {
@@ -50,7 +61,9 @@ void setup() {
   speaker.setVolume(settings.volume);
 
   display.begin(settings.calibration);
+  display.setBrightness(settings.brightness);
   display.setVolumeCallback(onVolumeChange);
+  display.setBrightnessCallback(onBrightnessChange);
 
   // Check for touch calibration status
   if (settings.calibration.isValid) {
@@ -117,6 +130,21 @@ void loop() {
     if (c == '\n' || c == '\r') {
       inputBuffer.trim();
       if (inputBuffer.length() > 0) {
+        if (inputBuffer == "/settings") {
+          Serial.println("\n--- Current Settings ---");
+          Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
+          Serial.printf("RSSI:       %d dBm\n", network.getSignalStrength());
+          Serial.printf("WiFi SSID:  %s\n", settings.wifiSSID.c_str());
+          Serial.printf("API URL:    %s\n", settings.apiUrl.c_str());
+          Serial.printf("LLM Model:  %s\n", settings.llmModel.c_str());
+          Serial.printf("Volume:     %d / 21\n", settings.volume);
+          Serial.printf("Brightness: %d / 255\n", settings.brightness);
+          Serial.printf("Touch Cal:  %s (%d,%d to %d,%d)\n", 
+            settings.calibration.isValid ? "Valid" : "Invalid",
+            settings.calibration.xMin, settings.calibration.yMin,
+            settings.calibration.xMax, settings.calibration.yMax);
+          Serial.println("------------------------\n");
+        } else {
         speaker.stop(); // Stop any current playback before processing new request
         isSpeaking = false;
         display.showThinking(true);
@@ -143,6 +171,7 @@ void loop() {
         } else {
             // Fallback if TTS fails so we don't stay on "Speaking..."
             display.showResponse("TTS Failed\n" + statusMsg);
+        }
         }
       }
       inputBuffer = "";

@@ -3,6 +3,10 @@
 #include <TJpg_Decoder.h>
 #include "BootLogo.h"
 
+// GPIO 38 conflicts with the PSRAM bus on S3 modules, causing audio distortion.
+// GPIO 4 is a safe pin for PWM backlight control.
+#define TFT_BL 4
+
 // Static reference for the callback
 static Arduino_GFX *static_gfx = nullptr;
 static DisplayManager *static_dm = nullptr;
@@ -38,6 +42,7 @@ bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) 
 }
 
 VolumeCallback DisplayManager::volumeCb = nullptr;
+BrightnessCallback DisplayManager::brightnessCb = nullptr;
 
 // LVGL Flush Callback
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
@@ -64,6 +69,11 @@ void DisplayManager::begin(TouchCalibration cal) {
     gfx->begin(20000000);
     gfx->setRotation(3);
     delay(100);
+
+    // Initialize Backlight PWM
+    ledcAttach(TFT_BL, 5000, 8);
+    ledcWrite(TFT_BL, 255); // Default to full brightness
+
     gfx->setFont(&FreeSans12pt7b);
 
     // Ensure Display CS is HIGH (inactive) before starting Touch SPI
@@ -136,6 +146,23 @@ void DisplayManager::begin(TouchCalibration cal) {
     lv_obj_set_style_text_font(lblPlus, &lv_font_montserrat_14, 0);
     lv_obj_center(lblPlus);
     lv_obj_add_event_cb(btnPlus, volumeEventHandler, LV_EVENT_CLICKED, (void*)1);
+
+    // Brightness Buttons
+    lv_obj_t *btnBriMinus = lv_btn_create(lv_scr_act());
+    lv_obj_align(btnBriMinus, LV_ALIGN_BOTTOM_LEFT, 10, -90);
+    lv_obj_set_size(btnBriMinus, 70, 70);
+    lv_obj_t *lblBriMinus = lv_label_create(btnBriMinus);
+    lv_label_set_text(lblBriMinus, "B-");
+    lv_obj_center(lblBriMinus);
+    lv_obj_add_event_cb(btnBriMinus, brightnessEventHandler, LV_EVENT_CLICKED, (void*)-15);
+
+    lv_obj_t *btnBriPlus = lv_btn_create(lv_scr_act());
+    lv_obj_align(btnBriPlus, LV_ALIGN_BOTTOM_RIGHT, -10, -90);
+    lv_obj_set_size(btnBriPlus, 70, 70);
+    lv_obj_t *lblBriPlus = lv_label_create(btnBriPlus);
+    lv_label_set_text(lblBriPlus, "B+");
+    lv_obj_center(lblBriPlus);
+    lv_obj_add_event_cb(btnBriPlus, brightnessEventHandler, LV_EVENT_CLICKED, (void*)15);
 }
 
 void DisplayManager::clear() {
@@ -192,14 +219,29 @@ void DisplayManager::showThinking(bool active) {
     }
 }
 
+void DisplayManager::setBrightness(int level) {
+    ledcWrite(TFT_BL, constrain(level, 0, 255));
+}
+
 void DisplayManager::setVolumeCallback(VolumeCallback cb) {
     volumeCb = cb;
+}
+
+void DisplayManager::setBrightnessCallback(BrightnessCallback cb) {
+    brightnessCb = cb;
 }
 
 void DisplayManager::volumeEventHandler(lv_event_t * e) {
     if (volumeCb) {
         int change = (int)(intptr_t)lv_event_get_user_data(e);
         volumeCb(change);
+    }
+}
+
+void DisplayManager::brightnessEventHandler(lv_event_t * e) {
+    if (brightnessCb) {
+        int change = (int)(intptr_t)lv_event_get_user_data(e);
+        brightnessCb(change);
     }
 }
 

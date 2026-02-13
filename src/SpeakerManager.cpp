@@ -84,7 +84,11 @@ void SpeakerManager::playTone(int freq, int duration_ms) {
     uint32_t dataSize = numSamples * channels * 2; // 2 bytes per sample * 2 channels
     uint32_t fileSize = sizeof(WavHeader) + dataSize;
 
-    mp3Buffer = (uint8_t*)ps_malloc(fileSize);
+    // Use internal RAM for tones to avoid PSRAM bus noise.
+    // This ensures the volume "beep" stays clean even during heavy memory usage.
+    mp3Buffer = (uint8_t*)malloc(fileSize);
+    if (!mp3Buffer) mp3Buffer = (uint8_t*)ps_malloc(fileSize);
+
     if (!mp3Buffer) {
         Serial.println("Tone Error: PSRAM Allocation Failed");
         xSemaphoreGiveRecursive(_mutex);
