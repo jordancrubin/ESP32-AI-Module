@@ -12,9 +12,10 @@ public:
     void setConfig(String apiUrl, String apiKey, String model);
     String sendPrompt(String prompt, WiFiManager& netMgr);
     String getModels(WiFiManager& netMgr);
+    String getVoices(WiFiManager& netMgr);
     void clearHistory();
     void setSystemPrompt(const char* prompt);
-    bool downloadTTS(String text, WiFiManager& netMgr, uint8_t** outBuffer, size_t* outSize, ProgressCallback cb = nullptr);
+    bool downloadTTS(String text, WiFiManager& netMgr, const char* filename, String voice = "alloy", ProgressCallback cb = nullptr);
 
 private:
     String _apiUrl;

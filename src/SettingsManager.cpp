@@ -1,13 +1,12 @@
 #include "SettingsManager.h"
-#include "Config.h"
 
 SettingsManager::SettingsManager() {
-    // Initialize with defaults from Config.h
-    wifiSSID = WIFI_SSID;
-    wifiPass = WIFI_PASS;
-    apiUrl = OPENWEBUI_URL;
-    apiKey = OPENWEBUI_KEY;
-    llmModel = LLM_MODEL;
+    // Initialize with defaults
+    wifiSSID = "YOUR_WIFI_SSID";
+    wifiPass = "YOUR_WIFI_PASSWORD";
+    apiUrl = "http://your-api-endpoint/api/chat/completions";
+    apiKey = "your_api_key_here";
+    llmModel = "llama3.2:3b";
     volume = 21;     // Default max volume
     brightness = 255; // Default max brightness
     calibration = {0, 0, 0, 0, false};

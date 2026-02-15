@@ -1,4 +1,8 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include <LittleFS.h>
+#include <WebServer.h>
+#include <Preferences.h>
 #include "Config.h"
 #include "DisplayManager.h"
 #include "WiFiManager.h"
@@ -8,60 +12,337 @@
 #include "SettingsManager.h"
 
 DisplayManager display;
-WiFiManager network(WIFI_SSID, WIFI_PASS);
-LLMClient llm(OPENWEBUI_URL, OPENWEBUI_KEY, LLM_MODEL);
+WiFiManager network("YOUR_WIFI_SSID", "YOUR_WIFI_PASSWORD");
+LLMClient llm("http://your-api-endpoint/api/chat/completions", "your_api_key_here", "llama3.2:3b");
 SpeechManager speech;
 SpeakerManager speaker;
 SettingsManager settings;
+WebServer server(80);
+Preferences adminPrefs;
+String adminPassword = "";
+String ttsVoice = "alloy";
+String voiceOptions = "alloy";
 
-void progressCallback(int percent, float speed) {
-    display.showProgress(percent, speed);
-    for(int i=0; i<5; i++) lv_timer_handler(); // Process queued touch events
-}
+String inputBuffer = "";
+bool isSpeaking = false;
+bool isWebServerActive = false;
+bool forceConfig = false;
 
-void onVolumeChange(int change) {
-    settings.volume += change;
-    if (settings.volume < 0) settings.volume = 0;
-    if (settings.volume > 21) settings.volume = 21;
-    
-    Serial.printf("Volume: %d\n", settings.volume);
+void onVolumeChange(int value) {
+    settings.volume = value;
+    Serial.printf("Volume: %d (Tone disabled)\n", settings.volume);
     speaker.setVolume(settings.volume);
-    // Play a tone that changes pitch with the volume level
-    int freq = 220 + (settings.volume * 30); 
-    speaker.playTone(freq, 100); 
     settings.save();
 }
 
-void onBrightnessChange(int change) {
-    settings.brightness += change;
-    if (settings.brightness < 0) settings.brightness = 0;
-    if (settings.brightness > 255) settings.brightness = 255;
+void onAdminConfig(String pass) {
+    if (pass.length() > 0) {
+        adminPassword = pass;
+        adminPrefs.putString("pass", adminPassword);
+        display.showStatus("Admin Password Saved");
+    }
+}
+
+void onVoiceChange(String voice) {
+    ttsVoice = voice;
+    adminPrefs.putString("voice", ttsVoice);
+    Serial.println("Voice changed to: " + ttsVoice);
+}
+
+void onSetupMode(bool enabled) {
+    if (enabled) {
+        server.begin();
+        isWebServerActive = true;
+        Serial.println("Web Server Started (Setup Mode)");
+    } else {
+        server.stop();
+        isWebServerActive = false;
+        Serial.println("Web Server Stopped");
+    }
+}
+
+void handleWebRoot() {
+    Serial.println("Web Request: /");
+    if (!server.authenticate("admin", adminPassword.c_str())) {
+        server.sendHeader("WWW-Authenticate", "Basic realm=\"Login Required\"");
+        server.send(401, "text/html", "Unauthorized\n");
+        return;
+    }
+
+    String html = "<html><head><title>AI ESP32 Config</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>body{font-family:sans-serif;padding:20px;} input, select{width:100%;padding:10px;margin:5px 0;} .btn{background-color:#4CAF50;color:white;border:none;cursor:pointer;} .btn-blue{background-color:#008CBA;color:white;border:none;cursor:pointer;padding:10px;width:100%;margin:5px 0;}</style></head><body>";
+    html += "<h2>Configuration</h2>";
+    html += "<form action='/save' method='POST'>";
+    html += "API Key: <input type='text' name='apiKey' value='" + settings.apiKey + "'><br>";
+    html += "API URL: <input type='text' name='apiUrl' value='" + settings.apiUrl + "'><br>";
+
+    html += "<input type='submit' value='Save & Verify' class='btn'>";
+    html += "</form>";
+    html += "</body></html>";
+    server.send(200, "text/html", html);
+}
+
+void handleWebSave() {
+    if (!server.authenticate("admin", adminPassword.c_str())) {
+        return server.requestAuthentication();
+    }
     
-    Serial.printf("Brightness: %d\n", settings.brightness);
-    display.setBrightness(settings.brightness);
-    settings.save();
+    String newApiKey = server.hasArg("apiKey") ? server.arg("apiKey") : settings.apiKey;
+    String newApiUrl = server.hasArg("apiUrl") ? server.arg("apiUrl") : settings.apiUrl;
+
+    // Temporarily apply config to test connection
+    llm.setConfig(newApiUrl, newApiKey, settings.llmModel);
+    String models = llm.getModels(network);
+
+    if (models.startsWith("Error")) {
+        // Revert to old settings
+        llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
+        String html = "<html><body><h1>Connection Failed</h1><p>Error: " + models + "</p><p>Settings were <b>NOT</b> saved.</p><a href='/'>Go Back</a></body></html>";
+        server.send(200, "text/html", html);
+    } else {
+        // Success - Save to NVRAM
+        settings.apiKey = newApiKey;
+        settings.apiUrl = newApiUrl;
+        settings.save();
+        forceConfig = false;
+        server.send(200, "text/html", "<html><body><h1>Saved & Verified!</h1><p>Connection successful.</p><a href='/'>Back</a></body></html>");
+        Serial.println("Settings updated and verified via Web Interface");
+    }
 }
 
 void onWiFiConfig(String ssid, String pass) {
-    settings.wifiSSID = ssid;
-    settings.wifiPass = pass;
-    settings.save();
     network.setCredentials(ssid, pass);
-    display.showStatus("Connecting...");
-    network.connect();
+
+    for (int i = 1; i <= 2; i++) {
+        display.showStatus(("Connecting (" + String(i) + "/2)...").c_str());
+        lv_timer_handler(); // Force UI update to show attempt count
+        network.connect();
+        if (network.isConnected()) {
+            settings.wifiSSID = ssid;
+            settings.wifiPass = pass;
+            return;
+        }
+    }
+
+    display.showStatus("Fail to connect");
+    lv_timer_handler();
+    delay(2000);
+    display.showWiFiConfig();
+}
+
+// Helper to URL encode the input string
+String urlEncode(String str) {
+    String encodedString = "";
+    char c;
+    char code0;
+    char code1;
+    for (int i = 0; i < str.length(); i++) {
+        c = str.charAt(i);
+        if (isalnum(c)) {
+            encodedString += c;
+        } else {
+            code1 = (c & 0xf) + '0';
+            if ((c & 0xf) > 9) code1 = (c & 0xf) - 10 + 'A';
+            c = (c >> 4) & 0xf;
+            code0 = c + '0';
+            if (c > 9) code0 = c - 10 + 'A';
+            encodedString += '%';
+            encodedString += code0;
+            encodedString += code1;
+        }
+    }
+    return encodedString;
+}
+
+void updateVoiceList() {
+    String jsonResponse = llm.getVoices(network);
+    if (jsonResponse.startsWith("Error")) {
+        Serial.println("Failed to fetch voices: " + jsonResponse);
+        return;
+    }
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, jsonResponse);
+
+    if (error) {
+        Serial.print(F("deserializeJson() failed: "));
+        Serial.println(error.f_str());
+        return;
+    }
+
+    if (!doc["voices"].is<JsonArray>()) {
+        Serial.println(F("JSON response missing 'voices' key"));
+        return;
+    }
+
+    JsonArray voices = doc["voices"];
+    String newOptions = "";
+    newOptions.reserve(1024);
+
+    for (JsonVariant v : voices) {
+        const char* voiceName = v.as<const char*>();
+        if (voiceName && strlen(voiceName) > 0) {
+            char firstChar = voiceName[0];
+            if (firstChar == 'a' || firstChar == 'b' || firstChar == 'd') {
+                if (newOptions.length() > 0) {
+                    newOptions += '\n';
+                }
+                newOptions += voiceName;
+            }
+        }
+    }
+
+    if (newOptions.length() > 0) {
+        voiceOptions = newOptions;
+        // Update UI with new options, keeping current voice and volume
+        display.showMainUI(ttsVoice, settings.volume, voiceOptions);
+        Serial.println("Voice list updated in dropdown.");
+    } else {
+        Serial.println("No matching voices found.");
+    }
+}
+
+void handleSerialCommands() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      inputBuffer.trim();
+      if (inputBuffer.length() > 0) {
+        if (inputBuffer == "/settings") {
+          Serial.println("\n--- Current Settings ---");
+          Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
+          Serial.printf("CPU Freq:   %d MHz\n", getCpuFrequencyMhz());
+          Serial.printf("RSSI:       %d dBm\n", network.getSignalStrength());
+          Serial.printf("WiFi SSID:  %s\n", settings.wifiSSID.c_str());
+          Serial.printf("WiFi Pass:  %s\n", settings.wifiPass.c_str());
+          Serial.printf("API URL:    %s\n", settings.apiUrl.c_str());
+          Serial.printf("API Key:    %s\n", settings.apiKey.c_str());
+          Serial.printf("LLM Model:  %s\n", settings.llmModel.c_str());
+          Serial.printf("Volume:     %d / 21\n", settings.volume);
+          Serial.printf("Brightness: %d / 255\n", settings.brightness);
+          Serial.printf("Touch Cal:  %s (%d,%d to %d,%d)\n", 
+            settings.calibration.isValid ? "Valid" : "Invalid",
+            settings.calibration.xMin, settings.calibration.yMin,
+            settings.calibration.xMax, settings.calibration.yMax);
+          Serial.println("------------------------\n");
+        } else if (inputBuffer == "/calibrate") {
+          Serial.println("Starting manual touch calibration...");
+          display.calibrateTouch(settings.calibration);
+          settings.save();
+          Serial.println("Calibration complete.");
+          display.showMainUI();
+        } else if (inputBuffer == "/reset_cal") {
+          Serial.println("Resetting touch calibration...");
+          settings.calibration = {0, 0, 0, 0, false};
+          settings.save();
+          Serial.println("Calibration reset. Restart the device to recalibrate.");
+        } else if (inputBuffer.startsWith("/say ")) {
+          String textToSay = inputBuffer.substring(5);
+          textToSay.trim();
+          if (textToSay.length() > 0) {
+            Serial.println("Direct TTS: " + textToSay);
+            speaker.stop();
+            isSpeaking = false;
+            display.showStatus("Direct TTS...");
+            
+            // Download TTS to file, then play
+            if (llm.downloadTTS(textToSay, network, "/speech.mp3", ttsVoice)) {
+                speaker.playSpeechFromFile("/speech.mp3");
+                isSpeaking = true;
+            } else {
+                display.showResponse("TTS Failed");
+            }
+          }
+        } else if (inputBuffer.startsWith("/llm ")) {
+          String newModel = inputBuffer.substring(5);
+          newModel.trim();
+          if (newModel.length() > 0) {
+            settings.llmModel = newModel;
+            settings.save();
+            llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
+            Serial.println("LLM Model updated to: " + newModel);
+          }
+        } else if (inputBuffer == "/new") {
+          llm.clearHistory();
+          Serial.println("Conversation history cleared.");
+        } else if (inputBuffer == "/voices") {
+          updateVoiceList();
+        } else {
+          speaker.stop(); // Stop any current playback before processing new request
+          isSpeaking = false;
+          display.showThinking(true);
+          display.showStatus("Thinking...");
+          // Force UI update before the blocking API call
+          lv_timer_handler(); 
+          
+          // NOTE: This call is blocking. UI will be unresponsive until it returns.
+          String answer = llm.sendPrompt(inputBuffer, network);
+          display.showThinking(false);
+          
+          Serial.println("Answer:");
+          Serial.println(answer);
+
+          display.showResponse("Speaking...");
+          
+          // Download TTS to file, then play
+          if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
+              speaker.playSpeechFromFile("/speech.mp3");
+              isSpeaking = true;
+          } else {
+              display.showResponse("TTS Failed");
+          }
+        }
+      }
+      inputBuffer = "";
+    } else {
+      inputBuffer += c;
+    }
+  }
 }
 
 void setup() {
   Serial.begin(115200);
+  pinMode(0, INPUT_PULLUP); // Initialize BOOT button (GPIO 0)
+  setCpuFrequencyMhz(240); // Lock CPU at 240MHz for maximum performance
   unsigned long start = millis();
     while (!Serial && (millis() - start < 3000));
 
-  Serial.println("System Starting...");
+  Serial.printf("System Starting at %d MHz...\n", getCpuFrequencyMhz());
+
+  // Initialize File System
+  if (!LittleFS.begin(true)) {
+      Serial.println("LittleFS Mount Failed");
+  }
 
   // Load Settings
   settings.begin();
+  adminPrefs.begin("admin", false);
+
+  // Check for Factory Reset (BOOT button held during startup)
+  if (digitalRead(0) == LOW) {
+      Serial.println("BOOT button held: Performing Factory Reset...");
+      settings.wifiSSID = "";
+      settings.wifiPass = "";
+      settings.apiKey = "";
+      settings.calibration.isValid = false;
+      settings.save();
+      adminPrefs.clear();
+      Serial.println("WiFi, API Key, Calibration, and Admin Password cleared.");
+      // Wait for button release to avoid accidental double-triggering
+      while(digitalRead(0) == LOW) delay(10);
+  }
+
   // Apply loaded settings
   network.setCredentials(settings.wifiSSID, settings.wifiPass);
+  
+  // Migration: Fix API URL suffix in NVRAM if it matches the old format
+  if (settings.apiUrl.endsWith("/v1/chat/completions")) {
+      settings.apiUrl.replace("/v1/chat/completions", "/api/chat/completions");
+      settings.save();
+      Serial.println("Migrated API URL to /api/chat/completions");
+  }
+
   llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
   // Speaker volume will be applied after begin()
 
@@ -70,16 +351,17 @@ void setup() {
   speaker.setVolume(settings.volume);
 
   display.begin(settings.calibration);
-  display.setBrightness(settings.brightness);
   display.setVolumeCallback(onVolumeChange);
-  display.setBrightnessCallback(onBrightnessChange);
   display.setWiFiConfigCallback(onWiFiConfig);
+  display.setAdminConfigCallback(onAdminConfig);
+  display.setVoiceCallback(onVoiceChange);
+  display.setSetupModeCallback(onSetupMode);
 
   // Check for touch calibration status
   if (settings.calibration.isValid) {
       Serial.println("Touch calibration found. Loading saved values...");
   } else {
-      Serial.println("Touch calibration NOT found. Starting calibration utility...");
+      Serial.println("Touch calibration NOT found or reset. Starting calibration utility...");
       display.calibrateTouch(settings.calibration);
       settings.save(); // Save the newly generated calibration to NVS
       Serial.println("Touch calibration completed and saved.");
@@ -88,13 +370,29 @@ void setup() {
   display.showBootLogo(); // Show the logo immediately
   delay(3000); // Wait 3 seconds so we can see the logo
 
+  // Admin Password Check
+  adminPassword = adminPrefs.getString("pass", "");
+  ttsVoice = adminPrefs.getString("voice", "alloy");
+  if (adminPassword == "") {
+      display.showAdminConfig();
+      while (adminPassword == "") {
+          lv_timer_handler();
+          handleSerialCommands();
+          delay(5);
+      }
+  }
+
   // WiFi Connection Logic
-  if (settings.wifiSSID == "" || settings.wifiSSID == "YOUR_WIFI_SSID") {
+  if (settings.wifiSSID == "" || settings.wifiSSID == "YOUR_WIFI_SSID" || 
+      settings.wifiPass == "" || settings.wifiPass == "YOUR_WIFI_PASSWORD") {
       display.showWiFiConfig();
       while (!network.isConnected()) {
           lv_timer_handler();
+          handleSerialCommands();
           delay(5);
       }
+      Serial.println("WiFi Config Success: Saving to NVRAM.");
+      settings.save();
   } else {
       int attempts = 0;
       while (attempts < 5) {
@@ -108,31 +406,82 @@ void setup() {
           display.showWiFiError("WiFi Connection Failed after 5 attempts.");
           while (!network.isConnected()) {
               lv_timer_handler();
+              handleSerialCommands();
               delay(5);
           }
+          Serial.println("WiFi Recovery Success: Saving to NVRAM.");
+          settings.save();
       }
   }
 
-  display.showMainUI();
-  display.showStatus("WiFi Connected!");
-  
+  // Start Web Server
+  server.on("/", handleWebRoot);
+  server.on("/save", HTTP_POST, handleWebSave);
+  server.onNotFound([]() {
+      server.send(404, "text/plain", "Not Found");
+  });
+  server.begin();
+  isWebServerActive = true;
+  Serial.println("Web Server started at http://aiesp.local or http://" + WiFi.localIP().toString());
+
   // Initialize Speech Recognition (I2S)
   speech.begin();
 
-  // Check API Connection and Models
+  // API Configuration Loop (Web Based)
+  unsigned long lastLog = 0;
+
   while (true) {
-      display.showStatus("Checking API...");
-      String models = llm.getModels(network);
-      if (models.startsWith("Error")) {
+      // If API Key/URL is missing, default, or verification failed (forceConfig)
+      if (forceConfig || settings.apiKey == "" || settings.apiKey == "your_api_key_here" ||
+          settings.apiUrl == "" || settings.apiUrl == "http://your-api-endpoint/api/chat/completions") {
+          
+          display.showWebConfig(WiFi.localIP().toString(), "aiesp.local");
+          
+          while (forceConfig || settings.apiKey == "" || settings.apiKey == "your_api_key_here" ||
+                 settings.apiUrl == "" || settings.apiUrl == "http://your-api-endpoint/api/chat/completions") {
+              lv_timer_handler();
+              handleSerialCommands();
+              server.handleClient();
+              delay(1); 
+              
+              if (millis() - lastLog > 2000) {
+                  Serial.println("Web Config Loop running...");
+                  lastLog = millis();
+              }
+          }
+      }
+
+      // Switch to Main UI to show verification status
+  display.showMainUI(ttsVoice, settings.volume, voiceOptions);
+
+      // 2. Verify API Connection (3 attempts)
+      bool apiVerified = false;
+      for (int i = 0; i < 3; i++) {
+          display.showStatus(("Verifying API (" + String(i + 1) + "/3)...").c_str());
+          lv_timer_handler();
+          server.handleClient(); // Keep web server alive during verification
+          
+          String models = llm.getModels(network);
+          if (!models.startsWith("Error")) {
+              Serial.println("API Verified: " + models);
+              display.showResponse(models);
+              delay(2000);
+              apiVerified = true;
+              break;
+          }
           Serial.println("API Check Failed: " + models);
-          display.showStatus("API Fail. Retrying...");
-          delay(2000);
-          network.connect();
-      } else {
-          Serial.println("API Models: " + models);
-          display.showResponse(models);
-          delay(3000);
+          delay(1000);
+      }
+
+      if (apiVerified) {
+          Serial.println("API Config Success: Saving to NVRAM.");
+          settings.save();
+          updateVoiceList();
           break;
+      } else {
+          display.showStatus("API Connection Failed");
+          delay(2000);
+          forceConfig = true; // Force return to Web Config screen without wiping data
       }
   }
 
@@ -142,14 +491,19 @@ void setup() {
   display.showStatus("Waiting...");
   
   Serial.println("Boot complete. Type prompt in Serial.");
+  
+  // Stop web server after boot configuration is complete to save cycles
+  server.stop();
+  isWebServerActive = false;
 }
 
 void loop() {
-  static String inputBuffer = "";
-  static bool isSpeaking = false;
-  
-  // Handle LVGL GUI
-  lv_timer_handler();
+  // Handle LVGL GUI - Skip updates during playback to prioritize audio bus bandwidth
+  if (!isSpeaking) {
+    lv_timer_handler();
+  }
+
+  // Keep loop responsive
   delay(5);
 
   // Check if speaking finished
@@ -158,60 +512,8 @@ void loop() {
       String waitMsg = "Waiting...\nRSSI: " + String(network.getSignalStrength()) + " dBm";
       display.showStatus(waitMsg.c_str());
   }
-
-  while (Serial.available()) {
-    char c = (char)Serial.read();
-    if (c == '\n' || c == '\r') {
-      inputBuffer.trim();
-      if (inputBuffer.length() > 0) {
-        if (inputBuffer == "/settings") {
-          Serial.println("\n--- Current Settings ---");
-          Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
-          Serial.printf("RSSI:       %d dBm\n", network.getSignalStrength());
-          Serial.printf("WiFi SSID:  %s\n", settings.wifiSSID.c_str());
-          Serial.printf("WiFi Pass:  %s\n", settings.wifiPass.c_str());
-          Serial.printf("API URL:    %s\n", settings.apiUrl.c_str());
-          Serial.printf("LLM Model:  %s\n", settings.llmModel.c_str());
-          Serial.printf("Volume:     %d / 21\n", settings.volume);
-          Serial.printf("Brightness: %d / 255\n", settings.brightness);
-          Serial.printf("Touch Cal:  %s (%d,%d to %d,%d)\n", 
-            settings.calibration.isValid ? "Valid" : "Invalid",
-            settings.calibration.xMin, settings.calibration.yMin,
-            settings.calibration.xMax, settings.calibration.yMax);
-          Serial.println("------------------------\n");
-        } else {
-        speaker.stop(); // Stop any current playback before processing new request
-        isSpeaking = false;
-        display.showThinking(true);
-        display.showStatus("Thinking...");
-        lv_timer_handler(); // Force UI update before blocking call
-        String answer = llm.sendPrompt(inputBuffer, network);
-        display.showThinking(false);
-        
-        Serial.println("Answer:");
-        Serial.println(answer);
-
-        String statusMsg = "Speaking...\n\n";
-        statusMsg += "Free PSRAM:\n" + String(ESP.getFreePsram());
-        
-        display.showResponse(statusMsg);
-        
-        // Download TTS from local server and play
-        uint8_t* audioData = nullptr;
-        size_t audioSize = 0;
-        
-        if (llm.downloadTTS(answer, network, &audioData, &audioSize, progressCallback)) {
-            speaker.playAudioFromRAM(audioData, audioSize);
-            isSpeaking = true;
-        } else {
-            // Fallback if TTS fails so we don't stay on "Speaking..."
-            display.showResponse("TTS Failed\n" + statusMsg);
-        }
-        }
-      }
-      inputBuffer = "";
-    } else {
-      inputBuffer += c;
-    }
+  handleSerialCommands();
+  if (isWebServerActive) {
+      server.handleClient();
   }
 }

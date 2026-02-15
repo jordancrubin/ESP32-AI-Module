@@ -1,4 +1,5 @@
 #include "LLMClient.h"
+#include <LittleFS.h>
 
 LLMClient::LLMClient(const char* apiUrl, const char* apiKey, const char* model)
     : _apiUrl(apiUrl), _apiKey(apiKey), _model(model), _systemPrompt(nullptr) {
@@ -23,7 +24,14 @@ String LLMClient::getModels(WiFiManager& netMgr) {
     if (splitIndex != -1) {
         url = url.substring(0, splitIndex + 5) + "models";
     } else {
-        return "Error: Invalid API URL format";
+        // Also try /v1/ format (OpenAI compatible)
+        splitIndex = url.indexOf("/v1/");
+        if (splitIndex != -1) {
+            url = url.substring(0, splitIndex) + "/api/models";
+        } else {
+            Serial.println("LLMClient Error: Invalid API URL format. Current URL: " + _apiUrl);
+            return "Error: Invalid API URL format";
+        }
     }
 
     String serverPath = netMgr.resolveHost(url);
@@ -122,74 +130,51 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
 
     String result = "";
     int httpResponseCode = -1;
-    int retries = 3;
 
-    while (retries > 0) {
-        // Create fresh clients for each attempt to ensure clean state
-        WiFiClient client;
-        HTTPClient http;
-        
-        client.setTimeout(60000);
-        http.setTimeout(60000);
+    if (http.begin(client, serverPath)) {
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("Authorization", "Bearer " + _apiKey);
 
-        if (http.begin(client, serverPath)) {
-            http.addHeader("Content-Type", "application/json");
-            http.addHeader("Authorization", "Bearer " + _apiKey);
+        httpResponseCode = http.POST((uint8_t*)requestBuffer, requestSize);
+        if (httpResponseCode > 0) {
+            Serial.print("HTTP Response code: ");
+            Serial.println(httpResponseCode);
 
-            httpResponseCode = http.POST((uint8_t*)requestBuffer, requestSize);
-            if (httpResponseCode > 0) {
-                // Success! Process response immediately
-                Serial.print("HTTP Response code: ");
-                Serial.println(httpResponseCode);
+            JsonDocument filter;
+            filter["choices"][0]["message"]["content"] = true;
 
-                JsonDocument filter;
-                filter["choices"][0]["message"]["content"] = true;
+            JsonDocument responseDoc;
+            DeserializationError error = deserializeJson(responseDoc, http.getStream(), DeserializationOption::Filter(filter));
 
-                JsonDocument responseDoc;
-                // Parse directly from stream to save memory
-                DeserializationError error = deserializeJson(responseDoc, http.getStream(), DeserializationOption::Filter(filter));
-
-                if (!error) {
-                    const char* content = responseDoc["choices"][0]["message"]["content"];
-                    if (content) {
-                        result = String(content);
-                        // Add assistant response to history
-                        Serial.printf("Free PSRAM after response: %u bytes\n", ESP.getFreePsram());
-                        JsonObject assistantMsg = _history.add<JsonObject>();
-                        assistantMsg["role"] = "assistant";
-                        assistantMsg["content"] = result;
-                    } else {
-                        result = "Error: No content in response";
-                    }
+            if (!error) {
+                const char* content = responseDoc["choices"][0]["message"]["content"];
+                if (content) {
+                    result = String(content);
+                    JsonObject assistantMsg = _history.add<JsonObject>();
+                    assistantMsg["role"] = "assistant";
+                    assistantMsg["content"] = result;
                 } else {
-                    result = "Error: JSON Parsing failed";
+                    result = "Error: No content in response";
                 }
-                http.end();
-                free(requestBuffer);
-                return result;
+            } else {
+                result = "Error: JSON Parsing failed";
             }
-            
-            Serial.printf("Request failed (Error: %d), retrying...\n", httpResponseCode);
-            if (httpResponseCode == -1) {
-                Serial.println("Hint: Check Server Binding (0.0.0.0) and Firewall rules.");
-            }
-            http.end();
+        } else {
+            result = "Error: HTTP " + String(httpResponseCode);
+            if (_history.size() > 0) _history.remove(_history.size() - 1);
         }
-        Serial.printf("Request failed (Error: %d), retrying...\n", httpResponseCode);
-        retries--;
-        delay(1000);
-        if (retries > 0) delay(1000);
+        http.end();
+    } else {
+        result = "Error: Connection failed";
+        if (_history.size() > 0) _history.remove(_history.size() - 1);
     }
 
     free(requestBuffer);
-    // If we reached here, all retries failed
-    result = "Error: HTTP " + String(httpResponseCode);
-    if (_history.size() > 0) _history.remove(_history.size() - 1);
-    
     return result;
 }
 
-bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, uint8_t** outBuffer, size_t* outSize, ProgressCallback cb) {
+bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filename, String voice, ProgressCallback cb) {
+    (void)cb; // Mark unused to prevent compiler warnings
     if (!netMgr.isConnected()) return false;
 
     // Construct TTS URL based on Docker configuration (Port 8880)
@@ -200,19 +185,16 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, uint8_t** outBuffe
     int pathStart = url.indexOf("/", doubleSlash + 2);
     String base = (pathStart == -1) ? url : url.substring(0, pathStart);
     
-    // Strip existing port if present (e.g. :3000)
+    // Strip existing port if present (e.g. :3000) and add :8880 for Kokoro TTS
     int portSep = base.lastIndexOf(":");
-    if (portSep > doubleSlash) {
-        base = base.substring(0, portSep);
-    }
-    
+    if (portSep > doubleSlash) base = base.substring(0, portSep);
+
     url = base + ":8880/v1/audio/speech";
 
     String serverPath = netMgr.resolveHost(url);
     if (serverPath == "") return false;
 
     Serial.println("Downloading TTS from: " + serverPath);
-    Serial.printf("Free PSRAM: %u bytes\n", ESP.getFreePsram());
 
     WiFiClient client;
     HTTPClient http;
@@ -226,7 +208,7 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, uint8_t** outBuffe
         JsonDocument doc;
         doc["model"] = "tts-1";
         doc["input"] = text;
-        doc["voice"] = "alloy"; // Options: alloy, echo, fable, onyx, nova, shimmer
+        doc["voice"] = voice; // Options: alloy, echo, fable, onyx, nova, shimmer
         doc["response_format"] = "mp3"; // Options: mp3, opus, aac, flac, wav, pcm
 
         String requestBody;
@@ -237,84 +219,19 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, uint8_t** outBuffe
 
         int httpCode = http.POST(requestBody);
         if (httpCode == 200) {
-            int len = http.getSize();
-            size_t allocSize;
-            if (len > 0) {
-                allocSize = len;
-            } else {
-                // If chunked (-1), allocate largest available PSRAM block minus safety margin (150KB)
-                size_t maxBlock = ESP.getMaxAllocPsram();
-                allocSize = (maxBlock > 150000) ? (maxBlock - 150000) : (1024 * 1024);
-            }
-            
-            uint8_t* buffer = (uint8_t*)ps_malloc(allocSize);
-            if (!buffer) {
-                Serial.println("TTS Error: OOM (PSRAM)");
+            File file = LittleFS.open(filename, "w");
+            if (!file) {
+                Serial.println("TTS Error: Failed to open file for writing");
                 http.end();
                 return false;
             }
 
-            int bytesWritten = 0;
-            int lastBytesWritten = 0;
-            WiFiClient *stream = http.getStreamPtr();
-            unsigned long lastLog = millis();
-
-            while (http.connected() && (len > 0 || len == -1)) {
-                size_t size = stream->available();
-                
-                // Optimization: Wait for more data to arrive to read in larger chunks (up to 4KB)
-                // This reduces overhead of calling read() too frequently for small packets
-                if (size > 0 && size < 4096 && http.connected()) {
-                    delay(1);
-                    size = stream->available();
-                }
-
-                if (size) {
-                    // Read directly into PSRAM buffer to increase speed and save stack
-                    size_t remaining = allocSize - bytesWritten;
-                    size_t readSize = (size > remaining) ? remaining : size;
-
-                    // Use read() instead of readBytes() for potentially lower overhead
-                    int c = stream->read(buffer + bytesWritten, readSize);
-
-                    if (c > 0) {
-                        bytesWritten += c;
-                        if (len > 0) len -= c;
-                    }
-
-                    if (bytesWritten >= allocSize && len == -1) {
-                         Serial.printf("TTS Warning: Buffer full. Limit: %u bytes. Truncating.\n", allocSize);
-                         break;
-                    }
-                } else {
-                    // Give the TCP stack a moment to receive more packets
-                    delay(1); 
-                }
-
-                if (millis() - lastLog > 1000) {
-                    float speed = (bytesWritten - lastBytesWritten) / 1024.0;
-                    Serial.printf("Speed: %.1f KB/s. RSSI: %d dBm. DL: %d / %u bytes.\n", 
-                        speed, netMgr.getSignalStrength(), bytesWritten, allocSize);
-                    lastLog = millis();
-                    lastBytesWritten = bytesWritten;
-                }
-
-                // Update UI more frequently than once per second
-                if (cb && bytesWritten % 8192 == 0) {
-                    cb((int)((bytesWritten * 100) / allocSize), 0);
-                }
-            }
-
+            http.writeToStream(&file);
+            file.close();
             http.end();
-            if (bytesWritten > 0) {
-                *outBuffer = buffer;
-                *outSize = bytesWritten;
-                return true;
-            } else {
-                free(buffer);
-                Serial.println("TTS Error: Downloaded 0 bytes");
-                return false;
-            }
+            
+            Serial.println("TTS Download Complete");
+            return true;
         } else {
             Serial.printf("TTS Error: HTTP %d\n", httpCode);
             if (httpCode > 0) Serial.println(http.getString());
@@ -322,6 +239,43 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, uint8_t** outBuffe
         http.end();
     }
     return false;
+}
+
+String LLMClient::getVoices(WiFiManager& netMgr) {
+    if (!netMgr.isConnected()) return "Error: WiFi not connected";
+
+    // Construct TTS URL based on Docker configuration (Port 8880)
+    String url = _apiUrl;
+    
+    // Extract base URL (protocol + host)
+    int doubleSlash = url.indexOf("//");
+    int pathStart = url.indexOf("/", doubleSlash + 2);
+    String base = (pathStart == -1) ? url : url.substring(0, pathStart);
+    
+    // Strip existing port if present (e.g. :3000) and add :8880 for Kokoro TTS
+    int portSep = base.lastIndexOf(":");
+    if (portSep > doubleSlash) base = base.substring(0, portSep);
+
+    url = base + ":8880/v1/audio/voices";
+
+    String serverPath = netMgr.resolveHost(url);
+    if (serverPath == "") return "Error: Host resolution failed";
+
+    Serial.println("Getting voices from: " + serverPath);
+
+    WiFiClient client;
+    HTTPClient http;
+    client.setTimeout(5000);
+    http.setTimeout(5000);
+
+    if (http.begin(client, serverPath)) {
+        http.addHeader("Authorization", "Bearer " + _apiKey);
+        int httpCode = http.GET();
+        String result = (httpCode > 0) ? http.getString() : ("Error: HTTP " + String(httpCode));
+        http.end();
+        return result;
+    }
+    return "Error: Connection failed";
 }
 
 void LLMClient::clearHistory() {

@@ -1,5 +1,6 @@
 #include "WiFiManager.h"
 #include <Arduino.h>
+#include <ESPmDNS.h>
 
 WiFiManager::WiFiManager(const char* ssid, const char* password) 
     : _ssid(ssid), _password(password), _cachedIP(IPAddress(0,0,0,0)) {}
@@ -10,9 +11,15 @@ void WiFiManager::setCredentials(String ssid, String password) {
 }
 
 void WiFiManager::connect() {
+    if (_ssid == "" || _ssid == "YOUR_WIFI_SSID" ||
+        _password == "" || _password == "YOUR_WIFI_PASSWORD") {
+        Serial.println("WiFi Error: Missing or default credentials. Aborting connection.");
+        return;
+    }
+
     Serial.println("Connecting to WiFi...");
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false); // Disable WiFi sleep to prevent audio crackling
+    WiFi.setSleep(false);
     WiFi.begin(_ssid, _password);
 
     unsigned long start = millis();
@@ -31,8 +38,11 @@ void WiFiManager::connect() {
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
 
-    if (!MDNS.begin("esp32-client")) {
+    if (!MDNS.begin("aiesp")) {
         Serial.println("Error setting up MDNS responder!");
+    } else {
+        MDNS.addService("http", "tcp", 80);
+        Serial.println("mDNS responder started: http://aiesp.local");
     }
 }
 

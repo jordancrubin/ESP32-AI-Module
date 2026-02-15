@@ -59,7 +59,13 @@ An integrated AI hardware module built on the ESP32-S3, featuring a touchscreen 
 ### Serial Commands
 You can interact with the module via the Serial Monitor (115200 baud):
 - **Type a prompt**: Send any text to the LLM.
+- **`/say <text>`**: Send text directly to the TTS engine (bypasses LLM).
 - **`/settings`**: View current system configuration, IP address, and signal strength.
+- **`/llm <model>`**: Manually update the LLM model (e.g., `/llm llama3`).
+- **`/new`**: Clear the conversation history (context).
+- **`/voices`**: List available TTS voices.
+- **`/calibrate`**: Manually trigger the touch screen calibration utility.
+- **`/reset_cal`**: Clear the stored touch calibration and force recalibration on next boot.
 - **`/config` / `/setup`**: Aliases for the settings dump.
 
 ## 🔧 Technical Details
