@@ -138,6 +138,7 @@ struct ClockWidgets {
     SevenSegmentDigit h1, h2, m1, m2;
     lv_obj_t* colon[2];
     lv_obj_t* wifiBars[4];
+    lv_obj_t* dayLabels[7];
 };
 
 static ClockWidgets g_clockWidgets;
@@ -299,6 +300,19 @@ static void clock_update_cb(lv_timer_t * t) {
             lv_obj_set_style_bg_color(g_clockWidgets.wifiBars[i], barColor, 0);
         }
     }
+
+    // Update Day of Week
+    int currentDay = timeinfo.tm_wday; // 0=Sun, 1=Mon...
+    int labelIdx = (currentDay + 6) % 7; // Convert to 0=Mon, 6=Sun
+    for(int i=0; i<7; i++) {
+        if(g_clockWidgets.dayLabels[i]) {
+             if(i == labelIdx) {
+                 lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], getClockColor(), 0);
+             } else {
+                 lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], lv_color_make(40, 40, 40), 0);
+             }
+        }
+    }
 }
 
 // Callback when Clock screen is touched
@@ -364,6 +378,27 @@ static void showClockScreen() {
 
     g_clockWidgets.m1.create(cont, startX + 2 * dW + 2 * gap + 28, y, dW, dH);
     g_clockWidgets.m2.create(cont, startX + 3 * dW + 3 * gap + 28, y, dW, dH);
+
+    // Days Container (Above Clock)
+    lv_obj_t * daysCont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(daysCont, 300, 20);
+    // Moved down by 5px to bring it closer to the clock
+    lv_obj_align_to(daysCont, cont, LV_ALIGN_OUT_TOP_MID, 15, 5);
+    lv_obj_set_style_bg_opa(daysCont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(daysCont, 0, 0);
+    lv_obj_set_style_pad_all(daysCont, 0, 0);
+    lv_obj_clear_flag(daysCont, LV_OBJ_FLAG_SCROLLABLE);
+    // Use Flex layout to evenly space variable-width day labels
+    lv_obj_set_flex_flow(daysCont, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(daysCont, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    
+    const char* dayNames[] = {"MON", "TUES", "WED", "THURS", "FRI", "SAT", "SUN"};
+    for(int i=0; i<7; i++) {
+        g_clockWidgets.dayLabels[i] = lv_label_create(daysCont);
+        lv_label_set_text(g_clockWidgets.dayLabels[i], dayNames[i]);
+        lv_obj_set_style_text_font(g_clockWidgets.dayLabels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], lv_color_make(40, 40, 40), 0);
+    }
 
     // WiFi Signal Meter (Top Right)
     lv_obj_t * wifiCont = lv_obj_create(lv_scr_act());
