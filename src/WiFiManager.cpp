@@ -25,8 +25,11 @@ void WiFiManager::connect() {
     }
 
     Serial.println("Connecting to WiFi...");
-    WiFi.disconnect(); // Ensure clean state
-    delay(100);
+    
+    MDNS.end(); // Clean up previous mDNS instance
+
+    WiFi.disconnect(true); // Turn off WiFi to reset radio state
+    delay(1000);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.begin(_ssid, _password);

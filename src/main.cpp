@@ -30,6 +30,7 @@ Preferences adminPrefs;
 String adminPassword = "";
 String ttsVoice = "alloy";
 String voiceOptions = "alloy";
+String modelOptions = "";
 
 String inputBuffer = "";
 bool isSpeaking = false;
@@ -52,9 +53,23 @@ void onAdminConfig(String pass) {
 }
 
 void onVoiceChange(String voice) {
-    ttsVoice = voice;
-    adminPrefs.putString("voice", ttsVoice);
-    Serial.println("Voice changed to: " + ttsVoice);
+    if (voice.startsWith("MODEL:")) {
+        String newModel = voice.substring(6);
+        // Extract ID if format is "Name (ID)"
+        int openParen = newModel.lastIndexOf('(');
+        int closeParen = newModel.lastIndexOf(')');
+        if (openParen != -1 && closeParen != -1 && closeParen > openParen) {
+            newModel = newModel.substring(openParen + 1, closeParen);
+        }
+        strlcpy(settings.llmModel, newModel.c_str(), sizeof(settings.llmModel));
+        settings.save();
+        llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
+        Serial.println("Model changed to: " + String(settings.llmModel));
+    } else {
+        ttsVoice = voice;
+        adminPrefs.putString("voice", ttsVoice);
+        Serial.println("Voice changed to: " + ttsVoice);
+    }
 }
 
 void onSetupMode(bool enabled) {
@@ -237,6 +252,10 @@ void updateVoiceList() {
 
     if (newOptions.length() > 0) {
         voiceOptions = newOptions;
+        // Combine with modelOptions if available
+        if (modelOptions.length() > 0) {
+            voiceOptions += "||" + modelOptions;
+        }
         // Update UI with new options, keeping current voice and volume
         display.showMainUI(ttsVoice, settings.volume, voiceOptions);
         Serial.println("Voice list updated in dropdown.");
@@ -443,6 +462,7 @@ void setup() {
       // Configure Time (NTP)
       configTime(0, 0, "pool.ntp.org");
       setenv("TZ", settings.timeZone, 1);
+      display.showStatus("Time Configured|OK");
       tzset();
   } else {
       int attempts = 0;
@@ -450,18 +470,22 @@ void setup() {
           display.showStatus(("Connecting to WiFi (" + String(attempts + 1) + "/5)...").c_str());
           network.connect();
           if (network.isConnected()) break;
+          display.showStatus("Connection Failed|FAIL");
           attempts++;
       }
       
       if (network.isConnected()) {
+          display.showStatus("WiFi Connected|OK");
           // Configure Time (NTP)
           configTime(0, 0, "pool.ntp.org");
           setenv("TZ", settings.timeZone, 1);
           tzset();
+          display.showStatus("Time Configured|OK");
       }
 
       if (!network.isConnected()) {
-          display.showWiFiError("WiFi Connection Failed after 5 attempts.");
+          display.showStatus("WiFi Failed|FAIL");
+          display.showWiFiError("WiFi Connection Failed");
           while (!network.isConnected()) {
               lv_timer_handler();
               handleSerialCommands();
@@ -515,25 +539,23 @@ void setup() {
           }
       }
 
-      // Switch to Main UI to show verification status
-  display.showMainUI(ttsVoice, settings.volume, voiceOptions);
-
-      // 2. Verify API Connection (3 attempts)
+      // 2. Verify API Connection (2 attempts)
       bool apiVerified = false;
-      for (int i = 0; i < 3; i++) {
-          display.showStatus(("Verifying API (" + String(i + 1) + "/3)...").c_str());
+      for (int i = 0; i < 2; i++) {
+          display.showStatus(("Verifying API (" + String(i + 1) + "/2)...").c_str());
           lv_timer_handler();
           server.handleClient(); // Keep web server alive during verification
           
           String models = llm.getModels(network);
           if (!models.startsWith("Error")) {
               Serial.println("API Verified: " + models);
-              display.showResponse(models);
+              display.showStatus("API Verified|OK");
+              modelOptions = models;
               delay(2000);
               apiVerified = true;
               break;
           }
-          Serial.println("API Check Failed: " + models);
+          display.showStatus("API Check Failed|FAIL");
           delay(1000);
       }
 
@@ -543,13 +565,11 @@ void setup() {
           updateVoiceList();
           break;
       } else {
-          display.showStatus("API Connection Failed");
+          display.showStatus("API Connection Failed|FAIL");
           
           if (wifiRetries < 2) {
               Serial.println("API Check Failed. Restarting WiFi...");
-              display.showStatus("Restarting WiFi...");
-              WiFi.disconnect();
-              delay(1000);
+              display.showStatus("Restarting WiFi...|FAIL");
               network.connect();
               wifiRetries++;
               continue;
@@ -563,6 +583,8 @@ void setup() {
   // Set a system prompt using PSRAM allocation
   llm.setSystemPrompt("You are a helpful AI assistant running on an ESP32-S3.");
   
+  // Final UI Load
+  display.showMainUI(ttsVoice, settings.volume, voiceOptions);
   display.showStatus("Waiting...");
   
   Serial.println("Boot complete. Type prompt in Serial.");

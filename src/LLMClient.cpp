@@ -45,8 +45,8 @@ String LLMClient::getModels(WiFiManager& netMgr) {
     if (serverPath == "") return "Error: Host resolution failed";
 
     Serial.println("Getting models from: " + serverPath);
-    client.setTimeout(10000);
-    http.setTimeout(10000);
+    client.setTimeout(5000);
+    http.setTimeout(5000);
 
     if (http.begin(client, serverPath)) {
         http.addHeader("Authorization", "Bearer " + _apiKey);
@@ -70,9 +70,7 @@ String LLMClient::getModels(WiFiManager& netMgr) {
                     const char* name = v["name"];
                     
                     if (result.length() > 0) result += "\n";
-                    if (name) {
-                        result += String(name) + " (" + String(id) + ")";
-                    } else if (id) {
+                    if (id) {
                         result += String(id);
                     }
                 }
