@@ -74,8 +74,33 @@ void handleWebRoot() {
     html += "<style>body{font-family:sans-serif;padding:20px;} input, select{width:100%;padding:10px;margin:5px 0;} .btn{background-color:#4CAF50;color:white;border:none;cursor:pointer;} .btn-blue{background-color:#008CBA;color:white;border:none;cursor:pointer;padding:10px;width:100%;margin:5px 0;}</style></head><body>";
     html += "<h2>Configuration</h2>";
     html += "<form action='/save' method='POST'>";
-    html += "API Key: <input type='text' name='apiKey' value='" + settings.apiKey + "'><br>";
-    html += "API URL: <input type='text' name='apiUrl' value='" + settings.apiUrl + "'><br>";
+    html += "API Key: <input type='text' name='apiKey' value='" + String(settings.apiKey) + "'><br>";
+    html += "API URL: <input type='text' name='apiUrl' value='" + String(settings.apiUrl) + "'><br>";
+    
+    html += "Timezone: <select name='timezone'>";
+    String tzs[] = {"UTC0", "EST5EDT,M3.2.0,M11.1.0", "CST6CDT,M3.2.0,M11.1.0", "MST7MDT,M3.2.0,M11.1.0", "PST8PDT,M3.2.0,M11.1.0", "MST7", "GMT0BST,M3.5.0/1,M10.5.0", "CET-1CEST,M3.5.0,M10.5.0/3", "JST-9", "CST-8", "AEST-10AEDT,M10.1.0,M4.1.0/3"};
+    String names[] = {"UTC", "US Eastern", "US Central", "US Mountain", "US Pacific", "US Arizona", "London", "Paris/Berlin", "Tokyo", "Shanghai", "Sydney"};
+    
+    for (int i = 0; i < 11; i++) {
+        html += "<option value='" + tzs[i] + "'";
+        if (String(settings.timeZone) == tzs[i]) html += " selected";
+        html += ">" + names[i] + "</option>";
+    }
+    // Allow custom entry if not in list
+    if (strlen(settings.timeZone) > 0 && html.indexOf("selected") == -1) {
+         html += "<option value='" + String(settings.timeZone) + "' selected>Custom (" + String(settings.timeZone) + ")</option>";
+    }
+    html += "</select><br>";
+
+    html += "Clock Color: <select name='clockColor'>";
+    String colors[] = {"red", "green", "white"};
+    String colorNames[] = {"Red", "Green", "White"};
+    for (int i = 0; i < 3; i++) {
+        html += "<option value='" + colors[i] + "'";
+        if (String(settings.clockColor) == colors[i]) html += " selected";
+        html += ">" + colorNames[i] + "</option>";
+    }
+    html += "</select><br>";
 
     html += "<input type='submit' value='Save & Verify' class='btn'>";
     html += "</form>";
@@ -90,6 +115,8 @@ void handleWebSave() {
     
     String newApiKey = server.hasArg("apiKey") ? server.arg("apiKey") : settings.apiKey;
     String newApiUrl = server.hasArg("apiUrl") ? server.arg("apiUrl") : settings.apiUrl;
+    String newTz = server.hasArg("timezone") ? server.arg("timezone") : settings.timeZone;
+    String newColor = server.hasArg("clockColor") ? server.arg("clockColor") : settings.clockColor;
 
     // Temporarily apply config to test connection
     llm.setConfig(newApiUrl, newApiKey, settings.llmModel);
@@ -102,10 +129,17 @@ void handleWebSave() {
         server.send(200, "text/html", html);
     } else {
         // Success - Save to NVRAM
-        settings.apiKey = newApiKey;
-        settings.apiUrl = newApiUrl;
+        strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
+        strlcpy(settings.apiUrl, newApiUrl.c_str(), sizeof(settings.apiUrl));
+        strlcpy(settings.timeZone, newTz.c_str(), sizeof(settings.timeZone));
+        strlcpy(settings.clockColor, newColor.c_str(), sizeof(settings.clockColor));
         settings.save();
         forceConfig = false;
+        
+        // Apply Timezone immediately
+        setenv("TZ", settings.timeZone, 1);
+        tzset();
+        
         server.send(200, "text/html", "<html><body><h1>Saved & Verified!</h1><p>Connection successful.</p><a href='/'>Back</a></body></html>");
         Serial.println("Settings updated and verified via Web Interface");
     }
@@ -119,8 +153,8 @@ void onWiFiConfig(String ssid, String pass) {
         lv_timer_handler(); // Force UI update to show attempt count
         network.connect();
         if (network.isConnected()) {
-            settings.wifiSSID = ssid;
-            settings.wifiPass = pass;
+            strlcpy(settings.wifiSSID, ssid.c_str(), sizeof(settings.wifiSSID));
+            strlcpy(settings.wifiPass, pass.c_str(), sizeof(settings.wifiPass));
             return;
         }
     }
@@ -214,12 +248,14 @@ void handleSerialCommands() {
           Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
           Serial.printf("CPU Freq:   %d MHz\n", getCpuFrequencyMhz());
           Serial.printf("RSSI:       %d dBm\n", network.getSignalStrength());
-          Serial.printf("WiFi SSID:  %s\n", settings.wifiSSID.c_str());
-          Serial.printf("WiFi Pass:  %s\n", settings.wifiPass.c_str());
-          Serial.printf("API URL:    %s\n", settings.apiUrl.c_str());
-          Serial.printf("API Key:    %s\n", settings.apiKey.c_str());
-          Serial.printf("LLM Model:  %s\n", settings.llmModel.c_str());
+          Serial.printf("WiFi SSID:  %s\n", settings.wifiSSID);
+          Serial.printf("WiFi Pass:  %s\n", settings.wifiPass);
+          Serial.printf("API URL:    %s\n", settings.apiUrl);
+          Serial.printf("API Key:    %s\n", settings.apiKey);
+          Serial.printf("LLM Model:  %s\n", settings.llmModel);
           Serial.printf("Volume:     %d / 21\n", settings.volume);
+          Serial.printf("Timezone:   %s\n", settings.timeZone);
+          Serial.printf("Clock Color:%s\n", settings.clockColor);
           Serial.printf("Brightness: %d / 255\n", settings.brightness);
           Serial.printf("Touch Cal:  %s (%d,%d to %d,%d)\n", 
             settings.calibration.isValid ? "Valid" : "Invalid",
@@ -258,7 +294,7 @@ void handleSerialCommands() {
           String newModel = inputBuffer.substring(5);
           newModel.trim();
           if (newModel.length() > 0) {
-            settings.llmModel = newModel;
+            strlcpy(settings.llmModel, newModel.c_str(), sizeof(settings.llmModel));
             settings.save();
             llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
             Serial.println("LLM Model updated to: " + newModel);
@@ -322,9 +358,9 @@ void setup() {
   // Check for Factory Reset (BOOT button held during startup)
   if (digitalRead(0) == LOW) {
       Serial.println("BOOT button held: Performing Factory Reset...");
-      settings.wifiSSID = "";
-      settings.wifiPass = "";
-      settings.apiKey = "";
+      settings.wifiSSID[0] = '\0';
+      settings.wifiPass[0] = '\0';
+      settings.apiKey[0] = '\0';
       settings.calibration.isValid = false;
       settings.save();
       adminPrefs.clear();
@@ -337,8 +373,10 @@ void setup() {
   network.setCredentials(settings.wifiSSID, settings.wifiPass);
   
   // Migration: Fix API URL suffix in NVRAM if it matches the old format
-  if (settings.apiUrl.endsWith("/v1/chat/completions")) {
-      settings.apiUrl.replace("/v1/chat/completions", "/api/chat/completions");
+  if (String(settings.apiUrl).endsWith("/v1/chat/completions")) {
+      String tempUrl = settings.apiUrl;
+      tempUrl.replace("/v1/chat/completions", "/api/chat/completions");
+      strlcpy(settings.apiUrl, tempUrl.c_str(), sizeof(settings.apiUrl));
       settings.save();
       Serial.println("Migrated API URL to /api/chat/completions");
   }
@@ -383,8 +421,8 @@ void setup() {
   }
 
   // WiFi Connection Logic
-  if (settings.wifiSSID == "" || settings.wifiSSID == "YOUR_WIFI_SSID" || 
-      settings.wifiPass == "" || settings.wifiPass == "YOUR_WIFI_PASSWORD") {
+  if (strlen(settings.wifiSSID) == 0 || strcmp(settings.wifiSSID, "YOUR_WIFI_SSID") == 0 || 
+      strlen(settings.wifiPass) == 0 || strcmp(settings.wifiPass, "YOUR_WIFI_PASSWORD") == 0) {
       display.showWiFiConfig();
       while (!network.isConnected()) {
           lv_timer_handler();
@@ -393,6 +431,11 @@ void setup() {
       }
       Serial.println("WiFi Config Success: Saving to NVRAM.");
       settings.save();
+      
+      // Configure Time (NTP)
+      configTime(0, 0, "pool.ntp.org");
+      setenv("TZ", settings.timeZone, 1);
+      tzset();
   } else {
       int attempts = 0;
       while (attempts < 5) {
@@ -400,6 +443,13 @@ void setup() {
           network.connect();
           if (network.isConnected()) break;
           attempts++;
+      }
+      
+      if (network.isConnected()) {
+          // Configure Time (NTP)
+          configTime(0, 0, "pool.ntp.org");
+          setenv("TZ", settings.timeZone, 1);
+          tzset();
       }
 
       if (!network.isConnected()) {
@@ -411,6 +461,11 @@ void setup() {
           }
           Serial.println("WiFi Recovery Success: Saving to NVRAM.");
           settings.save();
+          
+          // Configure Time (NTP)
+          configTime(0, 0, "pool.ntp.org");
+          setenv("TZ", settings.timeZone, 1);
+          tzset();
       }
   }
 
@@ -429,16 +484,17 @@ void setup() {
 
   // API Configuration Loop (Web Based)
   unsigned long lastLog = 0;
+  int wifiRetries = 0;
 
   while (true) {
       // If API Key/URL is missing, default, or verification failed (forceConfig)
-      if (forceConfig || settings.apiKey == "" || settings.apiKey == "your_api_key_here" ||
-          settings.apiUrl == "" || settings.apiUrl == "http://your-api-endpoint/api/chat/completions") {
+      if (forceConfig || strlen(settings.apiKey) == 0 || strcmp(settings.apiKey, "your_api_key_here") == 0 ||
+          strlen(settings.apiUrl) == 0 || strcmp(settings.apiUrl, "http://your-api-endpoint/api/chat/completions") == 0) {
           
           display.showWebConfig(WiFi.localIP().toString(), "aiesp.local");
           
-          while (forceConfig || settings.apiKey == "" || settings.apiKey == "your_api_key_here" ||
-                 settings.apiUrl == "" || settings.apiUrl == "http://your-api-endpoint/api/chat/completions") {
+          while (forceConfig || strlen(settings.apiKey) == 0 || strcmp(settings.apiKey, "your_api_key_here") == 0 ||
+                 strlen(settings.apiUrl) == 0 || strcmp(settings.apiUrl, "http://your-api-endpoint/api/chat/completions") == 0) {
               lv_timer_handler();
               handleSerialCommands();
               server.handleClient();
@@ -480,6 +536,17 @@ void setup() {
           break;
       } else {
           display.showStatus("API Connection Failed");
+          
+          if (wifiRetries < 2) {
+              Serial.println("API Check Failed. Restarting WiFi...");
+              display.showStatus("Restarting WiFi...");
+              WiFi.disconnect();
+              delay(1000);
+              network.connect();
+              wifiRetries++;
+              continue;
+          }
+          
           delay(2000);
           forceConfig = true; // Force return to Web Config screen without wiping data
       }

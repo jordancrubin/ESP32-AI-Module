@@ -3,6 +3,8 @@
 #include <TJpg_Decoder.h>
 #include "BootLogo.h"
 #include <WiFi.h>
+#include <time.h>
+#include "SettingsManager.h"
 
 // GPIO 38 conflicts with the PSRAM bus on S3 modules, causing audio distortion.
 // GPIO 4 is a safe pin for PWM backlight control.
@@ -14,6 +16,132 @@ static DisplayManager *static_dm = nullptr;
 static TouchCalibration _currentCal;
 static bool is_touch_active = false;
 static bool touch_disabled = false;
+
+// Global state for Clock/Idle handling
+static String g_lastVoice = "alloy";
+static int g_lastVolume = 21;
+static String g_voiceOptions = "alloy";
+static lv_timer_t * g_clockTimer = nullptr;
+static lv_timer_t * g_idleTimer = nullptr;
+
+static lv_color_t getClockColor() {
+    if (strcmp(settings.clockColor, "green") == 0) return lv_color_make(0, 255, 0);
+    if (strcmp(settings.clockColor, "white") == 0) return lv_color_make(255, 255, 255);
+    return lv_color_make(255, 0, 0); // Default Red
+}
+
+static void segment_draw_event_cb(lv_event_t * e) {
+    lv_obj_t * obj = lv_event_get_target(e);
+    lv_draw_ctx_t * draw_ctx = lv_event_get_draw_ctx(e);
+    
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+    
+    int32_t w = lv_obj_get_width(obj);
+    int32_t h = lv_obj_get_height(obj);
+    
+    lv_draw_rect_dsc_t draw_dsc;
+    lv_draw_rect_dsc_init(&draw_dsc);
+    draw_dsc.bg_color = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
+    draw_dsc.bg_opa = LV_OPA_COVER;
+    
+    lv_point_t points[6];
+    
+    if (w > h) { // Horizontal
+        int32_t half_h = h / 2;
+        points[0].x = coords.x1;                  points[0].y = coords.y1 + half_h;
+        points[1].x = coords.x1 + half_h;         points[1].y = coords.y1;
+        points[2].x = coords.x2 - half_h;         points[2].y = coords.y1;
+        points[3].x = coords.x2;                  points[3].y = coords.y1 + half_h;
+        points[4].x = coords.x2 - half_h;         points[4].y = coords.y2;
+        points[5].x = coords.x1 + half_h;         points[5].y = coords.y2;
+    } else { // Vertical
+        int32_t half_w = w / 2;
+        points[0].x = coords.x1 + half_w;         points[0].y = coords.y1;
+        points[1].x = coords.x2;                  points[1].y = coords.y1 + half_w;
+        points[2].x = coords.x2;                  points[2].y = coords.y2 - half_w;
+        points[3].x = coords.x1 + half_w;         points[3].y = coords.y2;
+        points[4].x = coords.x1;                  points[4].y = coords.y2 - half_w;
+        points[5].x = coords.x1;                  points[5].y = coords.y1 + half_w;
+    }
+    
+    lv_draw_polygon(draw_ctx, &draw_dsc, points, 6);
+}
+
+struct SevenSegmentDigit {
+    lv_obj_t* segments[7]; // A, B, C, D, E, F, G
+    
+    lv_obj_t* create_segment(lv_obj_t* parent, int x, int y, int w, int h) {
+        lv_obj_t* obj = lv_obj_create(parent);
+        lv_obj_set_pos(obj, x, y);
+        lv_obj_set_size(obj, w, h);
+        lv_obj_set_style_radius(obj, 0, 0);
+        lv_obj_set_style_border_width(obj, 0, 0);
+        lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+        lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+        // Set initial color to inactive gray
+        lv_obj_set_style_bg_color(obj, lv_color_make(40, 40, 40), 0);
+        lv_obj_add_event_cb(obj, segment_draw_event_cb, LV_EVENT_DRAW_MAIN, NULL);
+        return obj;
+    }
+
+    void create(lv_obj_t* parent, int x, int y, int w, int h) {
+        int thickness = w / 7; 
+        int segLenH = w - 2 * thickness; 
+        int segLenV = (h - 3 * thickness) / 2;
+        
+        // A: Top Horizontal
+        segments[0] = create_segment(parent, x + thickness, y, segLenH, thickness);
+        // B: Top Right Vertical
+        segments[1] = create_segment(parent, x + w - thickness, y + thickness, thickness, segLenV);
+        // C: Bottom Right Vertical
+        segments[2] = create_segment(parent, x + w - thickness, y + 2 * thickness + segLenV, thickness, segLenV);
+        // D: Bottom Horizontal
+        segments[3] = create_segment(parent, x + thickness, y + h - thickness, segLenH, thickness);
+        // E: Bottom Left Vertical
+        segments[4] = create_segment(parent, x, y + 2 * thickness + segLenV, thickness, segLenV);
+        // F: Top Left Vertical
+        segments[5] = create_segment(parent, x, y + thickness, thickness, segLenV);
+        // G: Middle Horizontal
+        segments[6] = create_segment(parent, x + thickness, y + thickness + segLenV, segLenH, thickness);
+    }
+
+    void setNumber(int num) {
+        // A=0, B=1, C=2, D=3, E=4, F=5, G=6
+        const uint8_t patterns[10] = {
+            0b00111111, // 0
+            0b00000110, // 1
+            0b01011011, // 2
+            0b01001111, // 3
+            0b01100110, // 4
+            0b01101101, // 5
+            0b01111101, // 6
+            0b00000111, // 7
+            0b01111111, // 8
+            0b01101111  // 9
+        };
+        
+        if (num < 0 || num > 9) return;
+        uint8_t mask = patterns[num];
+        
+        for(int i=0; i<7; i++) {
+            if ((mask >> i) & 1) {
+                lv_obj_set_style_bg_color(segments[i], getClockColor(), 0); // Active Color
+            } else {
+                lv_obj_set_style_bg_color(segments[i], lv_color_make(40, 40, 40), 0); // Inactive Gray
+            }
+        }
+    }
+};
+
+struct ClockWidgets {
+    SevenSegmentDigit h1, h2, m1, m2;
+    lv_obj_t* colon[2];
+    lv_obj_t* wifiBars[4];
+};
+
+static ClockWidgets g_clockWidgets;
+static void showClockScreen();
 
 static void kb_enable_timer_cb(lv_timer_t * timer) {
     touch_disabled = false;
@@ -136,12 +264,158 @@ void DisplayManager::begin(TouchCalibration cal) {
     showMainUI();
 }
 
+// Callback to update the clock label every second
+static void clock_update_cb(lv_timer_t * t) {
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    
+    g_clockWidgets.h1.setNumber(timeinfo.tm_hour / 10);
+    g_clockWidgets.h2.setNumber(timeinfo.tm_hour % 10);
+    g_clockWidgets.m1.setNumber(timeinfo.tm_min / 10);
+    g_clockWidgets.m2.setNumber(timeinfo.tm_min % 10);
+    
+    // Blink colon
+    bool blink = (timeinfo.tm_sec % 2) == 0;
+    lv_color_t col = blink ? getClockColor() : lv_color_make(40, 40, 40);
+    if(g_clockWidgets.colon[0]) lv_obj_set_style_bg_color(g_clockWidgets.colon[0], col, 0);
+    if(g_clockWidgets.colon[1]) lv_obj_set_style_bg_color(g_clockWidgets.colon[1], col, 0);
+
+    // Update WiFi Signal
+    int rssi = WiFi.RSSI();
+    int level = 0;
+    if (WiFi.status() == WL_CONNECTED) {
+        if (rssi > -55) level = 4;
+        else if (rssi > -65) level = 3;
+        else if (rssi > -75) level = 2;
+        else if (rssi > -85) level = 1;
+    }
+    
+    for (int i = 0; i < 4; i++) {
+        if (g_clockWidgets.wifiBars[i]) {
+            // Active bars are Green, inactive are Dark Gray
+            lv_color_t barColor = (i < level) ? lv_color_make(0, 255, 0) : lv_color_make(40, 40, 40);
+            lv_obj_set_style_bg_color(g_clockWidgets.wifiBars[i], barColor, 0);
+        }
+    }
+}
+
+// Callback when Clock screen is touched
+static void clock_click_cb(lv_event_t * e) {
+    if (g_clockTimer) {
+        lv_timer_del(g_clockTimer);
+        g_clockTimer = nullptr;
+    }
+    // Restore Main UI
+    if (static_dm) {
+        static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+    }
+}
+
+// Callback to check for inactivity
+static void idle_timer_cb(lv_timer_t * t) {
+    // If inactive for 30 seconds, switch to clock
+    if (lv_disp_get_inactive_time(NULL) > 30000) {
+        if (g_idleTimer) {
+             lv_timer_del(g_idleTimer);
+             g_idleTimer = nullptr;
+        }
+        showClockScreen();
+    }
+}
+
+static void showClockScreen() {
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
+
+    // Container to center the clock
+    lv_obj_t * cont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(cont, 300, 110);
+    // Adjusted: Moved back left by ~8px (from -5 to -13) based on user feedback
+    lv_obj_align(cont, LV_ALIGN_CENTER, -13, -5);
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(cont, LV_OBJ_FLAG_EVENT_BUBBLE); // Allow clicks to pass through
+
+    int dW = 50;
+    int dH = 88;
+    int gap = 13;
+    int startX = 16; // Mathematically centered in 300px container
+    int y = 6;
+
+    g_clockWidgets.h1.create(cont, startX, y, dW, dH);
+    g_clockWidgets.h2.create(cont, startX + dW + gap, y, dW, dH);
+    
+    // Colon
+    int colonX = startX + 2 * dW + gap + 15; // Centered in the 41px gap
+    g_clockWidgets.colon[0] = lv_obj_create(cont);
+    lv_obj_set_size(g_clockWidgets.colon[0], 11, 11);
+    lv_obj_set_style_radius(g_clockWidgets.colon[0], 0, 0);
+    lv_obj_set_style_border_width(g_clockWidgets.colon[0], 0, 0);
+    lv_obj_set_pos(g_clockWidgets.colon[0], colonX, y + dH/3);
+    
+    g_clockWidgets.colon[1] = lv_obj_create(cont);
+    lv_obj_set_size(g_clockWidgets.colon[1], 11, 11);
+    lv_obj_set_style_radius(g_clockWidgets.colon[1], 0, 0);
+    lv_obj_set_style_border_width(g_clockWidgets.colon[1], 0, 0);
+    lv_obj_set_pos(g_clockWidgets.colon[1], colonX, y + 2*dH/3);
+
+    g_clockWidgets.m1.create(cont, startX + 2 * dW + 2 * gap + 28, y, dW, dH);
+    g_clockWidgets.m2.create(cont, startX + 3 * dW + 3 * gap + 28, y, dW, dH);
+
+    // WiFi Signal Meter (Top Right)
+    lv_obj_t * wifiCont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(wifiCont, 40, 25);
+    lv_obj_align(wifiCont, LV_ALIGN_TOP_RIGHT, -10, 10);
+    lv_obj_set_style_bg_opa(wifiCont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(wifiCont, 0, 0);
+    lv_obj_set_style_pad_all(wifiCont, 0, 0);
+    lv_obj_clear_flag(wifiCont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(wifiCont, LV_OBJ_FLAG_EVENT_BUBBLE); // Pass clicks
+
+    for(int i=0; i<4; i++) {
+        g_clockWidgets.wifiBars[i] = lv_obj_create(wifiCont);
+        int h = 6 + (i * 4); // Heights: 6, 10, 14, 18
+        lv_obj_set_size(g_clockWidgets.wifiBars[i], 6, h);
+        lv_obj_align(g_clockWidgets.wifiBars[i], LV_ALIGN_BOTTOM_LEFT, i * 9, 0);
+        lv_obj_set_style_radius(g_clockWidgets.wifiBars[i], 2, 0);
+        lv_obj_set_style_border_width(g_clockWidgets.wifiBars[i], 0, 0);
+    }
+
+    // RUBINTECH Logo (Bottom Right)
+    lv_obj_t * logo = lv_label_create(lv_scr_act());
+    lv_label_set_text(logo, "RUBINTECH");
+    lv_obj_set_style_text_font(logo, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(logo, lv_color_make(40, 40, 40), 0);
+    lv_obj_align(logo, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_add_flag(logo, LV_OBJ_FLAG_EVENT_BUBBLE); // Pass clicks
+
+    clock_update_cb(NULL); // Initial draw
+    g_clockTimer = lv_timer_create(clock_update_cb, 500, NULL);
+
+    // Add click event to the screen object to capture touches anywhere
+    lv_obj_add_event_cb(lv_scr_act(), clock_click_cb, LV_EVENT_CLICKED, NULL);
+}
+
 void DisplayManager::showMainUI(String currentVoice, int currentVolume, String voiceOptions) {
+    if (g_clockTimer) {
+        lv_timer_del(g_clockTimer);
+        g_clockTimer = nullptr;
+    }
+
     _lastVoice = currentVoice;
     _lastVolume = currentVolume;
     if (voiceOptions.length() > 0) _voiceOptions = voiceOptions;
+    
+    // Update globals for restoration from clock
+    g_lastVoice = _lastVoice;
+    g_lastVolume = _lastVolume;
+    g_voiceOptions = _voiceOptions;
 
     lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_palette_lighten(LV_PALETTE_GREY, 4), 0);
 
     // Voice Dropdown
     lv_obj_t * dd_voice = lv_dropdown_create(lv_scr_act());
@@ -203,6 +477,11 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_set_size(spinner, 40, 40);
     lv_obj_align(spinner, LV_ALIGN_TOP_RIGHT, -70, 5); // Moved left of Setup button
     lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
+    
+    // Start/Restart Idle Timer
+    if (!g_idleTimer) {
+        g_idleTimer = lv_timer_create(idle_timer_cb, 1000, NULL);
+    }
 }
 
 void DisplayManager::clear() {
@@ -211,12 +490,18 @@ void DisplayManager::clear() {
 }
 
 void DisplayManager::showStatus(const char* message) {
+    if (g_clockTimer) {
+        showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+    }
     if (statusLabel) {
         lv_label_set_text(statusLabel, message);
     }
 }
 
 void DisplayManager::showResponse(const String& response) {
+    if (g_clockTimer) {
+        showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+    }
     if (statusLabel) {
         lv_label_set_text(statusLabel, response.c_str());
     }
@@ -243,6 +528,9 @@ void DisplayManager::showBootLogo() {
 }
 
 void DisplayManager::showThinking(bool active) {
+    if (g_clockTimer) {
+        showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+    }
     if (spinner) {
         if (active) {
             lv_obj_clear_flag(spinner, LV_OBJ_FLAG_HIDDEN);

@@ -18,6 +18,8 @@ void WiFiManager::connect() {
     }
 
     Serial.println("Connecting to WiFi...");
+    WiFi.disconnect(); // Ensure clean state
+    delay(100);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.begin(_ssid, _password);

@@ -18,11 +18,13 @@ public:
     void save();
 
     // Public members for easy access
-    String wifiSSID;
-    String wifiPass;
-    String apiUrl;
-    String apiKey;
-    String llmModel;
+    char wifiSSID[33];
+    char wifiPass[65];
+    char apiUrl[128];
+    char apiKey[128];
+    char llmModel[65];
+    char timeZone[65]; 
+    char clockColor[16];
     int volume;
     int brightness;
     TouchCalibration calibration;
@@ -30,3 +32,5 @@ public:
 private:
     Preferences prefs;
 };
+
+extern SettingsManager settings;
