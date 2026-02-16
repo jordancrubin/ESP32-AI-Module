@@ -415,13 +415,48 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     g_voiceOptions = _voiceOptions;
 
     lv_obj_clean(lv_scr_act());
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_palette_lighten(LV_PALETTE_GREY, 4), 0);
+    // Dark Theme Background
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
+
+    // --- Header / Top Right ---
+
+    // Setup Button (Icon)
+    lv_obj_t *btnSetup = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btnSetup, 40, 40);
+    lv_obj_align(btnSetup, LV_ALIGN_TOP_RIGHT, -10, 10);
+    lv_obj_set_style_bg_color(btnSetup, lv_color_make(60, 60, 60), 0);
+    lv_obj_set_style_radius(btnSetup, 20, 0); // Circle
+    lv_obj_t *lblSetup = lv_label_create(btnSetup);
+    lv_label_set_text(lblSetup, LV_SYMBOL_SETTINGS);
+    lv_obj_center(lblSetup);
+    lv_obj_add_event_cb(btnSetup, setupEventHandler, LV_EVENT_CLICKED, this);
+
+    // Spinner (Left of Setup)
+    spinner = lv_spinner_create(lv_scr_act(), 1000, 60);
+    lv_obj_set_size(spinner, 30, 30);
+    lv_obj_align_to(spinner, btnSetup, LV_ALIGN_OUT_LEFT_MID, -15, 0);
+    lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
+
+    // --- Controls Area (Left Side) ---
+    
+    lv_obj_t * contControls = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(contControls, 160, 220);
+    lv_obj_align(contControls, LV_ALIGN_LEFT_MID, 10, 0);
+    lv_obj_set_style_bg_opa(contControls, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(contControls, 0, 0);
+    lv_obj_set_style_pad_all(contControls, 0, 0);
+
+    // Voice Label
+    lv_obj_t * label_voice = lv_label_create(contControls);
+    lv_label_set_text(label_voice, "Voice");
+    lv_obj_set_style_text_color(label_voice, lv_color_make(200, 200, 200), 0);
+    lv_obj_align(label_voice, LV_ALIGN_TOP_LEFT, 0, 10);
 
     // Voice Dropdown
-    lv_obj_t * dd_voice = lv_dropdown_create(lv_scr_act());
+    lv_obj_t * dd_voice = lv_dropdown_create(contControls);
     lv_dropdown_set_options(dd_voice, _voiceOptions.c_str());
     lv_obj_set_width(dd_voice, 150);
-    lv_obj_align(dd_voice, LV_ALIGN_TOP_LEFT, 5, 5);
+    lv_obj_align(dd_voice, LV_ALIGN_TOP_LEFT, 0, 35);
     
     // Find and select current voice
     int index = 0;
@@ -442,41 +477,42 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_dropdown_set_selected(dd_voice, currentIdx);
     lv_obj_add_event_cb(dd_voice, voiceEventHandler, LV_EVENT_VALUE_CHANGED, NULL);
 
-    // Volume Slider
-    lv_obj_t * label_vol = lv_label_create(lv_scr_act());
-    lv_label_set_text(label_vol, "Volume");
-    lv_obj_align(label_vol, LV_ALIGN_TOP_LEFT, 5, 45);
+    // Volume Label
+    lv_obj_t * label_vol = lv_label_create(contControls);
+    lv_label_set_text(label_vol, LV_SYMBOL_VOLUME_MAX " Volume");
+    lv_obj_set_style_text_color(label_vol, lv_color_make(200, 200, 200), 0);
+    lv_obj_align(label_vol, LV_ALIGN_TOP_LEFT, 0, 90);
 
-    lv_obj_t * slider_vol = lv_slider_create(lv_scr_act());
-    lv_obj_set_width(slider_vol, 110);
-    lv_obj_align(slider_vol, LV_ALIGN_TOP_LEFT, 5, 65);
+    // Volume Slider
+    lv_obj_t * slider_vol = lv_slider_create(contControls);
+    lv_obj_set_width(slider_vol, 150);
+    lv_obj_set_height(slider_vol, 10);
+    lv_obj_align(slider_vol, LV_ALIGN_TOP_LEFT, 0, 120);
     lv_slider_set_range(slider_vol, 0, 21);
     lv_slider_set_value(slider_vol, currentVolume, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(slider_vol, lv_color_make(60, 60, 60), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider_vol, lv_palette_main(LV_PALETTE_BLUE), LV_PART_INDICATOR);
     lv_obj_add_event_cb(slider_vol, volumeEventHandler, LV_EVENT_VALUE_CHANGED, NULL);
 
-    // Create a basic label for status
-    statusLabel = lv_label_create(lv_scr_act());
+    // --- Status Area (Right Side / Bottom) ---
+
+    // Status Container (Card style)
+    lv_obj_t * contStatus = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(contStatus, 130, 150);
+    lv_obj_align(contStatus, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(contStatus, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(contStatus, 10, 0);
+    lv_obj_set_style_border_width(contStatus, 0, 0);
+    lv_obj_set_style_pad_all(contStatus, 10, 0);
+
+    // Status Label
+    statusLabel = lv_label_create(contStatus);
     lv_label_set_text(statusLabel, "Initializing...");
-    lv_obj_align(statusLabel, LV_ALIGN_TOP_RIGHT, -5, 50);
-    lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
-    lv_obj_set_width(statusLabel, SCREEN_WIDTH - 130);
+    lv_obj_set_width(statusLabel, 110);
+    lv_obj_align(statusLabel, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_label_set_long_mode(statusLabel, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_LEFT, 0);
-
-    // Setup Button (Top Right)
-    lv_obj_t *btnSetup = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(btnSetup, 60, 35);
-    lv_obj_align(btnSetup, LV_ALIGN_TOP_RIGHT, -5, 5);
-    lv_obj_t *lblSetup = lv_label_create(btnSetup);
-    lv_label_set_text(lblSetup, "Setup");
-    lv_obj_center(lblSetup);
-    lv_obj_add_event_cb(btnSetup, setupEventHandler, LV_EVENT_CLICKED, this);
-
-    // Create Thinking Spinner (Top Right)
-    spinner = lv_spinner_create(lv_scr_act(), 1000, 60);
-    lv_obj_set_size(spinner, 40, 40);
-    lv_obj_align(spinner, LV_ALIGN_TOP_RIGHT, -70, 5); // Moved left of Setup button
-    lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
+    lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
     
     // Start/Restart Idle Timer
     if (!g_idleTimer) {
