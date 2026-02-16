@@ -1,3 +1,10 @@
+/*
+  SpeakerManager.cpp - ESP32 AI Module Audio Output
+  Manages I2S audio playback via MAX98357A or similar DACs.
+  
+  https://www.youtube.com/@retrotechandelectronics
+  2026 Jordan Rubin.
+*/
 #include "SpeakerManager.h"
 #include <math.h>
 #include "Audio.h"

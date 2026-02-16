@@ -1,3 +1,10 @@
+/*
+  SpeechManager.cpp - ESP32 AI Module Audio Input
+  Handles I2S microphone recording (INMP441) and buffer management.
+  
+  https://www.youtube.com/@retrotechandelectronics
+  2026 Jordan Rubin.
+*/
 #include "SpeechManager.h"
 
 SpeechManager::SpeechManager() {}

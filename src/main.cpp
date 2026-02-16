@@ -1,3 +1,11 @@
+/*
+  main.cpp - ESP32 AI Module Firmware
+  Main application entry point. Orchestrates Display, WiFi, LLM, and Audio subsystems.
+  Functionality requires WiFi connection and valid API credentials.
+  
+  https://www.youtube.com/@retrotechandelectronics
+  2026 Jordan Rubin.
+*/
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>

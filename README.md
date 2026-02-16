@@ -1,91 +1,72 @@
-# ESP32-S3 AI Voice Assistant
+# ESP32 AI Module Firmware
 
-An integrated AI hardware module built on the ESP32-S3, featuring a touchscreen interface, voice recording, and real-time interaction with Large Language Models (LLMs) via Open WebUI or OpenAI-compatible APIs.
+An open-source AI voice assistant firmware designed for the ESP32-S3, featuring a modern touchscreen interface, voice interaction, and integration with OpenAI-compatible LLM APIs.
 
-## 🚀 Features
+## Features
 
-- **Interactive Touch UI**: Powered by **LVGL v8.4**, featuring a responsive interface for volume, brightness, and WiFi configuration.
-- **Voice Interaction**: 
-  - **Speech Recording**: High-quality I2S audio capture using the `SpeechManager`.
-  - **TTS Playback**: Streaming MP3 Text-to-Speech playback via `SpeakerManager` and `ESP8266Audio`.
-- **LLM Integration**: Seamless connection to Open WebUI, Ollama, or OpenAI. Supports system prompts and conversation history with sliding window memory management to prevent OOM.
-- **Smart Connectivity**: 
-  - On-screen WiFi scanning and configuration.
-  - mDNS support for resolving local network LLM servers (e.g., `http://chat.local`).
-- **Robust Settings Management**: Persistent storage of WiFi credentials, API keys, volume, brightness, and touch calibration in NVS (Non-Volatile Storage).
-- **Hardware Optimized**: Utilizes PSRAM for audio buffering and JSON processing to ensure smooth performance on the ESP32-S3.
+*   **Voice Interaction:** Record speech via I2S microphone and process it with an external LLM.
+*   **Text-to-Speech (TTS):** Plays back AI responses using high-quality MP3 streaming.
+*   **Touchscreen UI:** Built with LVGL, featuring a responsive interface for settings, volume control, and status monitoring.
+*   **Clock Mode:** A stylish 7-segment clock display with WiFi signal strength and day of week indicators that activates when idle.
+*   **Web Configuration:** Configure WiFi credentials, API keys, Timezone, and other settings via a web portal.
+*   **Customizable:** Change AI voices, clock colors, and LLM models directly from the device or web interface.
 
-## 🛠️ Hardware Requirements
+## Hardware Requirements
 
-- **Controller**: ESP32-S3 (N8R2 or higher recommended for PSRAM).
-- **Display**: ILI9341 TFT LCD (320x240).
-- **Touch**: XPT2046 Resistive Touch Controller.
-- **Audio Input**: INMP441 or similar I2S Microphone.
-- **Audio Output**: MAX98357A I2S DAC and Speaker.
-- **Backlight**: PWM-controlled backlight on GPIO 4.
+*   **Microcontroller:** ESP32-S3 (Tested on ESP32-S3-DevKitC-1-N8R2 with 8MB Flash / 2MB PSRAM).
+*   **Display:** ILI9341 TFT LCD (320x240) with XPT2046 Touch Controller.
+*   **Audio Input:** I2S Microphone (e.g., INMP441).
+*   **Audio Output:** I2S Amplifier (e.g., MAX98357A) + Speaker.
 
-## 📂 Project Structure
+## Software Requirements
 
-- `src/main.cpp`: System orchestration and state machine.
-- `src/DisplayManager.cpp`: LVGL initialization and UI screen management.
-- `src/LLMClient.cpp`: API communication, JSON parsing, and TTS downloading.
-- `src/SpeakerManager.cpp`: I2S audio playback and tone generation.
-- `src/SpeechManager.cpp`: I2S microphone recording and WAV formatting.
-- `src/SettingsManager.cpp`: NVS persistence for device configuration.
+*   **PlatformIO:** This project is built using PlatformIO.
+*   **Framework:** Arduino for ESP32.
+*   **Libraries:**
+    *   LVGL (Light and Versatile Graphics Library)
+    *   TFT_eSPI or Arduino_GFX
+    *   ArduinoJson
+    *   ESP32-audioI2S
+    *   TJpg_Decoder
 
-## ⚙️ Setup & Installation
+## Installation
 
-1.  **PlatformIO**: This project is designed for use with the PlatformIO IDE.
-2.  **Configuration**:
-    - Create a `include/Secrets.h` file based on your environment:
-      ```cpp
-      #define SECRET_WIFI_SSID "Your_SSID"
-      #define SECRET_WIFI_PASS "Your_Password"
-      #define SECRET_OPENWEBUI_URL "http://your-server:3000/api/chat/completions"
-      #define SECRET_OPENWEBUI_KEY "your_api_key"
-      #define SECRET_LLM_MODEL "gpt-4o"
-      ```
-3.  **Build & Flash**:
-    - Connect your ESP32-S3.
-    - Run `pio run -t upload`.
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/yourusername/ESP32-AI-Module.git
+    ```
+2.  **Open in PlatformIO:** Open the project folder in VS Code with the PlatformIO extension installed.
+3.  **Build and Upload:** Connect your ESP32-S3 via USB and click the "Upload" button.
+4.  **Filesystem:** Ensure you upload the filesystem image if you have custom assets (Boot logo, etc.).
 
-## 🎮 Usage
+## Configuration
 
-### Touch Interface
-- **Main Screen**: Displays AI responses and system status.
-- **Controls**: Use the on-screen buttons to adjust volume and brightness.
-- **WiFi Config**: If WiFi is not configured or connection fails, the module will automatically launch the WiFi setup utility.
+### Initial Setup
+1.  **WiFi:** On first boot, if no WiFi is configured, the device will prompt you to connect via the touchscreen.
+2.  **Calibration:** If the touch screen is not calibrated, a calibration routine will run automatically. Follow the on-screen dots.
 
-### Serial Commands
-You can interact with the module via the Serial Monitor (115200 baud):
-- **Type a prompt**: Send any text to the LLM.
-- **`/say <text>`**: Send text directly to the TTS engine (bypasses LLM).
-- **`/settings`**: View current system configuration, IP address, and signal strength.
-- **`/llm <model>`**: Manually update the LLM model (e.g., `/llm llama3`).
-- **`/new`**: Clear the conversation history (context).
-- **`/voices`**: List available TTS voices.
-- **`/calibrate`**: Manually trigger the touch screen calibration utility.
-- **`/reset_cal`**: Clear the stored touch calibration and force recalibration on next boot.
-- **`/config` / `/setup`**: Aliases for the settings dump.
+### Web Interface
+The device hosts a web server for easy configuration.
+1.  Connect the device to WiFi.
+2.  Navigate to `http://aiesp.local` or the device's IP address in a web browser.
+3.  **Login:** Use the admin password (set on the device).
+4.  **Settings Available:**
+    *   **API Key:** Your LLM provider's API Key.
+    *   **API URL:** The endpoint for the Chat API (e.g., `http://your-server:8080/api/chat/completions`).
+    *   **Timezone:** Select your local timezone for the clock.
+    *   **Clock Color:** Choose between Red, Green, or White.
 
-## 🔧 Technical Details
+## Usage
 
-### Audio Handling
-The system uses a dedicated task pinned to Core 1 for audio playback to prevent "crackling" caused by WiFi or UI interrupts. It supports 16-bit PCM for tones and MP3 for LLM responses.
+*   **Idle Mode:** The screen turns off or switches to a digital clock after 30 seconds of inactivity. Tap the screen to wake.
+*   **Voice Commands:** The device records audio and sends it to the configured LLM endpoint.
+*   **Settings:** Tap the "Setup" (Gear icon) button on the main screen to view IP address, RSSI, and access web config mode.
 
-### Memory Management
-To handle large JSON responses from LLMs, the project utilizes:
-- **ArduinoJson** with filtering to extract only necessary data.
-- **PSRAM** allocation for the request/response buffers and the TTS MP3 stream.
+## Credits
 
-### Touch Calibration
-On the first boot (or if settings are cleared), the module enters a calibration mode. Follow the on-screen prompts to calibrate the XPT2046 controller.
+Designed and developed by Jordan Rubin.
 
-## 📜 License
+*   **YouTube:** RetroTech & Electronics
+*   **Copyright:** 2026 Jordan Rubin
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🙏 Acknowledgments
-- LVGL for the graphics library.
-- ESP8266Audio for the playback engine.
-- Arduino_GFX for the display drivers.
+---

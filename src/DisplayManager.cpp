@@ -1,3 +1,11 @@
+/*
+  DisplayManager.cpp - ESP32 AI Module Display Controller
+  Designed for ESP32-S3 with ILI9341 TFT and LVGL.
+  Manages UI rendering, touch input, and screen transitions.
+  
+  https://www.youtube.com/@retrotechandelectronics
+  2026 Jordan Rubin.
+*/
 #include "DisplayManager.h"
 #include <Fonts/FreeSans12pt7b.h>
 #include <TJpg_Decoder.h>
