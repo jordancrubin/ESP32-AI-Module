@@ -78,8 +78,8 @@ void onVoiceChange(String voice) {
         lv_timer_handler(); // Force UI update
         
         size_t wavSize = 0;
-        // Record for 5 seconds (adjust as needed)
-        uint8_t* wavData = speech.record(5000, &wavSize);
+        // Record for 15 seconds (adjust as needed)
+        uint8_t* wavData = speech.record(15000, &wavSize);
         
         if (wavData && wavSize > 0) {
             // 2. Transcribe
