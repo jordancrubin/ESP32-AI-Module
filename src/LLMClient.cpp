@@ -45,8 +45,9 @@ String LLMClient::getModels(WiFiManager& netMgr) {
     if (serverPath == "") return "Error: Host resolution failed";
 
     Serial.println("Getting models from: " + serverPath);
-    client.setTimeout(5000);
-    http.setTimeout(5000);
+    client.setTimeout(10000);
+    http.setTimeout(10000);
+    http.setConnectTimeout(10000);
 
     if (http.begin(client, serverPath)) {
         http.addHeader("Authorization", "Bearer " + _apiKey);
@@ -246,6 +247,171 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
     return false;
 }
 
+String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& netMgr) {
+    if (!netMgr.isConnected()) return "Error: WiFi not connected";
+    if (!audioData || size == 0) return "Error: Empty audio data";
+
+    // Construct Transcription URL from _apiUrl
+    // e.g. http://host:8080/api/chat/completions -> http://host:8080/api/audio/transcriptions
+    String url = _apiUrl;
+    int chatIndex = url.indexOf("/chat/completions");
+    if (chatIndex != -1) {
+        url = url.substring(0, chatIndex);
+    }
+    if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+    if (url.endsWith("/api")) {
+        url += "/v1/audio/transcriptions";
+    } else {
+        url += "/audio/transcriptions";
+    }
+
+    String serverPath = netMgr.resolveHost(url);
+    if (serverPath == "") return "Error: Host resolution failed";
+
+    Serial.println("[" + String(millis()) + "] Transcribing at: " + serverPath);
+    Serial.println("[" + String(millis()) + "] Audio Size: " + String(size));
+
+    // Parse Host, Port, Path from resolvedUrl
+    int protocolEnd = serverPath.indexOf("://");
+    int hostStart = (protocolEnd == -1) ? 0 : protocolEnd + 3;
+    int pathStart = serverPath.indexOf('/', hostStart);
+    
+    String hostPort = (pathStart == -1) ? serverPath.substring(hostStart) : serverPath.substring(hostStart, pathStart);
+    String path = (pathStart == -1) ? "/" : serverPath.substring(pathStart);
+    
+    String host = hostPort;
+    int port = 80;
+    int portIndex = hostPort.indexOf(':');
+    if (portIndex != -1) {
+        host = hostPort.substring(0, portIndex);
+        port = hostPort.substring(portIndex + 1).toInt();
+    }
+
+    WiFiClient client;
+    if (!client.connect(host.c_str(), port)) {
+        Serial.println("[" + String(millis()) + "] Connection failed to " + host + ":" + String(port));
+        return "Error: Connection failed";
+    }
+    Serial.println("[" + String(millis()) + "] Connected to " + host + ":" + String(port));
+    client.setTimeout(60000);
+
+    // 1. Define the Boundary
+    String boundary = "------------------------ESP32Boundary" + String(millis());
+    
+    // 2. Construct the Body Parts
+    // Part 1: File Header (Audio) - Send FILE first for better compatibility
+    String part1 = "--" + boundary + "\r\n" +
+                   "Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n" +
+                   "Content-Type: audio/wav\r\n" +
+                   "\r\n";
+                   
+    // Part 2: Model + Footer
+    String part2 = "\r\n--" + boundary + "\r\n" +
+                   "Content-Disposition: form-data; name=\"model\"\r\n" +
+                   "\r\n" +
+                   "whisper-1\r\n" +
+                   "--" + boundary + "--\r\n";
+
+    // 3. Calculate Total Length
+    size_t totalLength = part1.length() + size + part2.length();
+
+    // 4. Send HTTP Headers
+    Serial.println("[" + String(millis()) + "] Sending Headers...");
+    client.println("POST " + path + " HTTP/1.1");
+    client.println("Host: " + host + ":" + String(port));
+    client.println("Authorization: Bearer " + _apiKey);
+    client.println("Content-Type: multipart/form-data; boundary=" + boundary);
+    client.println("Content-Length: " + String(totalLength));
+    client.println("User-Agent: ESP32");
+    client.println("Connection: close");
+    client.println(); // End of headers
+
+    // 5. Send the Body
+    Serial.println("[" + String(millis()) + "] Sending Body Part 1...");
+    client.print(part1);
+    
+    // Send audio in chunks
+    Serial.println("[" + String(millis()) + "] Sending Audio Data...");
+    size_t bytesWritten = 0;
+    size_t chunkSize = 1024;
+    while (bytesWritten < size) {
+        if (!client.connected()) {
+            Serial.println("[" + String(millis()) + "] Client disconnected during audio upload");
+            break;
+        }
+        size_t toWrite = (size - bytesWritten) < chunkSize ? (size - bytesWritten) : chunkSize;
+        size_t written = client.write(audioData + bytesWritten, toWrite);
+        if (written == 0) break;
+        bytesWritten += written;
+    }
+    Serial.println("[" + String(millis()) + "] Audio sent: " + String(bytesWritten) + "/" + String(size));
+    
+    Serial.println("[" + String(millis()) + "] Sending Body Part 2...");
+    client.print(part2);
+
+    // 6. Read Response
+    Serial.println("[" + String(millis()) + "] Waiting for response...");
+    String response = "";
+    bool headersFinished = false;
+    int contentLength = -1;
+    unsigned long start = millis();
+    
+    while (client.connected() || client.available()) {
+        if (millis() - start > 60000) break;
+        if (client.available()) {
+            if (!headersFinished) {
+                String line = client.readStringUntil('\n');
+                line.trim();
+                if (line == "") {
+                    headersFinished = true;
+                } else {
+                    String lowerLine = line;
+                    lowerLine.toLowerCase();
+                    if (lowerLine.startsWith("content-length:")) {
+                        contentLength = line.substring(15).toInt();
+                    }
+                }
+            } else {
+                // Read Body
+                if (contentLength != -1) {
+                    // If we know the length, read exactly that much and stop
+                    while (response.length() < (unsigned int)contentLength && (client.connected() || client.available())) {
+                        if (client.available()) response += (char)client.read();
+                        else delay(1);
+                    }
+                    break; // Done reading
+                } else {
+                    // Fallback: read until close
+                    response += (char)client.read();
+                }
+            }
+        }
+    }
+    client.stop();
+
+    Serial.println("[" + String(millis()) + "] Transcription Response: " + response);
+    
+    // Parse JSON result
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, response);
+    String result = "";
+    
+    if (error) {
+        result = "Error: JSON " + String(error.c_str());
+    } else if (!doc["error"].isNull()) {
+        result = "Error: " + doc["error"]["message"].as<String>();
+    } else if (!doc["detail"].isNull()) {
+        result = "Error: " + doc["detail"].as<String>();
+    } else if (!doc["text"].isNull()) {
+        result = doc["text"].as<String>();
+        if (result.length() == 0) result = "Error: No speech";
+    } else {
+        result = "Error: Invalid API response";
+    }
+    
+    return result;
+}
+
 String LLMClient::getVoices(WiFiManager& netMgr) {
     if (!netMgr.isConnected()) return "Error: WiFi not connected";
 
@@ -270,8 +436,9 @@ String LLMClient::getVoices(WiFiManager& netMgr) {
 
     WiFiClient client;
     HTTPClient http;
-    client.setTimeout(5000);
-    http.setTimeout(5000);
+    client.setTimeout(10000);
+    http.setTimeout(10000);
+    http.setConnectTimeout(10000);
 
     if (http.begin(client, serverPath)) {
         http.addHeader("Authorization", "Bearer " + _apiKey);

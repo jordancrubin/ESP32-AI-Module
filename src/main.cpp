@@ -65,6 +65,57 @@ void onVoiceChange(String voice) {
         settings.save();
         llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
         Serial.println("Model changed to: " + String(settings.llmModel));
+    } else if (voice == "TALK_ACTION") {
+        if (isSpeaking) {
+            speaker.stop();
+            isSpeaking = false;
+            display.showStatus("Tap to Talk");
+            return;
+        }
+
+        // 1. Record
+        display.showStatus("Listening...");
+        lv_timer_handler(); // Force UI update
+        
+        size_t wavSize = 0;
+        // Record for 5 seconds (adjust as needed)
+        uint8_t* wavData = speech.record(5000, &wavSize);
+        
+        if (wavData && wavSize > 0) {
+            // 2. Transcribe
+            display.showStatus("Transcribing...");
+            lv_timer_handler();
+            String text = llm.transcribeAudio(wavData, wavSize, network);
+            free(wavData); // Free PSRAM immediately
+            
+            if (text.startsWith("Error")) {
+                Serial.println("Transcription Failed: " + text);
+                display.showStatus(text.c_str());
+            } else {
+                Serial.println("Transcription: " + text);
+                
+                // 3. Send to LLM
+                display.showStatus("Thinking...");
+                lv_timer_handler();
+                
+                String answer = llm.sendPrompt(text, network);
+                Serial.println("Answer: " + answer);
+                
+                // 4. TTS
+                display.showStatus("Speaking...");
+                // Ensure any previous TTS file is removed to free space before downloading
+                if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
+                
+                if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
+                    speaker.playSpeechFromFile("/speech.mp3");
+                    isSpeaking = true;
+                } else {
+                    display.showStatus("TTS Failed");
+                }
+            }
+        } else {
+            display.showStatus("Record Failed");
+        }
     } else {
         ttsVoice = voice;
         adminPrefs.putString("voice", ttsVoice);
@@ -326,6 +377,43 @@ void handleSerialCommands() {
             llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
             Serial.println("LLM Model updated to: " + newModel);
           }
+        } else if (inputBuffer == "/test_mic") {
+          Serial.println("Testing Microphone (5s recording)...");
+          display.showStatus("Recording (5s)...");
+          speaker.stop(); // Stop any playback
+          
+          size_t wavSize = 0;
+          uint8_t* wavData = speech.record(5000, &wavSize);
+          
+          if (wavData && wavSize > 0) {
+              Serial.printf("Recording complete. Size: %d bytes\n", wavSize);
+              
+              // Calculate average amplitude for debug
+              long sum = 0;
+              int16_t* samples = (int16_t*)(wavData + 44); // Skip WAV header
+              int sampleCount = (wavSize - 44) / 2;
+              for(int i=0; i<sampleCount; i++) sum += abs(samples[i]);
+              int avg = sampleCount > 0 ? sum / sampleCount : 0;
+              Serial.printf("Average Amplitude: %d\n", avg);
+
+              display.showStatus("Saving...");
+              File file = LittleFS.open("/mic_test.wav", "w");
+              if (file) {
+                  file.write(wavData, wavSize);
+                  file.close();
+                  Serial.println("Saved to /mic_test.wav");
+                  display.showStatus("Playing back...");
+                  speaker.playSpeechFromFile("/mic_test.wav");
+                  isSpeaking = true;
+              } else {
+                  Serial.println("Failed to open file for writing");
+                  display.showStatus("Save Failed");
+              }
+              free(wavData);
+          } else {
+              Serial.println("Recording failed");
+              display.showStatus("Record Failed");
+          }
         } else if (inputBuffer == "/new") {
           llm.clearHistory();
           Serial.println("Conversation history cleared.");
@@ -476,6 +564,8 @@ void setup() {
       
       if (network.isConnected()) {
           display.showStatus("WiFi Connected|OK");
+          display.showStatus("mDNS Started|OK");
+          delay(1500); // Allow network stack to stabilize
           // Configure Time (NTP)
           configTime(0, 0, "pool.ntp.org");
           setenv("TZ", settings.timeZone, 1);
@@ -486,6 +576,7 @@ void setup() {
       if (!network.isConnected()) {
           display.showStatus("WiFi Failed|FAIL");
           display.showWiFiError("WiFi Connection Failed");
+          display.showWiFiError("WiFi Connection Failed after 5 attempts.");
           while (!network.isConnected()) {
               lv_timer_handler();
               handleSerialCommands();
@@ -513,6 +604,7 @@ void setup() {
 
   // Initialize Speech Recognition (I2S)
   speech.begin();
+  display.showStatus("Speech Init|OK");
 
   // API Configuration Loop (Web Based)
   unsigned long lastLog = 0;
@@ -539,13 +631,14 @@ void setup() {
           }
       }
 
-      // 2. Verify API Connection (2 attempts)
+      // 2. Verify API Connection (3 attempts)
       bool apiVerified = false;
-      for (int i = 0; i < 2; i++) {
-          display.showStatus(("Verifying API (" + String(i + 1) + "/2)...").c_str());
+      for (int i = 0; i < 3; i++) {
+          display.showStatus(("Verifying API (" + String(i + 1) + "/3)...").c_str());
           lv_timer_handler();
           server.handleClient(); // Keep web server alive during verification
           
+          display.showStatus("Fetching Models...");
           String models = llm.getModels(network);
           if (!models.startsWith("Error")) {
               Serial.println("API Verified: " + models);
@@ -556,6 +649,7 @@ void setup() {
               break;
           }
           display.showStatus("API Check Failed|FAIL");
+          Serial.println("API Check Failed: " + models);
           delay(1000);
       }
 
@@ -585,7 +679,7 @@ void setup() {
   
   // Final UI Load
   display.showMainUI(ttsVoice, settings.volume, voiceOptions);
-  display.showStatus("Waiting...");
+  display.showStatus("Tap to Talk");
   
   Serial.println("Boot complete. Type prompt in Serial.");
   
@@ -606,7 +700,7 @@ void loop() {
   // Check if speaking finished
   if (isSpeaking && !speaker.isRunning()) {
       isSpeaking = false;
-      String waitMsg = "Waiting...\nRSSI: " + String(network.getSignalStrength()) + " dBm";
+      String waitMsg = "Tap to Talk\nRSSI: " + String(network.getSignalStrength()) + " dBm";
       display.showStatus(waitMsg.c_str());
   }
   handleSerialCommands();

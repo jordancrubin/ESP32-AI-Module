@@ -11,7 +11,7 @@ SpeechManager::SpeechManager() {}
 
 void SpeechManager::begin() {
     setupI2S();
-    Serial.println("SpeechManager: I2S Initialized");
+    Serial.println("SpeechManager: ICS-43434 I2S Initialized");
 }
 
 void SpeechManager::setupI2S() {
@@ -21,7 +21,7 @@ void SpeechManager::setupI2S() {
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
             .bclk = (gpio_num_t)I2S_SCK,
@@ -89,23 +89,66 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize) {
     // Copy header to buffer
     memcpy(wavBuffer, &header, sizeof(WavHeader));
 
+    // Flush DMA buffer to remove stale audio (silence/noise from before button press)
+    size_t bytesFlushed = 0;
+    int32_t flushBuffer[128];
+    while (true) {
+        i2s_channel_read(rx_handle, flushBuffer, sizeof(flushBuffer), &bytesFlushed, 0);
+        if (bytesFlushed == 0) break;
+    }
+
     // Record Audio
     Serial.println("Recording...");
     size_t bytesRead;
-    int32_t sampleBuffer[64]; // Temporary buffer for 32-bit I2S data
+    int32_t sampleBuffer[128]; // Temporary buffer for 32-bit I2S data (Stereo)
     int16_t* pcmBuffer = (int16_t*)(wavBuffer + sizeof(WavHeader));
     size_t samplesRead = 0;
+    
+    unsigned long silenceStart = millis();
+    const int SILENCE_THRESHOLD = 800; // Amplitude threshold for "quiet" (after 32x gain)
+    const unsigned long SILENCE_DURATION = 3000; // Stop after 3 seconds of silence
 
     while (samplesRead < numSamples) {
         i2s_channel_read(rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY);
-        int samplesInBatch = bytesRead / 4; // 4 bytes per 32-bit sample
-        for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i++) {
-            // INMP441 sends 24-bit data MSB aligned in 32-bit word. Shift right 16 to get top 16 bits.
-            pcmBuffer[samplesRead++] = (int16_t)(sampleBuffer[i] >> 16);
+        int samplesInBatch = bytesRead / 4; // Number of 32-bit samples
+        
+        bool voiceDetectedInBatch = false;
+        // We are reading STEREO (L/R interleaved), but we only want LEFT channel (index 0, 2, 4...)
+        // This fixes the "Slow Playback" issue caused by capturing both slots as mono data.
+        for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i += 2) {
+            int32_t raw = sampleBuffer[i] >> 16; // Shift to get 16-bit
+            
+            // Software Gain (32x) to fix "Low Sensitivity"
+            raw *= 32;
+            if (raw > 32767) raw = 32767;
+            else if (raw < -32768) raw = -32768;
+            
+            if (abs(raw) > SILENCE_THRESHOLD) {
+                voiceDetectedInBatch = true;
+            }
+            
+            pcmBuffer[samplesRead++] = (int16_t)raw;
+        }
+        
+        if (voiceDetectedInBatch) {
+            silenceStart = millis(); // Reset timer if we hear something
+        } else {
+            if (millis() - silenceStart > SILENCE_DURATION) {
+                Serial.println("Silence detected, stopping recording.");
+                break;
+            }
         }
     }
     
     Serial.println("Recording Complete.");
-    *outSize = fileSize;
+    
+    // Update WAV Header with actual size (since we might have stopped early)
+    size_t actualDataSize = samplesRead * 2;
+    size_t actualFileSize = sizeof(WavHeader) + actualDataSize;
+    WavHeader* headerPtr = (WavHeader*)wavBuffer;
+    headerPtr->dataSize = actualDataSize;
+    headerPtr->overallSize = actualFileSize - 8;
+    
+    *outSize = actualFileSize;
     return wavBuffer;
 }

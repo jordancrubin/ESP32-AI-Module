@@ -16,10 +16,10 @@
 #define TOUCH_CS   14
 #define TOUCH_IRQ  255 // Set to 255 to disable interrupts and use polling
 
-// I2S Microphone Pins (INMP441 / MSM261S4030H0)
-#define I2S_SCK    42
-#define I2S_WS     41
-#define I2S_SD     40
+// I2S Microphone Pins (ICS-43434)
+#define I2S_SCK    42 // BCLK
+#define I2S_WS     41 // LRCL
+#define I2S_SD     40 // DOUT
 
 // I2S Speaker Pins (MAX98357)
 #define SPEAKER_SCK 17 // BCLK

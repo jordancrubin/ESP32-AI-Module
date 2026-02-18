@@ -29,7 +29,7 @@ void WiFiManager::connect() {
     MDNS.end(); // Clean up previous mDNS instance
 
     WiFi.disconnect(true); // Turn off WiFi to reset radio state
-    delay(1000);
+    delay(1500);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.begin(_ssid, _password);

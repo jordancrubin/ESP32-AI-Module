@@ -29,7 +29,7 @@ static bool touch_disabled = false;
 static String g_lastVoice = "alloy";
 static int g_lastVolume = 21;
 static String g_voiceOptions = "alloy";
-static String g_lastStatus = "Waiting...";
+static String g_lastStatus = "Tap to Talk";
 static lv_timer_t * g_clockTimer = nullptr;
 static lv_timer_t * g_idleTimer = nullptr;
 static void showVoiceModelConfig();
@@ -614,20 +614,22 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
 
     // --- Status Area (Center/Bottom) ---
 
-    // Status Container (Large Box)
-    lv_obj_t * contStatus = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(contStatus, 300, 160);
-    lv_obj_align(contStatus, LV_ALIGN_BOTTOM_MID, 0, -10);
-    lv_obj_set_style_bg_color(contStatus, lv_color_make(40, 40, 40), 0);
-    lv_obj_set_style_radius(contStatus, 5, 0);
-    lv_obj_set_style_border_width(contStatus, 0, 0);
-    lv_obj_set_style_pad_all(contStatus, 5, 0);
+    // Talk Button (Replaces Status Box)
+    lv_obj_t * btnTalk = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btnTalk, 300, 160);
+    lv_obj_align(btnTalk, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_color(btnTalk, lv_color_make(50, 50, 50), 0);
+    lv_obj_set_style_radius(btnTalk, 10, 0);
+    lv_obj_add_event_cb(btnTalk, [](lv_event_t * e){
+        if (g_voiceCb) g_voiceCb("TALK_ACTION");
+    }, LV_EVENT_CLICKED, NULL);
 
-    // Status Label
-    statusLabel = lv_label_create(contStatus);
+    // Status Label (On Button)
+    statusLabel = lv_label_create(btnTalk);
     lv_label_set_text(statusLabel, g_lastStatus.c_str());
     lv_obj_set_width(statusLabel, 280);
-    lv_obj_align(statusLabel, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_align(statusLabel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(statusLabel, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
     lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
@@ -711,23 +713,26 @@ void DisplayManager::showResponse(const String& response) {
 }
 
 void DisplayManager::showBootLogo() {
-    gfx->fillScreen(BLACK);
+    gfx->fillScreen(WHITE);
     
-    // Configure TJpg_Decoder
-    TJpgDec.setJpgScale(1);
-    TJpgDec.setSwapBytes(true); // Swap bytes for SPI TFT
-    TJpgDec.setCallback(tft_output);
-
-    // Center the image
-    uint16_t w = 0, h = 0;
-    TJpgDec.getJpgSize(&w, &h, boot_logo, sizeof(boot_logo));
-    
-    Serial.printf("Boot Logo Size: %dx%d\n", w, h);
-
-    int x = (gfx->width() - w) / 2;
-    int y = (gfx->height() - h) / 2;
-    
-    TJpgDec.drawJpg(x, y, boot_logo, sizeof(boot_logo));
+    // Check for JPEG Signature (FF D8)
+    if (sizeof(boot_logo) > 2 && boot_logo[0] == 0xFF && boot_logo[1] == 0xD8) {
+        // It is a JPEG
+        TJpgDec.setJpgScale(1);
+        TJpgDec.setSwapBytes(false); // Standard for ILI9341
+        TJpgDec.setCallback(tft_output);
+        uint16_t w = 0, h = 0;
+        if (TJpgDec.getJpgSize(&w, &h, boot_logo, sizeof(boot_logo)) == 0) {
+            Serial.printf("Boot Logo Size: %dx%d\n", w, h);
+            int x = (gfx->width() - w) / 2;
+            int y = (gfx->height() - h) / 2;
+            TJpgDec.drawJpg(x, y, boot_logo, sizeof(boot_logo));
+        } else {
+            Serial.println("Boot Logo Error: Invalid JPG data.");
+        }
+    } else {
+        Serial.println("Boot Logo Error: Unknown format.");
+    }
 }
 
 void DisplayManager::showThinking(bool active) {
