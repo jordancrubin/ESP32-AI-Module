@@ -41,7 +41,7 @@
 
 #include <stdint.h>
 #include "model_metadata.h"
-#include "tflite-model/tflite_learn_908594_9_compiled.h"
+#include "tflite-model/tflite_learn_908594_9.h"
 #include "edge-impulse-sdk/classifier/ei_model_types.h"
 #include "edge-impulse-sdk/classifier/inferencing_engines/engines.h"
 #include "edge-impulse-sdk/classifier/postprocessing/ei_postprocessing_common.h"
@@ -80,13 +80,11 @@ ei_model_dsp_t ei_dsp_blocks_908594_1[ei_dsp_blocks_908594_1_size] = {
         nullptr, // data normalization config
     }
 };
-const ei_config_tflite_eon_graph_t ei_config_graph_908594_9 = {
+const ei_config_tflite_graph_t ei_config_graph_908594_9 = {
     .implementation_version = 1,
-    .model_init = &tflite_learn_908594_9_init,
-    .model_invoke = &tflite_learn_908594_9_invoke,
-    .model_reset = &tflite_learn_908594_9_reset,
-    .model_input = &tflite_learn_908594_9_input,
-    .model_output = &tflite_learn_908594_9_output,
+    .model = tflite_learn_908594_9,
+    .model_size = tflite_learn_908594_9_len,
+    .arena_size = tflite_learn_908594_9_arena_size
 };
 
 const uint8_t ei_output_tensors_indices_908594_9[1] = { 0 };
@@ -97,7 +95,7 @@ ei_learning_block_config_tflite_graph_t ei_learning_block_config_908594_9 = {
     .output_tensors_indices = ei_output_tensors_indices_908594_9,
     .output_tensors_size = ei_output_tensors_size_908594_9,
     .quantized = 1,
-    .compiled = 1,
+    .compiled = 0,
     .graph_config = (void*)&ei_config_graph_908594_9,
     .dequantize_output = 0,
 };
@@ -145,7 +143,7 @@ const ei_impulse_t impulse_908594_1 = {
     .project_name = "ESP-ai-wakeword",
     .impulse_id = 1,
     .impulse_name = "Impulse #1",
-    .deploy_version = 13,
+    .deploy_version = 14,
 
     .nn_input_frame_size = 3960,
     .raw_sample_count = 16000,
