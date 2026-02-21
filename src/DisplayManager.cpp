@@ -663,6 +663,11 @@ static void setupBootScreen() {
 void DisplayManager::showStatus(const char* message) {
     g_lastStatus = message;
     
+    // If no UI is active (e.g. transitioning from WiFi config), recreate boot screen
+    if (!boot_cont && !statusLabel && !g_clockTimer) {
+        setupBootScreen();
+    }
+
     if (boot_cont) {
         String m = String(message);
         String status = "";
@@ -754,6 +759,8 @@ void DisplayManager::setWiFiConfigCallback(WiFiConfigCallback cb) {
 
 void DisplayManager::showWiFiConfig() {
     lv_obj_clean(lv_scr_act());
+    boot_cont = nullptr;
+    statusLabel = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "WiFi Configuration");

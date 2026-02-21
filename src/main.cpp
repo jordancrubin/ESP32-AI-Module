@@ -31,11 +31,49 @@ String adminPassword = "";
 String ttsVoice = "alloy";
 String voiceOptions = "alloy";
 String modelOptions = "";
+float wakeThreshold = 0.8;
 
 String inputBuffer = "";
 bool isSpeaking = false;
 bool isWebServerActive = false;
 bool forceConfig = false;
+
+bool shouldConnectWiFi = false;
+String pendingSSID = "";
+String pendingPass = "";
+
+void generateTone(const char* filename, int freq, int durationMs) {
+    File file = LittleFS.open(filename, "w");
+    if (!file) return;
+
+    uint32_t sampleRate = 16000;
+    uint32_t numSamples = (sampleRate * durationMs) / 1000;
+    uint32_t dataSize = numSamples * 2;
+    uint32_t fileSize = sizeof(WavHeader) + dataSize;
+
+    WavHeader header;
+    memcpy(header.riff, "RIFF", 4);
+    header.overallSize = fileSize - 8;
+    memcpy(header.wave, "WAVE", 4);
+    memcpy(header.fmtChunkMarker, "fmt ", 4);
+    header.lengthOfFmt = 16;
+    header.formatType = 1; // PCM
+    header.channels = 1;
+    header.sampleRate = sampleRate;
+    header.byteRate = sampleRate * 2;
+    header.blockAlign = 2;
+    header.bitsPerSample = 16;
+    memcpy(header.dataChunkHeader, "data", 4);
+    header.dataSize = dataSize;
+
+    file.write((uint8_t*)&header, sizeof(WavHeader));
+
+    for (uint32_t i = 0; i < numSamples; i++) {
+        int16_t sample = (int16_t)(10000.0 * sin(2.0 * PI * freq * i / sampleRate));
+        file.write((uint8_t*)&sample, 2);
+    }
+    file.close();
+}
 
 void onVolumeChange(int value) {
     settings.volume = value;
@@ -48,7 +86,6 @@ void onAdminConfig(String pass) {
     if (pass.length() > 0) {
         adminPassword = pass;
         adminPrefs.putString("pass", adminPassword);
-        display.showStatus("Admin Password Saved");
     }
 }
 
@@ -176,6 +213,8 @@ void handleWebRoot() {
     }
     html += "</select><br>";
 
+    html += "Wake Sensitivity (0.4-0.9): <input type='number' name='wakeThreshold' value='" + String(wakeThreshold) + "' step='0.05' min='0.4' max='0.9'><br>";
+
     html += "<input type='submit' value='Save & Verify' class='btn'>";
     html += "</form>";
     html += "</body></html>";
@@ -192,51 +231,42 @@ void handleWebSave() {
     String newTz = server.hasArg("timezone") ? server.arg("timezone") : settings.timeZone;
     String newColor = server.hasArg("clockColor") ? server.arg("clockColor") : settings.clockColor;
 
-    // Temporarily apply config to test connection
-    llm.setConfig(newApiUrl, newApiKey, settings.llmModel);
+    if (server.hasArg("wakeThreshold")) {
+        float val = server.arg("wakeThreshold").toFloat();
+        if (val >= 0.1 && val <= 1.0) {
+            wakeThreshold = val;
+            adminPrefs.putFloat("wake_thresh", wakeThreshold);
+        }
+    }
+
+    // Save to NVRAM immediately
+    strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
+    strlcpy(settings.apiUrl, newApiUrl.c_str(), sizeof(settings.apiUrl));
+    strlcpy(settings.timeZone, newTz.c_str(), sizeof(settings.timeZone));
+    strlcpy(settings.clockColor, newColor.c_str(), sizeof(settings.clockColor));
+    settings.save();
+    forceConfig = false;
+
+    // Apply config and test connection
+    llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
+    setenv("TZ", settings.timeZone, 1);
+    tzset();
+
     String models = llm.getModels(network);
 
     if (models.startsWith("Error")) {
-        // Revert to old settings
-        llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
-        String html = "<html><body><h1>Connection Failed</h1><p>Error: " + models + "</p><p>Settings were <b>NOT</b> saved.</p><a href='/'>Go Back</a></body></html>";
+        String html = "<html><body><h1>Saved (Verification Failed)</h1><p>Settings saved, but API check failed: " + models + "</p><a href='/'>Go Back</a></body></html>";
         server.send(200, "text/html", html);
     } else {
-        // Success - Save to NVRAM
-        strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
-        strlcpy(settings.apiUrl, newApiUrl.c_str(), sizeof(settings.apiUrl));
-        strlcpy(settings.timeZone, newTz.c_str(), sizeof(settings.timeZone));
-        strlcpy(settings.clockColor, newColor.c_str(), sizeof(settings.clockColor));
-        settings.save();
-        forceConfig = false;
-        
-        // Apply Timezone immediately
-        setenv("TZ", settings.timeZone, 1);
-        tzset();
-        
         server.send(200, "text/html", "<html><body><h1>Saved & Verified!</h1><p>Connection successful.</p><a href='/'>Back</a></body></html>");
         Serial.println("Settings updated and verified via Web Interface");
     }
 }
 
 void onWiFiConfig(String ssid, String pass) {
-    network.setCredentials(ssid, pass);
-
-    for (int i = 1; i <= 2; i++) {
-        display.showStatus(("Connecting (" + String(i) + "/2)...").c_str());
-        lv_timer_handler(); // Force UI update to show attempt count
-        network.connect();
-        if (network.isConnected()) {
-            strlcpy(settings.wifiSSID, ssid.c_str(), sizeof(settings.wifiSSID));
-            strlcpy(settings.wifiPass, pass.c_str(), sizeof(settings.wifiPass));
-            return;
-        }
-    }
-
-    display.showStatus("Fail to connect");
-    lv_timer_handler();
-    delay(2000);
-    display.showWiFiConfig();
+    pendingSSID = ssid;
+    pendingPass = pass;
+    shouldConnectWiFi = true;
 }
 
 // Helper to URL encode the input string
@@ -503,6 +533,11 @@ void setup() {
   speaker.begin();
   speaker.setVolume(settings.volume);
 
+  // Generate beep tone if it doesn't exist
+  if (!LittleFS.exists("/beep.wav")) {
+      generateTone("/beep.wav", 1000, 200); // 1kHz, 200ms
+  }
+
   display.begin(settings.calibration);
   display.setVolumeCallback(onVolumeChange);
   display.setWiFiConfigCallback(onWiFiConfig);
@@ -526,6 +561,7 @@ void setup() {
   // Admin Password Check
   adminPassword = adminPrefs.getString("pass", "");
   ttsVoice = adminPrefs.getString("voice", "alloy");
+  wakeThreshold = adminPrefs.getFloat("wake_thresh", 0.8);
   if (adminPassword == "") {
       display.showAdminConfig();
       while (adminPassword == "") {
@@ -533,6 +569,7 @@ void setup() {
           handleSerialCommands();
           delay(5);
       }
+      display.showStatus("Admin Password Saved");
   }
 
   // WiFi Connection Logic
@@ -543,6 +580,27 @@ void setup() {
           lv_timer_handler();
           handleSerialCommands();
           delay(5);
+          
+          if (shouldConnectWiFi) {
+              shouldConnectWiFi = false;
+              for (int i = 1; i <= 2; i++) {
+                  display.showStatus(("Connecting (" + String(i) + "/2)...").c_str());
+                  lv_timer_handler();
+                  network.setCredentials(pendingSSID, pendingPass);
+                  network.connect();
+                  if (network.isConnected()) {
+                      strlcpy(settings.wifiSSID, pendingSSID.c_str(), sizeof(settings.wifiSSID));
+                      strlcpy(settings.wifiPass, pendingPass.c_str(), sizeof(settings.wifiPass));
+                      break;
+                  }
+              }
+              if (!network.isConnected()) {
+                  display.showStatus("Fail to connect");
+                  lv_timer_handler();
+                  delay(2000);
+                  display.showWiFiConfig();
+              }
+          }
       }
       Serial.println("WiFi Config Success: Saving to NVRAM.");
       settings.save();
@@ -581,6 +639,27 @@ void setup() {
               lv_timer_handler();
               handleSerialCommands();
               delay(5);
+              
+              if (shouldConnectWiFi) {
+                  shouldConnectWiFi = false;
+                  for (int i = 1; i <= 2; i++) {
+                      display.showStatus(("Connecting (" + String(i) + "/2)...").c_str());
+                      lv_timer_handler();
+                      network.setCredentials(pendingSSID, pendingPass);
+                      network.connect();
+                      if (network.isConnected()) {
+                          strlcpy(settings.wifiSSID, pendingSSID.c_str(), sizeof(settings.wifiSSID));
+                          strlcpy(settings.wifiPass, pendingPass.c_str(), sizeof(settings.wifiPass));
+                          break;
+                      }
+                  }
+                  if (!network.isConnected()) {
+                      display.showStatus("Fail to connect");
+                      lv_timer_handler();
+                      delay(2000);
+                      display.showWiFiConfig();
+                  }
+              }
           }
           Serial.println("WiFi Recovery Success: Saving to NVRAM.");
           settings.save();
@@ -631,10 +710,10 @@ void setup() {
           }
       }
 
-      // 2. Verify API Connection (3 attempts)
+      // 2. Verify API Connection (1 attempt)
       bool apiVerified = false;
-      for (int i = 0; i < 3; i++) {
-          display.showStatus(("Verifying API (" + String(i + 1) + "/3)...").c_str());
+      for (int i = 0; i < 1; i++) {
+          display.showStatus("Verifying API...");
           lv_timer_handler();
           server.handleClient(); // Keep web server alive during verification
           
@@ -692,6 +771,28 @@ void loop() {
   // Handle LVGL GUI - Skip updates during playback to prioritize audio bus bandwidth
   if (!isSpeaking) {
     lv_timer_handler();
+  }
+  
+  // Check for Wake Word if not already speaking or in web config mode
+  if (!isSpeaking && !isWebServerActive) {
+      if (speech.detectWakeWord(wakeThreshold)) {
+          Serial.println("Wake Word Detected!");
+          speaker.playSpeechFromFile("/beep.wav");
+          
+          // Flash border white twice
+          lv_obj_t * scr = lv_scr_act();
+          for (int i = 0; i < 2; i++) {
+              lv_obj_set_style_border_width(scr, 10, 0);
+              lv_obj_set_style_border_color(scr, lv_color_white(), 0);
+              lv_obj_set_style_border_side(scr, LV_BORDER_SIDE_FULL, 0);
+              lv_timer_handler();
+              delay(250);
+              lv_obj_set_style_border_width(scr, 0, 0);
+              lv_timer_handler();
+              delay(250);
+          }
+          onVoiceChange("TALK_ACTION");
+      }
   }
 
   // Keep loop responsive
