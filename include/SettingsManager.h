@@ -36,6 +36,8 @@ public:
     int brightness;
     TouchCalibration calibration;
     int silenceThreshold;
+    char openWeatherKey[65];
+    char weatherLocation[65];
 
 private:
     Preferences prefs;

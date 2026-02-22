@@ -39,6 +39,9 @@ public:
     void calibrateTouch(TouchCalibration& cal);
     bool getRawTouch(uint16_t *x, uint16_t *y);
     void clear();
+    void updateWeather(const char* temp, const char* desc);
+    char _weatherTemp[16];
+    char _weatherDesc[32];
 
 private:
     static void volumeEventHandler(lv_event_t * e);

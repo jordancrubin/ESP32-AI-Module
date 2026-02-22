@@ -20,6 +20,8 @@ SettingsManager::SettingsManager() {
     strlcpy(timeZone, "UTC0", sizeof(timeZone)); // Default to UTC
     strlcpy(clockColor, "red", sizeof(clockColor));
     silenceThreshold = 800;
+    strlcpy(openWeatherKey, "", sizeof(openWeatherKey));
+    strlcpy(weatherLocation, "New York,US", sizeof(weatherLocation));
 }
 
 void SettingsManager::begin() {
@@ -39,6 +41,8 @@ void SettingsManager::load() {
     if (prefs.isKey("tz")) prefs.getString("tz", timeZone, sizeof(timeZone));
     if (prefs.isKey("clk_col")) prefs.getString("clk_col", clockColor, sizeof(clockColor));
     silenceThreshold = prefs.getInt("sil_thresh", silenceThreshold);
+    if (prefs.isKey("ow_key")) prefs.getString("ow_key", openWeatherKey, sizeof(openWeatherKey));
+    if (prefs.isKey("ow_loc")) prefs.getString("ow_loc", weatherLocation, sizeof(weatherLocation));
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
         prefs.getBytes("cal", &calibration, sizeof(TouchCalibration));
@@ -57,4 +61,6 @@ void SettingsManager::save() {
     prefs.putString("tz", timeZone);
     prefs.putString("clk_col", clockColor);
     prefs.putInt("sil_thresh", silenceThreshold);
+    prefs.putString("ow_key", openWeatherKey);
+    prefs.putString("ow_loc", weatherLocation);
 }

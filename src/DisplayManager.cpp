@@ -161,6 +161,7 @@ struct ClockWidgets {
     lv_obj_t* colon[2];
     lv_obj_t* wifiBars[4];
     lv_obj_t* dayLabels[7];
+    lv_obj_t* weatherLabel;
 };
 
 static ClockWidgets g_clockWidgets;
@@ -236,6 +237,8 @@ DisplayManager::DisplayManager() {
     _lastVoice = "alloy";
     _lastVolume = 21;
     _voiceOptions = "alloy";
+    _weatherTemp[0] = '\0';
+    _weatherDesc[0] = '\0';
 }
 
 void DisplayManager::begin(TouchCalibration cal) {
@@ -333,6 +336,13 @@ static void clock_update_cb(lv_timer_t * t) {
              } else {
                  lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], lv_color_make(40, 40, 40), 0);
              }
+        }
+    }
+
+    // Update Weather Label if it exists
+    if (g_clockWidgets.weatherLabel && static_dm) {
+        if (strlen(static_dm->_weatherTemp) > 0) {
+            lv_label_set_text_fmt(g_clockWidgets.weatherLabel, "%s %s", static_dm->_weatherTemp, static_dm->_weatherDesc);
         }
     }
 }
@@ -439,6 +449,17 @@ static void showClockScreen() {
         lv_obj_align(g_clockWidgets.wifiBars[i], LV_ALIGN_BOTTOM_LEFT, i * 9, 0);
         lv_obj_set_style_radius(g_clockWidgets.wifiBars[i], 2, 0);
         lv_obj_set_style_border_width(g_clockWidgets.wifiBars[i], 0, 0);
+    }
+
+    // Weather Label (Bottom Left)
+    if (static_dm && strlen(static_dm->_weatherTemp) > 0) {
+        g_clockWidgets.weatherLabel = lv_label_create(lv_scr_act());
+        lv_label_set_text_fmt(g_clockWidgets.weatherLabel, "%s %s", static_dm->_weatherTemp, static_dm->_weatherDesc);
+        lv_obj_set_style_text_font(g_clockWidgets.weatherLabel, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(g_clockWidgets.weatherLabel, lv_color_make(200, 200, 200), 0);
+        lv_obj_align(g_clockWidgets.weatherLabel, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    } else {
+        g_clockWidgets.weatherLabel = nullptr;
     }
 
     // RUBINTECH Logo (Bottom Right)
@@ -992,6 +1013,11 @@ void DisplayManager::showAdminConfig() {
 }
 
 void DisplayManager::showWebConfig(String ip, String hostname) {
+    if (g_idleTimer) {
+        lv_timer_del(g_idleTimer);
+        g_idleTimer = nullptr;
+    }
+
     lv_obj_clean(lv_scr_act());
     
     lv_obj_t * title = lv_label_create(lv_scr_act());
@@ -1018,7 +1044,7 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
     lv_obj_t * note = lv_label_create(lv_scr_act());
     lv_label_set_text(note, "Use Admin Password to login");
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
-    lv_obj_align(note, LV_ALIGN_BOTTOM_MID, 0, -20);
+    lv_obj_align(note, LV_ALIGN_BOTTOM_MID, 0, -60);
 
     // Close Button
     lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
@@ -1222,4 +1248,9 @@ void DisplayManager::calibrateTouch(TouchCalibration& cal) {
     gfx->setCursor(20, SCREEN_HEIGHT/2);
     gfx->print("Calibration Saved!");
     delay(1000);
+}
+
+void DisplayManager::updateWeather(const char* temp, const char* desc) {
+    strlcpy(_weatherTemp, temp, sizeof(_weatherTemp));
+    strlcpy(_weatherDesc, desc, sizeof(_weatherDesc));
 }

@@ -38,6 +38,7 @@ bool isSpeaking = false;
 bool isWebServerActive = false;
 bool forceConfig = false;
 
+unsigned long lastWeatherUpdate = 0;
 bool shouldConnectWiFi = false;
 String pendingSSID = "";
 String pendingPass = "";
@@ -174,6 +175,33 @@ void onSetupMode(bool enabled) {
     }
 }
 
+bool getWeather() {
+    if (strlen(settings.openWeatherKey) == 0) return false;
+    if (!network.isConnected()) return false;
+
+    HTTPClient http;
+    String url = "http://api.openweathermap.org/data/2.5/weather?q=" + 
+                 String(settings.weatherLocation) + "&appid=" + 
+                 String(settings.openWeatherKey) + "&units=metric";
+    
+    http.begin(url);
+    int httpCode = http.GET();
+    bool success = false;
+    if (httpCode == 200) {
+        String payload = http.getString();
+        JsonDocument doc;
+        deserializeJson(doc, payload);
+        float temp = doc["main"]["temp"];
+        const char* desc = doc["weather"][0]["main"];
+        char tempBuf[16];
+        snprintf(tempBuf, sizeof(tempBuf), "%.0fC", temp);
+        display.updateWeather(tempBuf, desc);
+        success = true;
+    }
+    http.end();
+    return success;
+}
+
 void handleWebRoot() {
     Serial.println("Web Request: /");
     if (!server.authenticate("admin", adminPassword.c_str())) {
@@ -219,6 +247,10 @@ void handleWebRoot() {
 
     html += "Silence Threshold (300-2000): <input type='number' name='silenceThreshold' value='" + String(settings.silenceThreshold) + "' step='50' min='300' max='2000'><br>";
 
+    html += "<h3>Weather (OpenWeatherMap)</h3>";
+    html += "API Key: <input type='text' name='owKey' value='" + String(settings.openWeatherKey) + "' placeholder='Leave empty to disable'><br>";
+    html += "Location (City,CC): <input type='text' name='owLoc' value='" + String(settings.weatherLocation) + "'><br>";
+
     html += "<input type='submit' value='Save & Verify' class='btn'>";
     html += "</form>";
     html += "</body></html>";
@@ -234,6 +266,8 @@ void handleWebSave() {
     String newApiUrl = server.hasArg("apiUrl") ? server.arg("apiUrl") : settings.apiUrl;
     String newTz = server.hasArg("timezone") ? server.arg("timezone") : settings.timeZone;
     String newColor = server.hasArg("clockColor") ? server.arg("clockColor") : settings.clockColor;
+    String newOwKey = server.hasArg("owKey") ? server.arg("owKey") : settings.openWeatherKey;
+    String newOwLoc = server.hasArg("owLoc") ? server.arg("owLoc") : settings.weatherLocation;
 
     if (server.hasArg("wakeThreshold")) {
         float val = server.arg("wakeThreshold").toFloat();
@@ -255,6 +289,8 @@ void handleWebSave() {
     strlcpy(settings.apiUrl, newApiUrl.c_str(), sizeof(settings.apiUrl));
     strlcpy(settings.timeZone, newTz.c_str(), sizeof(settings.timeZone));
     strlcpy(settings.clockColor, newColor.c_str(), sizeof(settings.clockColor));
+    strlcpy(settings.openWeatherKey, newOwKey.c_str(), sizeof(settings.openWeatherKey));
+    strlcpy(settings.weatherLocation, newOwLoc.c_str(), sizeof(settings.weatherLocation));
     settings.save();
     forceConfig = false;
 
@@ -262,6 +298,9 @@ void handleWebSave() {
     llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
     setenv("TZ", settings.timeZone, 1);
     tzset();
+
+    // Refresh weather immediately if configured
+    if (newOwKey.length() > 0) getWeather();
 
     String models = llm.getModels(network);
 
@@ -376,6 +415,8 @@ void handleSerialCommands() {
           Serial.printf("Timezone:   %s\n", settings.timeZone);
           Serial.printf("Clock Color:%s\n", settings.clockColor);
           Serial.printf("Brightness: %d / 255\n", settings.brightness);
+          Serial.printf("Wake Thresh: %.2f\n", wakeThreshold);
+          Serial.printf("Silence Thr: %d\n", settings.silenceThreshold);
           Serial.printf("Touch Cal:  %s (%d,%d to %d,%d)\n", 
             settings.calibration.isValid ? "Valid" : "Invalid",
             settings.calibration.xMin, settings.calibration.yMin,
@@ -555,6 +596,7 @@ void setup() {
   display.setAdminConfigCallback(onAdminConfig);
   display.setVoiceCallback(onVoiceChange);
   display.setSetupModeCallback(onSetupMode);
+  display.showStatus("Rubintech 2026");
 
   // Check for touch calibration status
   if (settings.calibration.isValid) {
@@ -640,6 +682,14 @@ void setup() {
           setenv("TZ", settings.timeZone, 1);
           tzset();
           display.showStatus("Time Configured|OK");
+
+          // Initial Weather Check
+          if (strlen(settings.openWeatherKey) > 0) {
+              display.showStatus("Checking Weather...");
+              if (getWeather()) display.showStatus("Weather Updated|OK");
+              else display.showStatus("Weather Error|FAIL");
+              lastWeatherUpdate = millis();
+          }
       }
 
       if (!network.isConnected()) {
@@ -782,6 +832,14 @@ void loop() {
   // Handle LVGL GUI - Skip updates during playback to prioritize audio bus bandwidth
   if (!isSpeaking) {
     lv_timer_handler();
+  }
+
+  // Hourly Weather Update
+  if (strlen(settings.openWeatherKey) > 0 && network.isConnected()) {
+      if (millis() - lastWeatherUpdate > 3600000) { // 1 hour
+          getWeather();
+          lastWeatherUpdate = millis();
+      }
   }
   
   // Check for Wake Word if not already speaking or in web config mode
