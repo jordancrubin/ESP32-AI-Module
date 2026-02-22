@@ -35,6 +35,7 @@ public:
     int volume;
     int brightness;
     TouchCalibration calibration;
+    int silenceThreshold;
 
 private:
     Preferences prefs;

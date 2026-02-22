@@ -116,7 +116,7 @@ void onVoiceChange(String voice) {
         
         size_t wavSize = 0;
         // Record for 15 seconds (adjust as needed)
-        uint8_t* wavData = speech.record(15000, &wavSize);
+        uint8_t* wavData = speech.record(15000, &wavSize, settings.silenceThreshold);
         
         if (wavData && wavSize > 0) {
             // 2. Transcribe
@@ -151,7 +151,9 @@ void onVoiceChange(String voice) {
                 }
             }
         } else {
-            display.showStatus("Record Failed");
+            display.showStatus("No Speech");
+            delay(1500);
+            display.showStatus("Tap to Talk");
         }
     } else {
         ttsVoice = voice;
@@ -215,6 +217,8 @@ void handleWebRoot() {
 
     html += "Wake Sensitivity (0.4-0.9): <input type='number' name='wakeThreshold' value='" + String(wakeThreshold) + "' step='0.05' min='0.4' max='0.9'><br>";
 
+    html += "Silence Threshold (300-2000): <input type='number' name='silenceThreshold' value='" + String(settings.silenceThreshold) + "' step='50' min='300' max='2000'><br>";
+
     html += "<input type='submit' value='Save & Verify' class='btn'>";
     html += "</form>";
     html += "</body></html>";
@@ -236,6 +240,13 @@ void handleWebSave() {
         if (val >= 0.1 && val <= 1.0) {
             wakeThreshold = val;
             adminPrefs.putFloat("wake_thresh", wakeThreshold);
+        }
+    }
+
+    if (server.hasArg("silenceThreshold")) {
+        int val = server.arg("silenceThreshold").toInt();
+        if (val >= 300 && val <= 2000) {
+            settings.silenceThreshold = val;
         }
     }
 
@@ -413,7 +424,7 @@ void handleSerialCommands() {
           speaker.stop(); // Stop any playback
           
           size_t wavSize = 0;
-          uint8_t* wavData = speech.record(5000, &wavSize);
+          uint8_t* wavData = speech.record(5000, &wavSize, settings.silenceThreshold);
           
           if (wavData && wavSize > 0) {
               Serial.printf("Recording complete. Size: %d bytes\n", wavSize);

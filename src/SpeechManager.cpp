@@ -180,7 +180,7 @@ bool SpeechManager::detectWakeWord(float threshold) {
     return false;
 }
 
-uint8_t* SpeechManager::record(int durationMs, size_t* outSize) {
+uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThreshold) {
     size_t sampleRate = 16000;
     size_t numSamples = (sampleRate * durationMs) / 1000;
     size_t dataSize = numSamples * 2; // 16-bit = 2 bytes per sample
@@ -228,9 +228,9 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize) {
     size_t samplesRead = 0;
     
     unsigned long silenceStart = millis();
-    const int SILENCE_THRESHOLD = 50; // Amplitude threshold for "quiet" (after 2x gain)
     const unsigned long SILENCE_DURATION = 3000; // Stop after 3 seconds of silence
     float rec_dc_offset = 0.0f;
+    bool voiceDetectedTotal = false;
 
     while (samplesRead < numSamples) {
         i2s_channel_read(rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY);
@@ -250,8 +250,9 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize) {
             if (raw > 32767) raw = 32767;
             else if (raw < -32768) raw = -32768;
             
-            if (abs(raw) > SILENCE_THRESHOLD) {
+            if (abs(raw) > silenceThreshold) {
                 voiceDetectedInBatch = true;
+                voiceDetectedTotal = true;
             }
             
             pcmBuffer[samplesRead++] = (int16_t)raw;
@@ -261,7 +262,12 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize) {
             silenceStart = millis(); // Reset timer if we hear something
         } else {
             if (millis() - silenceStart > SILENCE_DURATION) {
-                Serial.println("Silence detected, stopping recording.");
+                if (!voiceDetectedTotal) {
+                    Serial.println("Abort: No speech detected (Silence).");
+                    free(wavBuffer);
+                    return nullptr;
+                }
+                Serial.println("Silence detected after speech. Processing recording.");
                 break;
             }
         }

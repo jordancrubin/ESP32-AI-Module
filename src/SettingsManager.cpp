@@ -19,6 +19,7 @@ SettingsManager::SettingsManager() {
     calibration = {0, 0, 0, 0, false};
     strlcpy(timeZone, "UTC0", sizeof(timeZone)); // Default to UTC
     strlcpy(clockColor, "red", sizeof(clockColor));
+    silenceThreshold = 800;
 }
 
 void SettingsManager::begin() {
@@ -37,6 +38,7 @@ void SettingsManager::load() {
     brightness = prefs.getInt("bri", brightness);
     if (prefs.isKey("tz")) prefs.getString("tz", timeZone, sizeof(timeZone));
     if (prefs.isKey("clk_col")) prefs.getString("clk_col", clockColor, sizeof(clockColor));
+    silenceThreshold = prefs.getInt("sil_thresh", silenceThreshold);
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
         prefs.getBytes("cal", &calibration, sizeof(TouchCalibration));
@@ -54,4 +56,5 @@ void SettingsManager::save() {
     prefs.putBytes("cal", &calibration, sizeof(TouchCalibration));
     prefs.putString("tz", timeZone);
     prefs.putString("clk_col", clockColor);
+    prefs.putInt("sil_thresh", silenceThreshold);
 }

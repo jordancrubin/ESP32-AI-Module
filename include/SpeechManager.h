@@ -8,7 +8,7 @@ public:
     SpeechManager();
     void begin();
     bool detectWakeWord(float threshold);
-    uint8_t* record(int durationMs, size_t* outSize);
+    uint8_t* record(int durationMs, size_t* outSize, int silenceThreshold);
 
 private:
     void setupI2S();
