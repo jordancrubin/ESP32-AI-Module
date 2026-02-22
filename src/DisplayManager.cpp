@@ -29,7 +29,7 @@ static bool touch_disabled = false;
 static String g_lastVoice = "alloy";
 static int g_lastVolume = 21;
 static String g_voiceOptions = "alloy";
-static String g_lastStatus = "Tap to Talk";
+static String g_lastStatus = "Ready";
 static lv_timer_t * g_clockTimer = nullptr;
 static lv_timer_t * g_idleTimer = nullptr;
 static void showVoiceModelConfig();
@@ -635,18 +635,17 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
 
     // --- Status Area (Center/Bottom) ---
 
-    // Talk Button (Replaces Status Box)
-    lv_obj_t * btnTalk = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(btnTalk, 300, 160);
-    lv_obj_align(btnTalk, LV_ALIGN_BOTTOM_MID, 0, -10);
-    lv_obj_set_style_bg_color(btnTalk, lv_color_make(50, 50, 50), 0);
-    lv_obj_set_style_radius(btnTalk, 10, 0);
-    lv_obj_add_event_cb(btnTalk, [](lv_event_t * e){
-        if (g_voiceCb) g_voiceCb("TALK_ACTION");
-    }, LV_EVENT_CLICKED, NULL);
+    // Status Container (Visual background for text, no interaction)
+    lv_obj_t * statusCont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(statusCont, 300, 160);
+    lv_obj_align(statusCont, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_color(statusCont, lv_color_make(50, 50, 50), 0);
+    lv_obj_set_style_radius(statusCont, 10, 0);
+    lv_obj_set_style_border_width(statusCont, 0, 0);
+    lv_obj_clear_flag(statusCont, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Status Label (On Button)
-    statusLabel = lv_label_create(btnTalk);
+    // Status Label (On Container)
+    statusLabel = lv_label_create(statusCont);
     lv_label_set_text(statusLabel, g_lastStatus.c_str());
     lv_obj_set_width(statusLabel, 280);
     lv_obj_align(statusLabel, LV_ALIGN_CENTER, 0, 0);

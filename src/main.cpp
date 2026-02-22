@@ -42,6 +42,8 @@ unsigned long lastWeatherUpdate = 0;
 bool shouldConnectWiFi = false;
 String pendingSSID = "";
 String pendingPass = "";
+static bool isProcessing = false;
+static bool stopRequested = false;
 
 void generateTone(const char* filename, int freq, int durationMs) {
     File file = LittleFS.open(filename, "w");
@@ -104,58 +106,80 @@ void onVoiceChange(String voice) {
         llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
         Serial.println("Model changed to: " + String(settings.llmModel));
     } else if (voice == "TALK_ACTION") {
-        if (isSpeaking) {
+        if (isProcessing) {
+            stopRequested = true;
             speaker.stop();
             isSpeaking = false;
-            display.showStatus("Tap to Talk");
+            display.showStatus("Ready");
             return;
         }
 
-        // 1. Record
-        display.showStatus("Listening...");
-        lv_timer_handler(); // Force UI update
-        
-        size_t wavSize = 0;
-        // Record for 15 seconds (adjust as needed)
-        uint8_t* wavData = speech.record(15000, &wavSize, settings.silenceThreshold);
-        
-        if (wavData && wavSize > 0) {
-            // 2. Transcribe
-            display.showStatus("Transcribing...");
-            lv_timer_handler();
-            String text = llm.transcribeAudio(wavData, wavSize, network);
-            free(wavData); // Free PSRAM immediately
+        isProcessing = true;
+        stopRequested = false;
+
+        while (!stopRequested) {
+            // 1. Record
+            display.showStatus("Listening...");
+            lv_timer_handler(); // Force UI update
             
-            if (text.startsWith("Error")) {
-                Serial.println("Transcription Failed: " + text);
-                display.showStatus(text.c_str());
-            } else {
-                Serial.println("Transcription: " + text);
-                
-                // 3. Send to LLM
-                display.showStatus("Thinking...");
+            size_t wavSize = 0;
+            // Record for 15 seconds (adjust as needed)
+            uint8_t* wavData = speech.record(15000, &wavSize, settings.silenceThreshold);
+            
+            if (wavData && wavSize > 0) {
+                // 2. Transcribe
+                display.showStatus("Transcribing...");
                 lv_timer_handler();
+                String text = llm.transcribeAudio(wavData, wavSize, network);
+                free(wavData); // Free PSRAM immediately
                 
-                String answer = llm.sendPrompt(text, network);
-                Serial.println("Answer: " + answer);
-                
-                // 4. TTS
-                display.showStatus("Speaking...");
-                // Ensure any previous TTS file is removed to free space before downloading
-                if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
-                
-                if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
-                    speaker.playSpeechFromFile("/speech.mp3");
-                    isSpeaking = true;
+                if (text.startsWith("Error")) {
+                    Serial.println("Transcription Failed: " + text);
+                    display.showStatus(text.c_str());
+                    break; // Stop loop on error
                 } else {
-                    display.showStatus("TTS Failed");
+                    Serial.println("Transcription: " + text);
+                    
+                    // 3. Send to LLM
+                    display.showStatus("Thinking...");
+                    lv_timer_handler();
+                    
+                    String answer = llm.sendPrompt(text, network);
+                    Serial.println("Answer: " + answer);
+                    
+                    // 4. TTS
+                    display.showStatus("Speaking...");
+                    // Ensure any previous TTS file is removed to free space before downloading
+                    if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
+                    
+                    if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
+                        speaker.playSpeechFromFile("/speech.mp3");
+                        isSpeaking = true;
+                        lv_timer_handler(); // Update UI once to show "Speaking"
+                        
+                        // Wait for playback to finish (Blocking UI to prevent audio glitches)
+                        while (speaker.isRunning()) {
+                            delay(50);
+                        }
+                        isSpeaking = false;
+                    } else {
+                        display.showStatus("TTS Failed");
+                        break;
+                    }
                 }
+            } else {
+                display.showStatus("No Speech");
+                delay(1500);
+                
+                // Flush history on silence/abort
+                llm.clearHistory();
+                Serial.println("Conversation ended (Silence). History cleared.");
+                break;
             }
-        } else {
-            display.showStatus("No Speech");
-            delay(1500);
-            display.showStatus("Tap to Talk");
         }
+        
+        isProcessing = false;
+        display.showStatus("Ready");
     } else {
         ttsVoice = voice;
         adminPrefs.putString("voice", ttsVoice);
@@ -819,7 +843,7 @@ void setup() {
   
   // Final UI Load
   display.showMainUI(ttsVoice, settings.volume, voiceOptions);
-  display.showStatus("Tap to Talk");
+  display.showStatus("Ready");
   
   Serial.println("Boot complete. Type prompt in Serial.");
   
@@ -870,7 +894,7 @@ void loop() {
   // Check if speaking finished
   if (isSpeaking && !speaker.isRunning()) {
       isSpeaking = false;
-      String waitMsg = "Tap to Talk\nRSSI: " + String(network.getSignalStrength()) + " dBm";
+      String waitMsg = "Ready\nRSSI: " + String(network.getSignalStrength()) + " dBm";
       display.showStatus(waitMsg.c_str());
   }
   handleSerialCommands();
