@@ -22,6 +22,7 @@ SettingsManager::SettingsManager() {
     silenceThreshold = 800;
     strlcpy(openWeatherKey, "", sizeof(openWeatherKey));
     strlcpy(weatherLocation, "New York,US", sizeof(weatherLocation));
+    micMode = 1; // Default to Left Channel Only (0=Stereo, 1=Left, 2=Right)
 }
 
 void SettingsManager::begin() {
@@ -43,6 +44,7 @@ void SettingsManager::load() {
     silenceThreshold = prefs.getInt("sil_thresh", silenceThreshold);
     if (prefs.isKey("ow_key")) prefs.getString("ow_key", openWeatherKey, sizeof(openWeatherKey));
     if (prefs.isKey("ow_loc")) prefs.getString("ow_loc", weatherLocation, sizeof(weatherLocation));
+    micMode = prefs.getInt("mic_mode", micMode);
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
         prefs.getBytes("cal", &calibration, sizeof(TouchCalibration));
@@ -63,4 +65,5 @@ void SettingsManager::save() {
     prefs.putInt("sil_thresh", silenceThreshold);
     prefs.putString("ow_key", openWeatherKey);
     prefs.putString("ow_loc", weatherLocation);
+    prefs.putInt("mic_mode", micMode);
 }

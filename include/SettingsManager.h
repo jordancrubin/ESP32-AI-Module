@@ -38,6 +38,7 @@ public:
     int silenceThreshold;
     char openWeatherKey[65];
     char weatherLocation[65];
+    int micMode; // 0=Stereo, 1=Left, 2=Right
 
 private:
     Preferences prefs;

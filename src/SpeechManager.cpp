@@ -1,6 +1,6 @@
 /*
   SpeechManager.cpp - ESP32 AI Module Audio Input
-  Handles I2S microphone recording (INMP441) and buffer management.
+  Handles I2S microphone recording (ICS-43434) and buffer management.
   
   https://www.youtube.com/@retrotechandelectronics
   2026 Jordan Rubin.
@@ -8,6 +8,8 @@
 
 #include "SpeechManager.h"
 #include <ESP-ai-wakeword_inferencing.h>
+#include "SettingsManager.h"
+extern SettingsManager settings;
 
 // Pointer to the buffer for the static callback
 static float *s_inference_buffer = nullptr;
@@ -69,24 +71,34 @@ bool SpeechManager::detectWakeWord(float threshold) {
     // 1. Read available audio data from I2S (Non-blocking)
     size_t bytes_read = 0;
     int32_t i2s_buffer[256]; // Temporary buffer for raw I2S data
-    // Use small timeout (10ms) to ensure we get a full chunk of aligned data
-    i2s_channel_read(rx_handle, i2s_buffer, sizeof(i2s_buffer), &bytes_read, pdMS_TO_TICKS(10));
+    // Note: i2s_channel_read expects timeout in ms for ESP-IDF 5.x
+    esp_err_t err = i2s_channel_read(rx_handle, i2s_buffer, sizeof(i2s_buffer), &bytes_read, 20);
+    
+    if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+        Serial.printf("I2S Read Error: %d\n", err);
+        return false;
+    }
     
     if (bytes_read == 0) return false;
 
     // Debug: Print raw I2S data periodically to verify hardware input
-    // static unsigned long last_raw_debug = 0;
-    // if (millis() - last_raw_debug > 2000 && bytes_read >= 8) {
-    //     Serial.printf("Raw I2S Hex: L=0x%08X R=0x%08X\n", i2s_buffer[0], i2s_buffer[1]);
-    //     // Warn if we are reading partial frames (desync risk)
-    //     if (bytes_read % 8 != 0) {
-    //         Serial.printf("WARNING: I2S read misaligned! Bytes: %d\n", bytes_read);
-    //     }
-    //     last_raw_debug = millis();
-    // }
+    static unsigned long last_raw_debug = 0;
+    if (millis() - last_raw_debug > 1000 && bytes_read >= 8) {
+        // Dynamic Gain: Single mic (Mode 1/2) gets more boost (>>13) than Stereo (>>14)
+        int shift = (settings.micMode == 0) ? 14 : 13;
+        int32_t l = i2s_buffer[0] >> shift;
+        int32_t r = i2s_buffer[1] >> shift;
+        int32_t debug_raw;
+        if (settings.micMode == 1) debug_raw = l;
+        else if (settings.micMode == 2) debug_raw = r;
+        else debug_raw = (l + r) / 2;
+        Serial.printf("I2S Debug - Mode: %d | L: %d | R: %d | Raw: %d\n", settings.micMode, l, r, debug_raw);
+        last_raw_debug = millis();
+    }
 
     // 2. Process samples and fill inference buffer
-    int samplesRead = bytes_read / 4; // 32-bit samples
+    // Ensure we process complete stereo frames (2 samples * 4 bytes = 8 bytes)
+    int samplesRead = (bytes_read / 8) * 2; 
     
     // Use static to persist peak level across multiple calls until inference runs
     static int32_t max_audio_level = 0;
@@ -94,11 +106,16 @@ bool SpeechManager::detectWakeWord(float threshold) {
     static int32_t debug_min_val = 32767;
     static int32_t debug_max_val = -32768;
 
-    for (int i = 0; i < samplesRead; i += 2) { // Stereo -> Mono (Left Channel)
-        // Convert 32-bit int to float
-        // BIT SHIFT: Slide the 32-bit data right by 12 bits (was 15).
-        // This provides 8x gain to boost quiet microphones (INMP441/ICS-43434).
-        int32_t raw = i2s_buffer[i] >> 14; 
+    for (int i = 0; i < samplesRead; i += 2) { // Stereo -> Mono (Beamforming Mix)
+        // Dynamic Gain: Single mic (Mode 1/2) gets more boost (>>13) than Stereo (>>14)
+        int shift = (settings.micMode == 0) ? 14 : 13;
+        
+        int32_t left = i2s_buffer[i] >> shift;
+        int32_t right = i2s_buffer[i+1] >> shift;
+        int32_t raw;
+        if (settings.micMode == 1) raw = left;
+        else if (settings.micMode == 2) raw = right;
+        else raw = (left + right) / 2; // Broadside Beamforming (Sum/Avg)
 
         // Remove DC Offset (High-pass filter) to prevent early clipping
         // Adjusted to 0.995f (approx 13Hz cutoff) to preserve voice body
@@ -237,11 +254,17 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
         int samplesInBatch = bytesRead / 4; // Number of 32-bit samples
         
         bool voiceDetectedInBatch = false;
-        // We are reading STEREO (L/R interleaved), but we only want LEFT channel (index 0, 2, 4...)
-        // This fixes the "Slow Playback" issue caused by capturing both slots as mono data.
+        // We are reading STEREO (L/R interleaved).
+        // Apply Broadside Beamforming (Average L+R) to reduce noise.
         for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i += 2) {
-            // Shift by 15 for safe 2x gain
-            int32_t raw = sampleBuffer[i] >> 15; 
+            // Match gain settings from wake word detection
+            int shift = (settings.micMode == 0) ? 14 : 13;
+            int32_t left = sampleBuffer[i] >> shift;
+            int32_t right = sampleBuffer[i+1] >> shift;
+            int32_t raw;
+            if (settings.micMode == 1) raw = left;
+            else if (settings.micMode == 2) raw = right;
+            else raw = (left + right) / 2;
             
             // Remove DC Offset
             rec_dc_offset = (rec_dc_offset * 0.995f) + ((float)raw * 0.005f);

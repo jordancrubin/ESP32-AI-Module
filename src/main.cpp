@@ -72,7 +72,24 @@ void generateTone(const char* filename, int freq, int durationMs) {
     file.write((uint8_t*)&header, sizeof(WavHeader));
 
     for (uint32_t i = 0; i < numSamples; i++) {
-        int16_t sample = (int16_t)(10000.0 * sin(2.0 * PI * freq * i / sampleRate));
+        float t = (float)i / sampleRate;
+        float duration = (float)durationMs / 1000.0;
+        
+        // Envelope: Fast attack (5ms), Quadratic decay for a "bell" shape
+        float envelope = 0.0f;
+        if (t < 0.005f) {
+            envelope = t / 0.005f;
+        } else {
+            float decayPos = (t - 0.005f) / (duration - 0.005f);
+            if (decayPos > 1.0f) decayPos = 1.0f;
+            envelope = (1.0f - decayPos) * (1.0f - decayPos);
+        }
+
+        // Synthesis: Fundamental + 2nd Harmonic (Octave) for richness
+        float wave = sin(2.0f * PI * freq * t) + 0.5f * sin(2.0f * PI * (freq * 2.0f) * t);
+        
+        // Scale to 16-bit (Max ~24000)
+        int16_t sample = (int16_t)(24000.0f * envelope * wave / 1.5f);
         file.write((uint8_t*)&sample, 2);
     }
     file.close();
@@ -271,6 +288,15 @@ void handleWebRoot() {
 
     html += "Silence Threshold (300-2000): <input type='number' name='silenceThreshold' value='" + String(settings.silenceThreshold) + "' step='50' min='300' max='2000'><br>";
 
+    html += "Microphone Mode: <select name='micMode'>";
+    String micModes[] = {"Stereo (Beamforming)", "Left Channel Only", "Right Channel Only"};
+    for (int i = 0; i < 3; i++) {
+        html += "<option value='" + String(i) + "'";
+        if (settings.micMode == i) html += " selected";
+        html += ">" + micModes[i] + "</option>";
+    }
+    html += "</select><br>";
+
     html += "<h3>Weather (OpenWeatherMap)</h3>";
     html += "API Key: <input type='text' name='owKey' value='" + String(settings.openWeatherKey) + "' placeholder='Leave empty to disable'><br>";
     html += "Location (City,CC): <input type='text' name='owLoc' value='" + String(settings.weatherLocation) + "'><br>";
@@ -306,6 +332,10 @@ void handleWebSave() {
         if (val >= 300 && val <= 2000) {
             settings.silenceThreshold = val;
         }
+    }
+
+    if (server.hasArg("micMode")) {
+        settings.micMode = server.arg("micMode").toInt();
     }
 
     // Save to NVRAM immediately
@@ -609,9 +639,9 @@ void setup() {
   speaker.begin();
   speaker.setVolume(settings.volume);
 
-  // Generate beep tone if it doesn't exist
-  if (!LittleFS.exists("/beep.wav")) {
-      generateTone("/beep.wav", 1000, 200); // 1kHz, 200ms
+  // Generate chime tone if it doesn't exist (Updated to 880Hz "Ding")
+  if (!LittleFS.exists("/chime.wav")) {
+      generateTone("/chime.wav", 880, 250); // A5, 250ms
   }
 
   display.begin(settings.calibration);
@@ -870,7 +900,7 @@ void loop() {
   if (!isSpeaking && !isWebServerActive) {
       if (speech.detectWakeWord(wakeThreshold)) {
           Serial.println("Wake Word Detected!");
-          speaker.playSpeechFromFile("/beep.wav");
+          speaker.playSpeechFromFile("/chime.wav");
           
           // Flash border white twice
           lv_obj_t * scr = lv_scr_act();
