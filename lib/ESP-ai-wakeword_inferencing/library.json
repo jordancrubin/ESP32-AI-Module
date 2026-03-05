@@ -1,0 +1,16 @@
+{
+    "name": "ESP-ai-wakeword_inferencing",
+    "version": "1.0.0",
+    "build": {
+        "flags": [
+            "-Dkiss_fft_alloc=ei_kiss_fft_alloc",
+            "-Dkiss_fft_stride=ei_kiss_fft_stride",
+            "-Dkiss_fft=ei_kiss_fft",
+            "-Dkiss_fft_cleanup=ei_kiss_fft_cleanup",
+            "-Dkiss_fft_next_fast_size=ei_kiss_fft_next_fast_size",
+            "-Dkiss_fftr_alloc=ei_kiss_fftr_alloc",
+            "-Dkiss_fftr=ei_kiss_fftr",
+            "-Dkiss_fftri=ei_kiss_fftri"
+        ]
+    }
+}

@@ -2,6 +2,8 @@
 #include <Arduino.h>
 #include <driver/i2s_std.h>
 #include "Config.h"
+#include <speex/speex_echo.h>
+#include <speex/speex_preprocess.h>
 
 class SpeechManager {
 public:
@@ -9,6 +11,7 @@ public:
     void begin();
     bool detectWakeWord(float threshold);
     uint8_t* record(int durationMs, size_t* outSize, int silenceThreshold);
+    void feedReference(const int16_t *data, size_t samples);
 
 private:
     void setupI2S();

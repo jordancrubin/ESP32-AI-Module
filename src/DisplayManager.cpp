@@ -36,6 +36,9 @@ static void showVoiceModelConfig();
 static void setupBootScreen();
 static lv_obj_t * boot_cont = nullptr;
 static VoiceCallback g_voiceCb = nullptr;
+static uint16_t * s_boot_buffer = nullptr;
+static uint16_t s_boot_w = 0;
+static uint16_t s_boot_h = 0;
 
 static void localVoiceEventHandler(lv_event_t * e) {
     if (g_voiceCb) {
@@ -208,6 +211,16 @@ bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) 
     return true;
 }
 
+// Callback for decoding JPG to memory buffer
+static bool memory_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
+    if (s_boot_buffer) {
+        for (int j = 0; j < h; j++) {
+            memcpy(&s_boot_buffer[(y + j) * s_boot_w + x], &bitmap[j * w], w * 2);
+        }
+    }
+    return true;
+}
+
 VolumeCallback DisplayManager::volumeCb = nullptr;
 WiFiConfigCallback DisplayManager::wifiCb = nullptr;
 APIConfigCallback DisplayManager::apiCb = nullptr;
@@ -239,6 +252,7 @@ DisplayManager::DisplayManager() {
     _voiceOptions = "alloy";
     _weatherTemp[0] = '\0';
     _weatherDesc[0] = '\0';
+    _currentBrightness = 255;
 }
 
 void DisplayManager::begin(TouchCalibration cal) {
@@ -247,9 +261,10 @@ void DisplayManager::begin(TouchCalibration cal) {
     gfx->setRotation(3);
     delay(100);
 
-    // Initialize Backlight (Digital Mode)
-    pinMode(TFT_BL, OUTPUT);
-    digitalWrite(TFT_BL, HIGH);
+    // Initialize Backlight (PWM Mode)
+    ledcAttach(TFT_BL, 5000, 8); // 5kHz, 8-bit resolution
+    ledcWrite(TFT_BL, 255);      // Start at full brightness
+    _currentBrightness = 255;
 
     gfx->setFont(&FreeSans12pt7b);
 
@@ -666,6 +681,25 @@ void DisplayManager::clear() {
     if (statusLabel) lv_label_set_text(statusLabel, "");
 }
 
+void DisplayManager::setBacklight(uint8_t brightness) {
+    ledcWrite(TFT_BL, brightness);
+    _currentBrightness = brightness;
+}
+
+void DisplayManager::fadeBacklight(uint8_t target, int durationMs) {
+    int start = _currentBrightness;
+    int steps = 50; // Number of steps for the fade
+    int delayTime = durationMs / steps;
+    
+    for (int i = 1; i <= steps; i++) {
+        int val = start + ((target - start) * i / steps);
+        ledcWrite(TFT_BL, val);
+        delay(delayTime);
+    }
+    ledcWrite(TFT_BL, target);
+    _currentBrightness = target;
+}
+
 static void setupBootScreen() {
     lv_obj_clean(lv_scr_act());
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
@@ -714,7 +748,8 @@ void DisplayManager::showStatus(const char* message) {
             lv_obj_set_style_text_font(st, &lv_font_montserrat_14, 0);
             lv_obj_align(st, LV_ALIGN_RIGHT_MID, 0, 0);
         }
-        lv_obj_scroll_to_view(row, LV_ANIM_ON);
+        lv_obj_update_layout(boot_cont);
+        lv_obj_scroll_to_view(row, LV_ANIM_OFF);
         lv_timer_handler(); // Force update
         return;
     }

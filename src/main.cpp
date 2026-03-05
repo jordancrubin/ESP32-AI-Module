@@ -49,7 +49,7 @@ void generateTone(const char* filename, int freq, int durationMs) {
     File file = LittleFS.open(filename, "w");
     if (!file) return;
 
-    uint32_t sampleRate = 16000;
+    uint32_t sampleRate = 24000; // Match I2S default rate
     uint32_t numSamples = (sampleRate * durationMs) / 1000;
     uint32_t dataSize = numSamples * 2;
     uint32_t fileSize = sizeof(WavHeader) + dataSize;
@@ -85,11 +85,14 @@ void generateTone(const char* filename, int freq, int durationMs) {
             envelope = (1.0f - decayPos) * (1.0f - decayPos);
         }
 
-        // Synthesis: Fundamental + 2nd Harmonic (Octave) for richness
-        float wave = sin(2.0f * PI * freq * t) + 0.5f * sin(2.0f * PI * (freq * 2.0f) * t);
+        // Synthesis: Fundamental + Sub-Octave (Depth) + 2nd Harmonic (Clarity)
+        float wave = sin(2.0f * PI * freq * t) + 
+                     0.6f * sin(2.0f * PI * (freq * 0.5f) * t) + 
+                     0.3f * sin(2.0f * PI * (freq * 2.0f) * t);
         
-        // Scale to 16-bit (Max ~24000)
-        int16_t sample = (int16_t)(24000.0f * envelope * wave / 1.5f);
+        // Scale to 16-bit (Increased to ~30000 for max volume without clipping)
+        // Normalization factor: 1.0 + 0.6 + 0.3 = 1.9
+        int16_t sample = (int16_t)(30000.0f * envelope * wave / 1.9f);
         file.write((uint8_t*)&sample, 2);
     }
     file.close();
@@ -640,8 +643,8 @@ void setup() {
   speaker.setVolume(settings.volume);
 
   // Generate chime tone if it doesn't exist (Updated to 880Hz "Ding")
-  if (!LittleFS.exists("/chime.wav")) {
-      generateTone("/chime.wav", 880, 250); // A5, 250ms
+  if (!LittleFS.exists("/chime_660.wav")) {
+      generateTone("/chime_660.wav", 660, 600); // 660Hz, 600ms
   }
 
   display.begin(settings.calibration);
@@ -650,7 +653,6 @@ void setup() {
   display.setAdminConfigCallback(onAdminConfig);
   display.setVoiceCallback(onVoiceChange);
   display.setSetupModeCallback(onSetupMode);
-  display.showStatus("Rubintech 2026");
 
   // Check for touch calibration status
   if (settings.calibration.isValid) {
@@ -663,7 +665,10 @@ void setup() {
   }
 
   display.showBootLogo(); // Show the logo immediately
-  delay(3000); // Wait 3 seconds so we can see the logo
+  delay(3000); // Wait 3 seconds to see logo
+  
+  display.showStatus("AI Interactor Version " FIRMWARE_VERSION);
+  display.showStatus("Retrotech&Electronics");
 
   // Admin Password Check
   adminPassword = adminPrefs.getString("pass", "");
@@ -900,7 +905,7 @@ void loop() {
   if (!isSpeaking && !isWebServerActive) {
       if (speech.detectWakeWord(wakeThreshold)) {
           Serial.println("Wake Word Detected!");
-          speaker.playSpeechFromFile("/chime.wav");
+          speaker.playSpeechFromFile("/chime_660.wav");
           
           // Flash border white twice
           lv_obj_t * scr = lv_scr_act();

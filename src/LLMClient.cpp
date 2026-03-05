@@ -6,6 +6,7 @@
   2026 Jordan Rubin.
 */
 #include "LLMClient.h"
+#include <FS.h>
 #include <LittleFS.h>
 
 LLMClient::LLMClient(const char* apiUrl, const char* apiKey, const char* model)

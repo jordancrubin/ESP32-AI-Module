@@ -39,6 +39,8 @@ public:
     void calibrateTouch(TouchCalibration& cal);
     bool getRawTouch(uint16_t *x, uint16_t *y);
     void clear();
+    void fadeBacklight(uint8_t target, int durationMs);
+    void setBacklight(uint8_t brightness);
     void updateWeather(const char* temp, const char* desc);
     char _weatherTemp[16];
     char _weatherDesc[32];
@@ -70,4 +72,5 @@ private:
     String _lastVoice;
     int _lastVolume;
     String _voiceOptions;
+    uint8_t _currentBrightness;
 };

@@ -41,3 +41,5 @@ extern const char* WIFI_PASS;
 extern const char* OPENWEBUI_URL;
 extern const char* OPENWEBUI_KEY;
 extern const char* LLM_MODEL;
+
+#define FIRMWARE_VERSION "0.0.2A"

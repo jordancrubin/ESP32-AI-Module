@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
-#include "Audio.h"
 #include "Config.h"
+#include <driver/i2s_std.h>
 
 class SpeakerManager {
 public:
@@ -14,8 +14,8 @@ public:
     bool isRunning();
 
 private:
-    Audio *audio;
     static void audioTask(void* parameter);
     SemaphoreHandle_t _mutex;
     volatile bool _isPlaying = false;
+    i2s_chan_handle_t tx_handle = NULL; // I2S Transmit Handle
 };
