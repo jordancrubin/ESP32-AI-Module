@@ -11,6 +11,7 @@
 #include <LittleFS.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <Adafruit_NeoPixel.h>
 #include "Config.h"
 #include "DisplayManager.h"
 #include "WiFiManager.h"
@@ -45,57 +46,15 @@ String pendingPass = "";
 static bool isProcessing = false;
 static bool stopRequested = false;
 
-void generateTone(const char* filename, int freq, int durationMs) {
-    File file = LittleFS.open(filename, "w");
-    if (!file) return;
+// Chime Configuration
+const char* CHIME_FILENAME = "/chime.mp3";
 
-    uint32_t sampleRate = 24000; // Match I2S default rate
-    uint32_t numSamples = (sampleRate * durationMs) / 1000;
-    uint32_t dataSize = numSamples * 2;
-    uint32_t fileSize = sizeof(WavHeader) + dataSize;
+// Onboard RGB LED
+Adafruit_NeoPixel pixels(1, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
-    WavHeader header;
-    memcpy(header.riff, "RIFF", 4);
-    header.overallSize = fileSize - 8;
-    memcpy(header.wave, "WAVE", 4);
-    memcpy(header.fmtChunkMarker, "fmt ", 4);
-    header.lengthOfFmt = 16;
-    header.formatType = 1; // PCM
-    header.channels = 1;
-    header.sampleRate = sampleRate;
-    header.byteRate = sampleRate * 2;
-    header.blockAlign = 2;
-    header.bitsPerSample = 16;
-    memcpy(header.dataChunkHeader, "data", 4);
-    header.dataSize = dataSize;
-
-    file.write((uint8_t*)&header, sizeof(WavHeader));
-
-    for (uint32_t i = 0; i < numSamples; i++) {
-        float t = (float)i / sampleRate;
-        float duration = (float)durationMs / 1000.0;
-        
-        // Envelope: Fast attack (5ms), Quadratic decay for a "bell" shape
-        float envelope = 0.0f;
-        if (t < 0.005f) {
-            envelope = t / 0.005f;
-        } else {
-            float decayPos = (t - 0.005f) / (duration - 0.005f);
-            if (decayPos > 1.0f) decayPos = 1.0f;
-            envelope = (1.0f - decayPos) * (1.0f - decayPos);
-        }
-
-        // Synthesis: Fundamental + Sub-Octave (Depth) + 2nd Harmonic (Clarity)
-        float wave = sin(2.0f * PI * freq * t) + 
-                     0.6f * sin(2.0f * PI * (freq * 0.5f) * t) + 
-                     0.3f * sin(2.0f * PI * (freq * 2.0f) * t);
-        
-        // Scale to 16-bit (Increased to ~30000 for max volume without clipping)
-        // Normalization factor: 1.0 + 0.6 + 0.3 = 1.9
-        int16_t sample = (int16_t)(30000.0f * envelope * wave / 1.9f);
-        file.write((uint8_t*)&sample, 2);
-    }
-    file.close();
+void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
+    pixels.setPixelColor(0, pixels.Color(r, g, b));
+    pixels.show();
 }
 
 void onVolumeChange(int value) {
@@ -131,6 +90,7 @@ void onVoiceChange(String voice) {
             speaker.stop();
             isSpeaking = false;
             display.showStatus("Ready");
+            setLedColor(0, 0, 0); // LED Off
             return;
         }
 
@@ -140,11 +100,13 @@ void onVoiceChange(String voice) {
         while (!stopRequested) {
             // 1. Record
             display.showStatus("Listening...");
+            setLedColor(0, 255, 0); // Green while recording
             lv_timer_handler(); // Force UI update
             
             size_t wavSize = 0;
             // Record for 15 seconds (adjust as needed)
             uint8_t* wavData = speech.record(15000, &wavSize, settings.silenceThreshold);
+            setLedColor(255, 0, 0); // Red after recording (Processing)
             
             if (wavData && wavSize > 0) {
                 // 2. Transcribe
@@ -200,6 +162,7 @@ void onVoiceChange(String voice) {
         
         isProcessing = false;
         display.showStatus("Ready");
+        setLedColor(0, 0, 0); // LED Off
     } else {
         ttsVoice = voice;
         adminPrefs.putString("voice", ttsVoice);
@@ -595,6 +558,13 @@ void setup() {
   Serial.begin(115200);
   pinMode(0, INPUT_PULLUP); // Initialize BOOT button (GPIO 0)
   setCpuFrequencyMhz(240); // Lock CPU at 240MHz for maximum performance
+  
+  // Initialize LED
+  pixels.begin();
+  pixels.setBrightness(20); // Low brightness
+  pixels.clear();
+  pixels.show();
+
   unsigned long start = millis();
     while (!Serial && (millis() - start < 3000));
 
@@ -642,9 +612,9 @@ void setup() {
   speaker.begin();
   speaker.setVolume(settings.volume);
 
-  // Generate chime tone if it doesn't exist (Updated to 880Hz "Ding")
-  if (!LittleFS.exists("/chime_660.wav")) {
-      generateTone("/chime_660.wav", 660, 600); // 660Hz, 600ms
+  // Check for chime file
+  if (!LittleFS.exists(CHIME_FILENAME)) {
+      Serial.println("Warning: /chime.mp3 not found. Please upload it to LittleFS.");
   }
 
   display.begin(settings.calibration);
@@ -905,7 +875,17 @@ void loop() {
   if (!isSpeaking && !isWebServerActive) {
       if (speech.detectWakeWord(wakeThreshold)) {
           Serial.println("Wake Word Detected!");
-          speaker.playSpeechFromFile("/chime_660.wav");
+          speaker.playSpeechFromFile(CHIME_FILENAME);
+          
+          // Visual Wake Indication (Rainbow Cycle)
+          // Run for approx 1 second (6 cycles)
+          for(int j=0; j<6; j++) {
+              for(int i=0; i<256; i+=8) {
+                  pixels.setPixelColor(0, pixels.ColorHSV(i*256));
+                  pixels.show();
+                  delay(5);
+              }
+          }
           
           // Flash border white twice
           lv_obj_t * scr = lv_scr_act();

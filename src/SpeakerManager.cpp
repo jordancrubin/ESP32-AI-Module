@@ -22,10 +22,20 @@ static i2s_std_config_t s_i2s_std_cfg; // Store the I2S standard config
 static bool isWav = false;
 static bool s_i2s_enabled = false;
 static int s_fade_samples = 0;
-const int FADE_LEN = 4000; // ~160ms fade-in at 24kHz
+const int FADE_LEN = 2000; // ~80ms fade-in at 24kHz (Faster attack for chimes)
 
 // Helix Decoder Callback
 void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
+    // Handle Stereo -> Mono conversion if needed
+    if (info.nChans == 2) {
+        for (size_t i = 0; i < len / 2; i++) {
+            int32_t l = pcm_buffer[i * 2];
+            int32_t r = pcm_buffer[i * 2 + 1];
+            pcm_buffer[i] = (int16_t)((l + r) / 2);
+        }
+        len /= 2; // Update length to reflect mono samples
+    }
+
     // 1. Apply Volume & Fade-in
     for (size_t i = 0; i < len; i++) {
         float fade = 1.0f;
@@ -196,7 +206,7 @@ void SpeakerManager::loop() {
     if (xSemaphoreTakeRecursive(_mutex, 0) == pdTRUE) {
         if (_isPlaying) {
             if (audioFile && audioFile.available()) {
-                uint8_t buff[1024];
+                static uint8_t buff[4096]; // Increased buffer size for smoother playback
                 int bytesRead = audioFile.read(buff, sizeof(buff));
                 if (bytesRead > 0) {
                     if (isWav) {
@@ -258,7 +268,7 @@ void SpeakerManager::audioTask(void* parameter) {
     while (true) {
         if (manager->isRunning()) {
             manager->loop();
-            vTaskDelay(1); // Yield to allow other tasks (like Serial/WiFi) to run
+            // No delay here to keep I2S buffer full (prevents stuttering)
         } else {
             vTaskDelay(pdMS_TO_TICKS(10)); // Sleep when idle
         }
