@@ -667,7 +667,11 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(statusLabel, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
-    lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
+    if (g_lastStatus.length() < 20) {
+        lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
+    } else {
+        lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
+    }
     
     // Start/Restart Idle Timer
     if (!g_idleTimer) {
@@ -759,6 +763,11 @@ void DisplayManager::showStatus(const char* message) {
     }
     if (statusLabel) {
         lv_label_set_text(statusLabel, message);
+        if (String(message).length() < 20) {
+            lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
+        } else {
+            lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
+        }
     }
 }
 
@@ -769,6 +778,11 @@ void DisplayManager::showResponse(const String& response) {
     }
     if (statusLabel) {
         lv_label_set_text(statusLabel, response.c_str());
+        if (response.length() < 20) {
+            lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
+        } else {
+            lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
+        }
     }
 }
 
@@ -1053,36 +1067,40 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
     }
 
     lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
     
+    // Check if configuration is incomplete (default values or empty)
+    bool incomplete = (strlen(settings.apiKey) == 0 || strcmp(settings.apiKey, "your_api_key_here") == 0 ||
+                       strlen(settings.apiUrl) == 0 || strcmp(settings.apiUrl, "http://your-api-endpoint/api/chat/completions") == 0 ||
+                       strlen(settings.wifiSSID) == 0 || strcmp(settings.wifiSSID, "YOUR_WIFI_SSID") == 0);
+
     lv_obj_t * title = lv_label_create(lv_scr_act());
-    lv_label_set_text(title, "Configuration Required");
+    lv_label_set_text(title, incomplete ? "Configuration Required" : "Configuration Mode");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_make(180, 180, 180), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
-    lv_obj_t * instr = lv_label_create(lv_scr_act());
-    lv_label_set_text(instr, "Connect to:");
-    lv_obj_align(instr, LV_ALIGN_CENTER, 0, -40);
-
-    lv_obj_t * url_label = lv_label_create(lv_scr_act());
-    String url = "http://" + hostname;
-    lv_label_set_text(url_label, url.c_str());
-    lv_obj_set_style_text_font(url_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(url_label, lv_color_make(100, 200, 255), 0);
-    lv_obj_align(url_label, LV_ALIGN_CENTER, 0, -10);
-
-    lv_obj_t * ip_label = lv_label_create(lv_scr_act());
-    String ipStr = "(" + ip + ")";
-    lv_label_set_text(ip_label, ipStr.c_str());
-    lv_obj_align(ip_label, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_t * connect_label = lv_label_create(lv_scr_act());
+    String connectStr = "Connect to: http://" + hostname + " (" + ip + ")";
+    lv_label_set_text(connect_label, connectStr.c_str());
+    lv_obj_set_style_text_font(connect_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(connect_label, lv_color_make(180, 180, 180), 0);
+    lv_obj_align(connect_label, LV_ALIGN_TOP_LEFT, 10, 50);
 
     lv_obj_t * note = lv_label_create(lv_scr_act());
     lv_label_set_text(note, "Use Admin Password to login");
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
-    lv_obj_align(note, LV_ALIGN_BOTTOM_MID, 0, -60);
+    lv_obj_align(note, LV_ALIGN_TOP_LEFT, 10, 75);
 
-    // Debug Toggle
+    // Debug Toggle Row (Left Aligned)
+    lv_obj_t * sw_lbl = lv_label_create(lv_scr_act());
+    lv_label_set_text(sw_lbl, "Debug");
+    lv_obj_set_style_text_color(sw_lbl, lv_color_make(180, 180, 180), 0);
+    lv_obj_align(sw_lbl, LV_ALIGN_BOTTOM_LEFT, 20, -25);
+
     lv_obj_t * sw = lv_switch_create(lv_scr_act());
-    lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, -20, 55);
+    lv_obj_set_size(sw, 40, 20);
+    lv_obj_align_to(sw, sw_lbl, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
     if (settings.debugMode) lv_obj_add_state(sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(sw, [](lv_event_t * e){
         lv_obj_t * obj = lv_event_get_target(e);
@@ -1090,24 +1108,22 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
         settings.save();
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
-    lv_obj_t * sw_lbl = lv_label_create(lv_scr_act());
-    lv_label_set_text(sw_lbl, "Debug");
-    lv_obj_align_to(sw_lbl, sw, LV_ALIGN_OUT_TOP_MID, 0, -5);
-
     lv_obj_t * baud_lbl = lv_label_create(lv_scr_act());
-    lv_label_set_text(baud_lbl, "Serial Baud: 115200");
+    lv_label_set_text(baud_lbl, "115200");
     lv_obj_set_style_text_font(baud_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(baud_lbl, lv_color_make(150, 150, 150), 0);
-    lv_obj_align_to(baud_lbl, sw, LV_ALIGN_OUT_BOTTOM_MID, 0, 5);
+    lv_obj_align_to(baud_lbl, sw, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
 
     // Close Button
-    lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(btnClose, 80, 40);
-    lv_obj_align(btnClose, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
-    lv_obj_t *lblClose = lv_label_create(btnClose);
-    lv_label_set_text(lblClose, "Close");
-    lv_obj_center(lblClose);
-    lv_obj_add_event_cb(btnClose, closeSetupEventHandler, LV_EVENT_CLICKED, this);
+    if (!incomplete) {
+        lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
+        lv_obj_set_size(btnClose, 80, 40);
+        lv_obj_align(btnClose, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+        lv_obj_t *lblClose = lv_label_create(btnClose);
+        lv_label_set_text(lblClose, "Return");
+        lv_obj_center(lblClose);
+        lv_obj_add_event_cb(btnClose, closeSetupEventHandler, LV_EVENT_CLICKED, this);
+    }
 }
 
 void DisplayManager::showWiFiError(const char* message) {

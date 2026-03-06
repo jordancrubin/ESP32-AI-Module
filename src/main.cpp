@@ -755,6 +755,8 @@ void setup() {
   
   display.showStatus("AI Interactor Version " FIRMWARE_VERSION);
   display.showStatus("Retrotech&Electronics");
+  display.showStatus("Powered by Edge Impulse");
+  display.showStatus("UI by LVGL");
 
   // Admin Password Check
   adminPassword = adminPrefs.getString("pass", "");
