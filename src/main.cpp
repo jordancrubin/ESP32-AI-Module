@@ -12,6 +12,7 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
+#include <math.h>
 #include "Config.h"
 #include "DisplayManager.h"
 #include "WiFiManager.h"
@@ -45,6 +46,12 @@ String pendingSSID = "";
 String pendingPass = "";
 static bool isProcessing = false;
 static bool stopRequested = false;
+
+// External functions from SpeechManager.cpp
+extern void setAecDebug(bool enable);
+extern void setAecDelay(int delay);
+extern void setAecGain(int gain);
+extern void setAecPhase(bool invert);
 
 // Chime Configuration
 const char* CHIME_FILENAME = "/chime.mp3";
@@ -263,6 +270,10 @@ void handleWebRoot() {
     }
     html += "</select><br>";
 
+    html += "<h3>Debug</h3>";
+    html += "Enable Debug Logging: <input type='checkbox' name='debugMode' value='1'" + String(settings.debugMode ? " checked" : "") + "><br>";
+    html += "<small>Serial Baud: 115200</small><br>";
+
     html += "<h3>Weather (OpenWeatherMap)</h3>";
     html += "API Key: <input type='text' name='owKey' value='" + String(settings.openWeatherKey) + "' placeholder='Leave empty to disable'><br>";
     html += "Location (City,CC): <input type='text' name='owLoc' value='" + String(settings.weatherLocation) + "'><br>";
@@ -304,6 +315,8 @@ void handleWebSave() {
         settings.micMode = server.arg("micMode").toInt();
     }
 
+    settings.debugMode = server.hasArg("debugMode");
+
     // Save to NVRAM immediately
     strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
     strlcpy(settings.apiUrl, newApiUrl.c_str(), sizeof(settings.apiUrl));
@@ -312,6 +325,7 @@ void handleWebSave() {
     strlcpy(settings.openWeatherKey, newOwKey.c_str(), sizeof(settings.openWeatherKey));
     strlcpy(settings.weatherLocation, newOwLoc.c_str(), sizeof(settings.weatherLocation));
     settings.save();
+    
     forceConfig = false;
 
     // Apply config and test connection
@@ -415,6 +429,90 @@ void updateVoiceList() {
     }
 }
 
+void testAEC() {
+    if (!settings.debugMode) return;
+
+    Serial.println("Downloading TTS for AEC Test...");
+    String testPhrase = "this is a test from the ai esp32 to see how speaker cancellation is functioning. Like and Subscribe to retro tech and electronics as well as classic wrench today. Beep Beep!";
+    const char* ttsFile = "/aec_test_source.mp3";
+    
+    if (!network.isConnected()) {
+        Serial.println("WiFi not connected. Cannot download TTS.");
+        return;
+    }
+
+    if (!llm.downloadTTS(testPhrase, network, ttsFile, ttsVoice)) {
+        Serial.println("TTS Download failed. Aborting test.");
+        return;
+    }
+    
+    // --- Test 1: With AEC ---
+    Serial.println("\n--- Test 1: With AEC (Cancellation Enabled) ---");
+    Serial.println("Playing TTS & Recording (10s)...");
+    setAecDebug(true); // Enable debug stats
+    speaker.playSpeechFromFile(ttsFile);
+    
+    // Record with 0 threshold to ensure capture
+    size_t wavSize1 = 0;
+    uint8_t* wavData1 = speech.record(10000, &wavSize1, 0);
+    
+    speaker.stop();
+    setAecDebug(false); // Disable debug stats
+    
+    if (wavData1 && wavSize1 > 0) {
+        File f = LittleFS.open("/aec_with.wav", "w");
+        if (f) {
+            f.write(wavData1, wavSize1);
+            f.close();
+            Serial.println("Saved /aec_with.wav");
+        }
+        free(wavData1);
+    } else {
+        Serial.println("Recording 1 failed.");
+    }
+
+    delay(2000);
+
+    // --- Test 2: Without AEC (Raw) ---
+    Serial.println("\n--- Test 2: Without AEC (Raw Input) ---");
+    int originalMicMode = settings.micMode;
+    settings.micMode = 1; // Force Left Channel Only (Bypasses AEC logic in record())
+    
+    Serial.println("Playing TTS & Recording (10s)...");
+    speaker.playSpeechFromFile(ttsFile);
+    
+    size_t wavSize2 = 0;
+    uint8_t* wavData2 = speech.record(10000, &wavSize2, 0);
+    
+    speaker.stop();
+    settings.micMode = originalMicMode; // Restore settings
+
+    if (wavData2 && wavSize2 > 0) {
+        File f = LittleFS.open("/aec_raw.wav", "w");
+        if (f) {
+            f.write(wavData2, wavSize2);
+            f.close();
+            Serial.println("Saved /aec_raw.wav");
+        }
+        free(wavData2);
+    } else {
+        Serial.println("Recording 2 failed.");
+    }
+
+    // --- Playback ---
+    Serial.println("\n--- Playback: With AEC ---");
+    speaker.playSpeechFromFile("/aec_with.wav");
+    while(speaker.isRunning()) delay(100);
+    
+    delay(1000);
+    
+    Serial.println("\n--- Playback: Without AEC ---");
+    speaker.playSpeechFromFile("/aec_raw.wav");
+    while(speaker.isRunning()) delay(100);
+    
+    Serial.println("\nAEC Test Complete.");
+}
+
 void handleSerialCommands() {
   while (Serial.available()) {
     char c = (char)Serial.read();
@@ -442,6 +540,20 @@ void handleSerialCommands() {
             settings.calibration.xMin, settings.calibration.yMin,
             settings.calibration.xMax, settings.calibration.yMax);
           Serial.println("------------------------\n");
+        } else if (inputBuffer == "/debug_aec") {
+          static bool d = false;
+          d = !d;
+          setAecDebug(d);
+        } else if (inputBuffer.startsWith("/aec_delay ")) {
+          int d = inputBuffer.substring(11).toInt();
+          if (d > 0) setAecDelay(d);
+        } else if (inputBuffer.startsWith("/aec_gain ")) {
+          int g = inputBuffer.substring(10).toInt();
+          if (g > 0) setAecGain(g);
+        } else if (inputBuffer == "/aec_invert") {
+          static bool inv = false;
+          inv = !inv;
+          setAecPhase(inv);
         } else if (inputBuffer == "/calibrate") {
           Serial.println("Starting manual touch calibration...");
           display.calibrateTouch(settings.calibration);
@@ -453,6 +565,8 @@ void handleSerialCommands() {
           settings.calibration = {0, 0, 0, 0, false};
           settings.save();
           Serial.println("Calibration reset. Restart the device to recalibrate.");
+        } else if (inputBuffer == "/test_aec") {
+          testAEC();
         } else if (inputBuffer.startsWith("/say ")) {
           String textToSay = inputBuffer.substring(5);
           textToSay.trim();
@@ -479,7 +593,7 @@ void handleSerialCommands() {
             llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
             Serial.println("LLM Model updated to: " + newModel);
           }
-        } else if (inputBuffer == "/test_mic") {
+        } else if (inputBuffer == "/test_mic" && settings.debugMode) {
           Serial.println("Testing Microphone (5s recording)...");
           display.showStatus("Recording (5s)...");
           speaker.stop(); // Stop any playback
@@ -516,6 +630,8 @@ void handleSerialCommands() {
               Serial.println("Recording failed");
               display.showStatus("Record Failed");
           }
+        } else if (inputBuffer == "/test_mic" && !settings.debugMode) {
+            Serial.println("Debug mode disabled. Enable debug to run mic test.");
         } else if (inputBuffer == "/new") {
           llm.clearHistory();
           Serial.println("Conversation history cleared.");

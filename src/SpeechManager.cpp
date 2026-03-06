@@ -17,10 +17,34 @@ extern SettingsManager settings;
 static SpeexEchoState *st = NULL;
 static SpeexPreprocessState *den = NULL;
 
-static RingbufHandle_t s_ref_ringbuf = NULL;
+// AEC Reference Buffer (Circular Buffer)
+#define REF_BUFFER_SIZE 16384 // ~1 second at 16kHz
+static int16_t s_ref_buffer[REF_BUFFER_SIZE];
+static volatile size_t s_ref_write_index = 0;
+static volatile size_t s_ref_read_index = 0;
+static SemaphoreHandle_t s_ref_mutex = NULL;
+
+// AEC Debug & Tuning
+static volatile bool s_debug_aec = false;
+static volatile int s_aec_target_delay = 640; // Default ~40ms (Aligned with user suggestion)
+static volatile int s_aec_gain = 2; // Default Gain 2x to match Mic levels
+static volatile bool s_aec_invert = false; // Phase inversion flag
+
+// Global functions for main.cpp to call
+void setAecDebug(bool enable) { s_debug_aec = enable; Serial.printf("AEC Debug: %s\n", enable ? "ON" : "OFF"); }
+void setAecDelay(int delay) { s_aec_target_delay = delay; Serial.printf("AEC Target Delay: %d samples\n", delay); }
+void setAecGain(int gain) { s_aec_gain = gain; Serial.printf("AEC Ref Gain: %d\n", gain); }
+void setAecPhase(bool invert) { s_aec_invert = invert; Serial.printf("AEC Phase Invert: %s\n", invert ? "ON" : "OFF"); }
+
 static RingbufHandle_t s_processed_ringbuf = NULL; // Buffer for clean audio
 static i2s_chan_handle_t s_rx_handle = NULL;
 static volatile bool s_is_recording = false; // Flag to pause AEC task
+
+// Buffer Health Stats
+static volatile uint32_t s_aec_overflows = 0;
+static volatile uint32_t s_aec_underflows = 0;
+static volatile size_t s_aec_max_usage = 0;
+static volatile size_t s_aec_bytes_written = 0;
 
 // Pointer to the buffer for the static callback
 static float *s_inference_buffer = nullptr;
@@ -34,7 +58,7 @@ static int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
 // Background Task to feed the AFE pipeline
 void feed_Task(void *arg) {
     // Speex operates on frames. 20ms at 16kHz = 320 samples.
-    const int FRAME_SIZE = 320; 
+    const int FRAME_SIZE = 256; 
     int16_t mic_frame[FRAME_SIZE];
     int16_t ref_frame[FRAME_SIZE];
     int16_t out_frame[FRAME_SIZE];
@@ -54,28 +78,54 @@ void feed_Task(void *arg) {
             // We need FRAME_SIZE samples. Stereo * 32-bit = 8 bytes per sample.
             if (i2s_channel_read(s_rx_handle, i2s_raw_buff, sizeof(i2s_raw_buff), &bytes_read, portMAX_DELAY) == ESP_OK) {
                 
-                // 2. Read Reference (Non-blocking attempt)
-                size_t ref_bytes_received = 0;
-                void* ref_data = NULL;
-                if (s_ref_ringbuf) {
-                    // Try to get exactly one frame of reference audio
-                    ref_data = xRingbufferReceive(s_ref_ringbuf, &ref_bytes_received, 0);
+                // Debug: Analyze Stereo Input Levels
+                int32_t max_l = 0;
+                int32_t max_r = 0;
+                if (s_debug_aec) {
+                    for (int i = 0; i < FRAME_SIZE; i++) {
+                        int32_t l = abs(i2s_raw_buff[i*2] >> 13);
+                        int32_t r = abs(i2s_raw_buff[i*2+1] >> 13);
+                        if (l > max_l) max_l = l;
+                        if (r > max_r) max_r = r;
+                    }
                 }
-                
-                // Prepare Reference Frame
-                if (ref_data && ref_bytes_received >= sizeof(ref_frame)) {
-                    memcpy(ref_frame, ref_data, sizeof(ref_frame));
-                    vRingbufferReturnItem(s_ref_ringbuf, ref_data);
-                } else {
-                    if (ref_data) vRingbufferReturnItem(s_ref_ringbuf, ref_data); // Return partial/wrong size
+
+                // 2. Read Reference from Circular Buffer
+                bool has_ref = false;
+                if (s_ref_mutex) {
+                    xSemaphoreTake(s_ref_mutex, portMAX_DELAY);
+                    size_t available = (s_ref_write_index >= s_ref_read_index) 
+                        ? (s_ref_write_index - s_ref_read_index) 
+                        : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index));
+                    
+                    // Sync Delay: Hold reference back to align with physical echo
+                    // Latency ~100ms. Delay Ref by ~1600 samples
+                    // const size_t TARGET_DELAY = 1600; 
+                    if (available >= (FRAME_SIZE + s_aec_target_delay)) {
+                        for (int i = 0; i < FRAME_SIZE; i++) {
+                            // Apply Gain to Reference
+                            int32_t ref_val = s_ref_buffer[s_ref_read_index] * s_aec_gain;
+                            if (ref_val > 32767) ref_val = 32767;
+                            else if (ref_val < -32768) ref_val = -32768;
+                            ref_frame[i] = (int16_t)ref_val;
+                            
+                            s_ref_read_index = (s_ref_read_index + 1) % REF_BUFFER_SIZE;
+                        }
+                        has_ref = true;
+                    }
+                    xSemaphoreGive(s_ref_mutex);
+                }
+
+                if (!has_ref) {
                     memset(ref_frame, 0, sizeof(ref_frame)); // Silence
                 }
 
                 // 3. Prepare Mic Frame (Convert 32-bit Stereo to 16-bit Mono)
                 for (int i = 0; i < FRAME_SIZE; i++) {
                     // Use Left Channel (or mix)
-                    int32_t raw = i2s_raw_buff[i*2] >> 13; // Scale 24-bit to 16-bit
+                    int32_t raw = i2s_raw_buff[i*2] >> 14; // Scale 24-bit to 16-bit (Lower gain to prevent clipping)
                     if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
+                    if (s_aec_invert) raw = -raw; // Optional Phase Inversion
                     mic_frame[i] = (int16_t)raw;
                 }
 
@@ -85,9 +135,35 @@ void feed_Task(void *arg) {
                 // 5. Run Noise Suppression
                 speex_preprocess_run(den, out_frame);
 
+                // Debug Output
+                if (s_debug_aec) {
+                    int16_t max_ref = 0;
+                    int16_t max_out = 0;
+                    for (int i = 0; i < FRAME_SIZE; i++) {
+                        if (abs(ref_frame[i]) > max_ref) max_ref = abs(ref_frame[i]);
+                        if (abs(out_frame[i]) > max_out) max_out = abs(out_frame[i]);
+                    }
+                    
+                    static int debug_skip = 0;
+                    if (++debug_skip >= 10) { // Print every ~200ms
+                        debug_skip = 0;
+                        Serial.printf("AEC: RefBuf=%5d | MicL=%5d MicR=%5d | RefPk=%5d | OutPk=%5d\n", 
+                            (int)((s_ref_write_index >= s_ref_read_index) ? (s_ref_write_index - s_ref_read_index) : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index))), 
+                            max_l, max_r, max_ref, max_out);
+                    }
+                }
+
                 // 6. Output to Processed Buffer
                 if (s_processed_ringbuf) {
-                    xRingbufferSend(s_processed_ringbuf, out_frame, sizeof(out_frame), 0);
+                    if (xRingbufferSend(s_processed_ringbuf, out_frame, sizeof(out_frame), 0) != pdTRUE) {
+                        s_aec_overflows = s_aec_overflows + 1;
+                    } else {
+                        s_aec_bytes_written += sizeof(out_frame);
+                        UBaseType_t uxFree, uxRead, uxWrite, uxAcquire, uxItemsWaiting;
+                        vRingbufferGetInfo(s_processed_ringbuf, &uxFree, &uxRead, &uxWrite, &uxAcquire, &uxItemsWaiting);
+                        size_t used = (16 * 1024) - uxFree; // Fixed buffer size calculation
+                        if (used > s_aec_max_usage) s_aec_max_usage = used;
+                    }
                 }
 
                 // Yield to prevent WDT starvation (IDLE0) if processing takes >20ms
@@ -121,12 +197,12 @@ void SpeechManager::begin() {
 
     // Initialize Speex AEC if in Stereo Mode (Mode 0)
     if (settings.micMode == 0) {
-        s_ref_ringbuf = xRingbufferCreate(8 * 1024, RINGBUF_TYPE_BYTEBUF);
-        s_processed_ringbuf = xRingbufferCreate(8 * 1024, RINGBUF_TYPE_BYTEBUF);
+        s_ref_mutex = xSemaphoreCreateMutex();
+        s_processed_ringbuf = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_BYTEBUF); // Increased to 16KB
         
         int sampleRate = 16000;
-        int frameSize = 320; // 20ms
-        int filterLen = 3200; // 200ms tail length
+        int frameSize = 256; // Power of 2 often better for FFT
+        int filterLen = 1024; // ~64ms tail length (Requires synced reference)
 
         st = speex_echo_state_init(frameSize, filterLen);
         den = speex_preprocess_state_init(frameSize, sampleRate);
@@ -215,8 +291,8 @@ bool SpeechManager::detectWakeWord(float threshold) {
             raw = processed_buff[i];
         } else {
             // Fallback processing: Convert 32-bit Stereo to 16-bit Mono
-            int32_t l = raw_i2s_buffer[i*2] >> 13;
-            int32_t r = raw_i2s_buffer[i*2+1] >> 13;
+            int32_t l = raw_i2s_buffer[i*2] >> 14;
+            int32_t r = raw_i2s_buffer[i*2+1] >> 14;
             raw = (l + r) / 2; 
 
             // DC Offset removal (High-pass filter)
@@ -297,15 +373,27 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
 void SpeechManager::feedReference(const int16_t *data, size_t samples) {
     // Feed reference data to the Ring Buffer
-    if (s_ref_ringbuf && settings.micMode == 0) {
-        // Send data. If buffer full, we drop (better to drop ref than block playback)
-        xRingbufferSend(s_ref_ringbuf, (void*)data, samples * sizeof(int16_t), 0);
+    if (s_ref_mutex && settings.micMode == 0) {
+        xSemaphoreTake(s_ref_mutex, portMAX_DELAY);
+        for (size_t i = 0; i < samples; i++) {
+            s_ref_buffer[s_ref_write_index] = data[i];
+            s_ref_write_index = (s_ref_write_index + 1) % REF_BUFFER_SIZE;
+            // If write catches read, bump read (overwrite oldest)
+            if (s_ref_write_index == s_ref_read_index) {
+                s_ref_read_index = (s_ref_read_index + 1) % REF_BUFFER_SIZE;
+            }
+        }
+        xSemaphoreGive(s_ref_mutex);
     }
 }
 
 uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThreshold) {
-    s_is_recording = true; // Pause the AEC feed task
-    delay(50); // Give the task time to yield
+    bool useAec = (settings.micMode == 0);
+
+    if (!useAec) {
+        s_is_recording = true; // Pause the AEC feed task only if NOT using AEC
+        delay(50); // Give the task time to yield
+    }
 
     size_t sampleRate = 16000;
     size_t numSamples = (sampleRate * durationMs) / 1000;
@@ -339,10 +427,23 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
     // Copy header to buffer
     memcpy(wavBuffer, &header, sizeof(WavHeader));
 
-    // Flush I2S buffer
-    size_t bytesRead;
-    int32_t flushBuffer[128];
-    while (i2s_channel_read(rx_handle, flushBuffer, sizeof(flushBuffer), &bytesRead, 0) == ESP_OK && bytesRead > 0);
+    // Flush Input Buffer (Ringbuffer or I2S)
+    if (useAec) {
+        size_t bytesFetched;
+        void* data;
+        while ((data = xRingbufferReceive(s_processed_ringbuf, &bytesFetched, 0)) != NULL) {
+            vRingbufferReturnItem(s_processed_ringbuf, data);
+        }
+        // Reset Stats
+        s_aec_overflows = 0;
+        s_aec_underflows = 0;
+        s_aec_max_usage = 0;
+        s_aec_bytes_written = 0;
+    } else {
+        size_t bytesRead;
+        int32_t flushBuffer[128];
+        while (i2s_channel_read(rx_handle, flushBuffer, sizeof(flushBuffer), &bytesRead, 0) == ESP_OK && bytesRead > 0);
+    }
 
     Serial.println("Recording...");
     int16_t* pcmBuffer = (int16_t*)(wavBuffer + sizeof(WavHeader));
@@ -355,36 +456,60 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
     bool voiceDetectedTotal = false;
 
     while (samplesRead < numSamples) {
-        if (i2s_channel_read(rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
-            int samplesInBatch = bytesRead / 8; // 8 bytes per stereo frame
-            bool voiceDetectedInBatch = false;
+        bool voiceDetectedInBatch = false;
+        size_t bytesRead = 0;
 
-            for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i++) {
-                // Convert 32-bit Stereo to 16-bit Mono (Left Channel)
-                int32_t raw = sampleBuffer[i*2] >> 13;
-                if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
-                
-                if (abs(raw) > silenceThreshold) {
-                    voiceDetectedInBatch = true;
-                    voiceDetectedTotal = true;
+        if (useAec) {
+            // Read from AEC Ringbuffer
+            size_t bytesFetched = 0;
+            int16_t* processed_data = (int16_t*)xRingbufferReceive(s_processed_ringbuf, &bytesFetched, pdMS_TO_TICKS(100));
+            
+            if (processed_data && bytesFetched > 0) {
+                int samplesInBatch = bytesFetched / sizeof(int16_t);
+                for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i++) {
+                    int16_t raw = processed_data[i];
+                    if (abs(raw) > silenceThreshold) {
+                        voiceDetectedInBatch = true;
+                        voiceDetectedTotal = true;
+                    }
+                    pcmBuffer[samplesRead++] = raw;
                 }
-                pcmBuffer[samplesRead++] = (int16_t)raw;
-            }
-
-            if (voiceDetectedInBatch) {
-                silenceStart = millis();
+                vRingbufferReturnItem(s_processed_ringbuf, processed_data);
             } else {
-                unsigned long silenceTime = millis() - silenceStart;
-                if (voiceDetectedTotal && (silenceTime > SILENCE_DURATION)) {
-                    Serial.println("Silence detected. Stopping recording.");
-                    break;
+                s_aec_underflows = s_aec_underflows + 1;
+            }
+        } else {
+            // Read from Raw I2S
+            if (i2s_channel_read(rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
+                int samplesInBatch = bytesRead / 8; // 8 bytes per stereo frame
+                for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i++) {
+                    // Convert 32-bit Stereo to 16-bit Mono (Left Channel)
+                    int32_t raw = sampleBuffer[i*2] >> 14;
+                    if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
+                    
+                    if (abs(raw) > silenceThreshold) {
+                        voiceDetectedInBatch = true;
+                        voiceDetectedTotal = true;
+                    }
+                    pcmBuffer[samplesRead++] = (int16_t)raw;
                 }
-                if (!voiceDetectedTotal && (silenceTime > MAX_INITIAL_SILENCE)) {
-                    Serial.println("No speech detected (Timeout). Aborting.");
-                    free(wavBuffer);
-                    s_is_recording = false;
-                    return nullptr;
-                }
+            }
+        }
+
+        // Common Silence Logic
+        if (voiceDetectedInBatch) {
+            silenceStart = millis();
+        } else {
+            unsigned long silenceTime = millis() - silenceStart;
+            if (voiceDetectedTotal && (silenceTime > SILENCE_DURATION)) {
+                Serial.println("Silence detected. Stopping recording.");
+                break;
+            }
+            if (!voiceDetectedTotal && (silenceTime > MAX_INITIAL_SILENCE)) {
+                Serial.println("No speech detected (Timeout). Aborting.");
+                free(wavBuffer);
+                if (!useAec) s_is_recording = false;
+                return nullptr;
             }
         }
     }
@@ -392,7 +517,7 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
     if (!voiceDetectedTotal) {
         Serial.println("No speech detected (Max Duration). Aborting.");
         free(wavBuffer);
-        s_is_recording = false;
+        if (!useAec) s_is_recording = false;
         return nullptr;
     }
 
@@ -404,6 +529,15 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
     headerPtr->overallSize = actualFileSize - 8;
     
     *outSize = actualFileSize;
-    s_is_recording = false; // Resume AEC task
+    if (useAec) {
+        Serial.println("\n--- AEC Buffer Health Report ---");
+        Serial.printf("Total Bytes Written: %u\n", s_aec_bytes_written);
+        Serial.printf("Overflows (Write Fails): %u\n", s_aec_overflows);
+        Serial.printf("Underflows (Read Fails): %u\n", s_aec_underflows);
+        Serial.printf("Max Buffer Usage: %u / %u bytes\n", s_aec_max_usage, 16 * 1024);
+        Serial.println("--------------------------------");
+    } else {
+        s_is_recording = false; // Resume AEC task if it was paused
+    }
     return wavBuffer;
 }

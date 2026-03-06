@@ -1080,6 +1080,26 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
     lv_obj_align(note, LV_ALIGN_BOTTOM_MID, 0, -60);
 
+    // Debug Toggle
+    lv_obj_t * sw = lv_switch_create(lv_scr_act());
+    lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, -20, 55);
+    if (settings.debugMode) lv_obj_add_state(sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, [](lv_event_t * e){
+        lv_obj_t * obj = lv_event_get_target(e);
+        settings.debugMode = lv_obj_has_state(obj, LV_STATE_CHECKED);
+        settings.save();
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t * sw_lbl = lv_label_create(lv_scr_act());
+    lv_label_set_text(sw_lbl, "Debug");
+    lv_obj_align_to(sw_lbl, sw, LV_ALIGN_OUT_TOP_MID, 0, -5);
+
+    lv_obj_t * baud_lbl = lv_label_create(lv_scr_act());
+    lv_label_set_text(baud_lbl, "Serial Baud: 115200");
+    lv_obj_set_style_text_font(baud_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(baud_lbl, lv_color_make(150, 150, 150), 0);
+    lv_obj_align_to(baud_lbl, sw, LV_ALIGN_OUT_BOTTOM_MID, 0, 5);
+
     // Close Button
     lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
     lv_obj_set_size(btnClose, 80, 40);

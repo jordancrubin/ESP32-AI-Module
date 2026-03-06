@@ -46,6 +46,32 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
         pcm_buffer[i] = (int16_t)(pcm_buffer[i] * s_volume * fade);
     }
 
+    // 4. Feed AEC Reference (BEFORE I2S Write to prevent starvation)
+    // Handle 24kHz -> 16kHz resampling for AEC
+    if (info.samprate == 16000) {
+        speech.feedReference(pcm_buffer, len);
+    } else if (info.samprate == 24000) {
+        // Simple 24kHz -> 16kHz downsampling (3 input -> 2 output)
+        // We use a static buffer to avoid stack allocation issues
+        static int16_t resample_buff[4096]; 
+        size_t new_len = 0;
+        
+        for (size_t i = 0; i < len; i += 3) {
+            if (new_len >= 4096 - 2) break;
+            
+            // Sample 1: Copy directly (0 -> 0)
+            resample_buff[new_len++] = pcm_buffer[i];
+            
+            // Sample 2: Interpolate (1.5 -> 1)
+            // We take average of index 1 and 2
+            if (i + 2 < len) {
+                int32_t val = ((int32_t)pcm_buffer[i+1] + (int32_t)pcm_buffer[i+2]) / 2;
+                resample_buff[new_len++] = (int16_t)val;
+            }
+        }
+        speech.feedReference(resample_buff, new_len);
+    }
+
     // 2. Write to I2S (Blocking if buffer full)
     // Dynamically adjust I2S sample rate if needed
     if (s_tx_handle && s_i2s_std_cfg.clk_cfg.sample_rate_hz != info.samprate) {
@@ -61,8 +87,6 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
         size_t bytes_written;
         i2s_channel_write(s_tx_handle, pcm_buffer, len * sizeof(int16_t), &bytes_written, portMAX_DELAY);
     }
-    // 4. Feed AEC Reference
-    speech.feedReference(pcm_buffer, len);
 }
 
 static MP3DecoderHelix mp3(dataCallback);
@@ -224,14 +248,34 @@ void SpeakerManager::loop() {
                             pcm[i] = (int16_t)(pcm[i] * s_volume * fade);
                         }
                         
+                        // Feed AEC (BEFORE I2S Write)
+                        // Handle 24kHz -> 16kHz resampling
+                        if (s_i2s_std_cfg.clk_cfg.sample_rate_hz == 16000) {
+                            speech.feedReference(pcm, samples);
+                        } else if (s_i2s_std_cfg.clk_cfg.sample_rate_hz == 24000) {
+                            static int16_t resample_buff[4096]; 
+                            size_t new_len = 0;
+                            
+                            for (size_t i = 0; i < samples; i += 3) {
+                                if (new_len >= 4096 - 2) break;
+                                
+                                // Sample 1: Copy directly
+                                resample_buff[new_len++] = pcm[i];
+                                
+                                // Sample 2: Interpolate
+                                if (i + 2 < samples) {
+                                    int32_t val = ((int32_t)pcm[i+1] + (int32_t)pcm[i+2]) / 2;
+                                    resample_buff[new_len++] = (int16_t)val;
+                                }
+                            }
+                            speech.feedReference(resample_buff, new_len);
+                        }
+
                         // Write to I2S
                         if (tx_handle) {
                             size_t bytes_written;
                             i2s_channel_write(tx_handle, pcm, bytesRead, &bytes_written, portMAX_DELAY);
                         }
-                        
-                        // Feed AEC
-                        speech.feedReference(pcm, samples);
                     } else {
                         mp3.write(buff, bytesRead);
                     }
