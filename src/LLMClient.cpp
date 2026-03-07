@@ -8,6 +8,9 @@
 #include "LLMClient.h"
 #include <FS.h>
 #include <LittleFS.h>
+#include "SettingsManager.h"
+
+extern SettingsManager settings;
 
 LLMClient::LLMClient(const char* apiUrl, const char* apiKey, const char* model)
     : _apiUrl(apiUrl), _apiKey(apiKey), _model(model), _systemPrompt(nullptr) {
@@ -37,7 +40,7 @@ String LLMClient::getModels(WiFiManager& netMgr) {
         if (splitIndex != -1) {
             url = url.substring(0, splitIndex) + "/api/models";
         } else {
-            Serial.println("LLMClient Error: Invalid API URL format. Current URL: " + _apiUrl);
+            if (settings.debugMode) Serial.println("LLMClient Error: Invalid API URL format. Current URL: " + _apiUrl);
             return "Error: Invalid API URL format";
         }
     }
@@ -45,7 +48,7 @@ String LLMClient::getModels(WiFiManager& netMgr) {
     String serverPath = netMgr.resolveHost(url);
     if (serverPath == "") return "Error: Host resolution failed";
 
-    Serial.println("Getting models from: " + serverPath);
+    if (settings.debugMode) Serial.println("Getting models from: " + serverPath);
     client.setTimeout(10000);
     http.setTimeout(10000);
     http.setConnectTimeout(10000);
@@ -100,7 +103,7 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
         return "Error: Host resolution failed";
     }
     
-    Serial.println("Sending request to: " + serverPath);
+    if (settings.debugMode) Serial.println("Sending request to: " + serverPath);
 
     client.setTimeout(60000);
     http.setTimeout(60000);
@@ -132,8 +135,10 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     if (!requestBuffer) return "Error: OOM (Request Buffer)";
     serializeJson(doc, requestBuffer, requestSize + 1);
 
-    Serial.println("Request Body:");
-    Serial.println(requestBuffer);
+    if (settings.debugMode) {
+        Serial.println("Request Body:");
+        Serial.println(requestBuffer);
+    }
 
     String result = "";
     int httpResponseCode = -1;
@@ -144,8 +149,10 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
 
         httpResponseCode = http.POST((uint8_t*)requestBuffer, requestSize);
         if (httpResponseCode > 0) {
-            Serial.print("HTTP Response code: ");
-            Serial.println(httpResponseCode);
+            if (settings.debugMode) {
+                Serial.print("HTTP Response code: ");
+                Serial.println(httpResponseCode);
+            }
 
             JsonDocument filter;
             filter["choices"][0]["message"]["content"] = true;
@@ -201,7 +208,7 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
     String serverPath = netMgr.resolveHost(url);
     if (serverPath == "") return false;
 
-    Serial.println("Downloading TTS from: " + serverPath);
+    if (settings.debugMode) Serial.println("Downloading TTS from: " + serverPath);
 
     WiFiClient client;
     HTTPClient http;
@@ -221,14 +228,16 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
         String requestBody;
         serializeJson(doc, requestBody);
 
-        Serial.println("TTS Request Body:");
-        Serial.println(requestBody);
+        if (settings.debugMode) {
+            Serial.println("TTS Request Body:");
+            Serial.println(requestBody);
+        }
 
         int httpCode = http.POST(requestBody);
         if (httpCode == 200) {
             File file = LittleFS.open(filename, "w");
             if (!file) {
-                Serial.println("TTS Error: Failed to open file for writing");
+                if (settings.debugMode) Serial.println("TTS Error: Failed to open file for writing");
                 http.end();
                 return false;
             }
@@ -237,11 +246,11 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
             file.close();
             http.end();
             
-            Serial.println("TTS Download Complete");
+            if (settings.debugMode) Serial.println("TTS Download Complete");
             return true;
         } else {
-            Serial.printf("TTS Error: HTTP %d\n", httpCode);
-            if (httpCode > 0) Serial.println(http.getString());
+            if (settings.debugMode) Serial.printf("TTS Error: HTTP %d\n", httpCode);
+            if (httpCode > 0 && settings.debugMode) Serial.println(http.getString());
         }
         http.end();
     }
@@ -269,8 +278,10 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
     String serverPath = netMgr.resolveHost(url);
     if (serverPath == "") return "Error: Host resolution failed";
 
-    Serial.println("[" + String(millis()) + "] Transcribing at: " + serverPath);
-    Serial.println("[" + String(millis()) + "] Audio Size: " + String(size));
+    if (settings.debugMode) {
+        Serial.println("[" + String(millis()) + "] Transcribing at: " + serverPath);
+        Serial.println("[" + String(millis()) + "] Audio Size: " + String(size));
+    }
 
     // Parse Host, Port, Path from resolvedUrl
     int protocolEnd = serverPath.indexOf("://");
@@ -290,10 +301,10 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
 
     WiFiClient client;
     if (!client.connect(host.c_str(), port)) {
-        Serial.println("[" + String(millis()) + "] Connection failed to " + host + ":" + String(port));
+        if (settings.debugMode) Serial.println("[" + String(millis()) + "] Connection failed to " + host + ":" + String(port));
         return "Error: Connection failed";
     }
-    Serial.println("[" + String(millis()) + "] Connected to " + host + ":" + String(port));
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Connected to " + host + ":" + String(port));
     client.setTimeout(60000);
 
     // 1. Define the Boundary
@@ -317,7 +328,7 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
     size_t totalLength = part1.length() + size + part2.length();
 
     // 4. Send HTTP Headers
-    Serial.println("[" + String(millis()) + "] Sending Headers...");
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Sending Headers...");
     client.println("POST " + path + " HTTP/1.1");
     client.println("Host: " + host + ":" + String(port));
     client.println("Authorization: Bearer " + _apiKey);
@@ -328,16 +339,16 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
     client.println(); // End of headers
 
     // 5. Send the Body
-    Serial.println("[" + String(millis()) + "] Sending Body Part 1...");
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Sending Body Part 1...");
     client.print(part1);
     
     // Send audio in chunks
-    Serial.println("[" + String(millis()) + "] Sending Audio Data...");
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Sending Audio Data...");
     size_t bytesWritten = 0;
     size_t chunkSize = 1024;
     while (bytesWritten < size) {
         if (!client.connected()) {
-            Serial.println("[" + String(millis()) + "] Client disconnected during audio upload");
+            if (settings.debugMode) Serial.println("[" + String(millis()) + "] Client disconnected during audio upload");
             break;
         }
         size_t toWrite = (size - bytesWritten) < chunkSize ? (size - bytesWritten) : chunkSize;
@@ -345,13 +356,13 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
         if (written == 0) break;
         bytesWritten += written;
     }
-    Serial.println("[" + String(millis()) + "] Audio sent: " + String(bytesWritten) + "/" + String(size));
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Audio sent: " + String(bytesWritten) + "/" + String(size));
     
-    Serial.println("[" + String(millis()) + "] Sending Body Part 2...");
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Sending Body Part 2...");
     client.print(part2);
 
     // 6. Read Response
-    Serial.println("[" + String(millis()) + "] Waiting for response...");
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Waiting for response...");
     String response = "";
     bool headersFinished = false;
     int contentLength = -1;
@@ -390,7 +401,7 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
     }
     client.stop();
 
-    Serial.println("[" + String(millis()) + "] Transcription Response: " + response);
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Transcription Response: " + response);
     
     // Parse JSON result
     JsonDocument doc;
@@ -433,7 +444,7 @@ String LLMClient::getVoices(WiFiManager& netMgr) {
     String serverPath = netMgr.resolveHost(url);
     if (serverPath == "") return "Error: Host resolution failed";
 
-    Serial.println("Getting voices from: " + serverPath);
+    if (settings.debugMode) Serial.println("Getting voices from: " + serverPath);
 
     WiFiClient client;
     HTTPClient http;

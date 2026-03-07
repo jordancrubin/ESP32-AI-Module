@@ -11,7 +11,9 @@
 #include <LittleFS.h>
 #include "MP3DecoderHelix.h"
 #include "SpeechManager.h" // To feed reference signal
+#include "SettingsManager.h"
 
+extern SettingsManager settings;
 extern SpeechManager speech;
 using namespace libhelix;
 
@@ -75,7 +77,7 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
     // 2. Write to I2S (Blocking if buffer full)
     // Dynamically adjust I2S sample rate if needed
     if (s_tx_handle && s_i2s_std_cfg.clk_cfg.sample_rate_hz != info.samprate) {
-        Serial.printf("SpeakerManager: Changing I2S sample rate from %d to %d\n", s_i2s_std_cfg.clk_cfg.sample_rate_hz, info.samprate);
+        if (settings.debugMode) Serial.printf("SpeakerManager: Changing I2S sample rate from %d to %d\n", s_i2s_std_cfg.clk_cfg.sample_rate_hz, info.samprate);
         if (s_i2s_enabled) i2s_channel_disable(s_tx_handle);
         s_i2s_std_cfg.clk_cfg.sample_rate_hz = info.samprate;
         i2s_channel_reconfig_std_clock(s_tx_handle, &s_i2s_std_cfg.clk_cfg);
@@ -134,7 +136,7 @@ void SpeakerManager::begin() {
         NULL,
         1               // Core 1
     );
-    Serial.println("SpeakerManager: Helix Decoder Initialized (AEC Enabled)");
+    if (settings.debugMode) Serial.println("SpeakerManager: Helix Decoder Initialized (AEC Enabled)");
 }
 
 void SpeakerManager::setVolume(int volume) {
@@ -145,7 +147,7 @@ void SpeakerManager::setVolume(int volume) {
 void SpeakerManager::playSpeechFromFile(const char* filename) {
     xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     
-    Serial.printf("Playing TTS from file: %s\n", filename);
+    if (settings.debugMode) Serial.printf("Playing TTS from file: %s\n", filename);
     
     // Flush I2S buffer to remove stale data
     String fn = String(filename);
@@ -165,7 +167,7 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
             audioFile.read(header, 44);
             // Sample rate is at offset 24 (4 bytes)
             memcpy(&sampleRate, &header[24], 4);
-            Serial.printf("WAV Sample Rate: %d\n", sampleRate);
+            if (settings.debugMode) Serial.printf("WAV Sample Rate: %d\n", sampleRate);
         }
         // Seek back to data start (assuming standard 44 byte header)
         audioFile.seek(44);

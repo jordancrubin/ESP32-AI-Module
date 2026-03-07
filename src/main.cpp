@@ -68,7 +68,7 @@ void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
 
 void onVolumeChange(int value) {
     settings.volume = value;
-    Serial.printf("Volume: %d (Tone disabled)\n", settings.volume);
+    if (settings.debugMode) Serial.printf("Volume: %d (Tone disabled)\n", settings.volume);
     speaker.setVolume(settings.volume);
     settings.save();
 }
@@ -98,7 +98,7 @@ void onVoiceChange(String voice) {
         strlcpy(settings.llmModel, newModel.c_str(), sizeof(settings.llmModel));
         settings.save();
         llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
-        Serial.println("Model changed to: " + String(settings.llmModel));
+        if (settings.debugMode) Serial.println("Model changed to: " + String(settings.llmModel));
     } else if (voice == "TALK_ACTION") {
         if (isProcessing) {
             stopRequested = true;
@@ -131,18 +131,18 @@ void onVoiceChange(String voice) {
                 free(wavData); // Free PSRAM immediately
                 
                 if (text.startsWith("Error")) {
-                    Serial.println("Transcription Failed: " + text);
+                    if (settings.debugMode) Serial.println("Transcription Failed: " + text);
                     display.showStatus(text.c_str());
                     break; // Stop loop on error
                 } else {
-                    Serial.println("Transcription: " + text);
+                    if (settings.debugMode) Serial.println("Transcription: " + text);
                     
                     // 3. Send to LLM
                     display.showStatus("Thinking...");
                     lv_timer_handler();
                     
                     String answer = llm.sendPrompt(text, network);
-                    Serial.println("Answer: " + answer);
+                    if (settings.debugMode) Serial.println("Answer: " + answer);
                     
                     // 4. TTS
                     display.showStatus("Speaking...");
@@ -170,7 +170,7 @@ void onVoiceChange(String voice) {
                 
                 // Flush history on silence/abort
                 llm.clearHistory();
-                Serial.println("Conversation ended (Silence). History cleared.");
+                if (settings.debugMode) Serial.println("Conversation ended (Silence). History cleared.");
                 break;
             }
         }
@@ -181,7 +181,7 @@ void onVoiceChange(String voice) {
     } else {
         ttsVoice = voice;
         adminPrefs.putString("voice", ttsVoice);
-        Serial.println("Voice changed to: " + ttsVoice);
+        if (settings.debugMode) Serial.println("Voice changed to: " + ttsVoice);
     }
 }
 
@@ -189,11 +189,11 @@ void onSetupMode(bool enabled) {
     if (enabled) {
         server.begin();
         isWebServerActive = true;
-        Serial.println("Web Server Started (Setup Mode)");
+        if (settings.debugMode) Serial.println("Web Server Started (Setup Mode)");
     } else {
         server.stop();
         isWebServerActive = false;
-        Serial.println("Web Server Stopped");
+        if (settings.debugMode) Serial.println("Web Server Stopped");
     }
 }
 
@@ -225,7 +225,7 @@ bool getWeather() {
 }
 
 void handleWebRoot() {
-    Serial.println("Web Request: /");
+    if (settings.debugMode) Serial.println("Web Request: /");
     if (!server.authenticate("admin", adminPassword.c_str())) {
         server.sendHeader("WWW-Authenticate", "Basic realm=\"Login Required\"");
         server.send(401, "text/html", "Unauthorized\n");
@@ -357,7 +357,7 @@ void handleWebSave() {
         server.send(200, "text/html", html);
     } else {
         server.send(200, "text/html", "<html><body><h1>Saved & Verified!</h1><p>Connection successful.</p><a href='/'>Back</a></body></html>");
-        Serial.println("Settings updated and verified via Web Interface");
+        if (settings.debugMode) Serial.println("Settings updated and verified via Web Interface");
     }
 }
 
@@ -394,7 +394,7 @@ String urlEncode(String str) {
 void updateVoiceList() {
     String jsonResponse = llm.getVoices(network);
     if (jsonResponse.startsWith("Error")) {
-        Serial.println("Failed to fetch voices: " + jsonResponse);
+        if (settings.debugMode) Serial.println("Failed to fetch voices: " + jsonResponse);
         return;
     }
 
@@ -402,13 +402,13 @@ void updateVoiceList() {
     DeserializationError error = deserializeJson(doc, jsonResponse);
 
     if (error) {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.f_str());
+        if (settings.debugMode) Serial.print(F("deserializeJson() failed: "));
+        if (settings.debugMode) Serial.println(error.f_str());
         return;
     }
 
     if (!doc["voices"].is<JsonArray>()) {
-        Serial.println(F("JSON response missing 'voices' key"));
+        if (settings.debugMode) Serial.println(F("JSON response missing 'voices' key"));
         return;
     }
 
@@ -437,9 +437,9 @@ void updateVoiceList() {
         }
         // Update UI with new options, keeping current voice and volume
         display.showMainUI(ttsVoice, settings.volume, voiceOptions);
-        Serial.println("Voice list updated in dropdown.");
+        if (settings.debugMode) Serial.println("Voice list updated in dropdown.");
     } else {
-        Serial.println("No matching voices found.");
+        if (settings.debugMode) Serial.println("No matching voices found.");
     }
 }
 
@@ -533,15 +533,30 @@ void handleSerialCommands() {
     if (c == '\n' || c == '\r') {
       inputBuffer.trim();
       if (inputBuffer.length() > 0) {
-        if (inputBuffer == "/settings") {
+        if (inputBuffer == "/help") {
+          Serial.println("\n--- Available Commands ---");
+          Serial.println("/settings       - Show current configuration");
+          Serial.println("/calibrate      - Start touch calibration");
+          Serial.println("/reset_cal      - Reset touch calibration");
+          Serial.println("/say <text>     - Speak text immediately");
+          Serial.println("/new            - Clear conversation history");
+          Serial.println("/test_mic       - Record 5s clip to test mic (Debug only)");
+          Serial.println("/test_aec       - Run AEC diagnostics (Debug only)");
+          Serial.println("/debug_aec      - Toggle AEC debug stats");
+          Serial.println("/aec_delay <n>  - Set AEC delay samples");
+          Serial.println("/aec_gain <n>   - Set AEC gain multiplier");
+          Serial.println("/aec_invert     - Toggle AEC phase inversion");
+          Serial.println("<text>          - Send prompt to AI");
+          Serial.println("--------------------------\n");
+        } else if (inputBuffer == "/settings") {
           Serial.println("\n--- Current Settings ---");
           Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
           Serial.printf("CPU Freq:   %d MHz\n", getCpuFrequencyMhz());
           Serial.printf("RSSI:       %d dBm\n", network.getSignalStrength());
           Serial.printf("WiFi SSID:  %s\n", settings.wifiSSID);
-          Serial.printf("WiFi Pass:  %s\n", settings.wifiPass);
+          Serial.printf("WiFi Pass:  ******\n");
           Serial.printf("API URL:    %s\n", settings.apiUrl);
-          Serial.printf("API Key:    %s\n", settings.apiKey);
+          Serial.printf("API Key:    ******\n");
           Serial.printf("LLM Model:  %s\n", settings.llmModel);
           Serial.printf("Volume:     %d / 21\n", settings.volume);
           Serial.printf("Timezone:   %s\n", settings.timeZone);
@@ -553,6 +568,13 @@ void handleSerialCommands() {
             settings.calibration.isValid ? "Valid" : "Invalid",
             settings.calibration.xMin, settings.calibration.yMin,
             settings.calibration.xMax, settings.calibration.yMax);
+          Serial.printf("Mic Mode:   %d\n", settings.micMode);
+          Serial.printf("Input Bal:  %d\n", settings.inputBalance);
+          Serial.printf("Debug Mode: %s\n", settings.debugMode ? "ON" : "OFF");
+          Serial.printf("Sys Prompt: %s\n", settings.systemPrompt);
+          Serial.printf("Weather Key:******\n");
+          Serial.printf("Weather Loc:%s\n", settings.weatherLocation);
+          Serial.println("Note: Redacted values can be viewed from the configuration web page.");
           Serial.println("------------------------\n");
         } else if (inputBuffer == "/debug_aec") {
           static bool d = false;
@@ -585,7 +607,7 @@ void handleSerialCommands() {
           String textToSay = inputBuffer.substring(5);
           textToSay.trim();
           if (textToSay.length() > 0) {
-            Serial.println("Direct TTS: " + textToSay);
+            if (settings.debugMode) Serial.println("Direct TTS: " + textToSay);
             speaker.stop();
             isSpeaking = false;
             display.showStatus("Direct TTS...");
@@ -639,7 +661,7 @@ void handleSerialCommands() {
             Serial.println("Debug mode disabled. Enable debug to run mic test.");
         } else if (inputBuffer == "/new") {
           llm.clearHistory();
-          Serial.println("Conversation history cleared.");
+          if (settings.debugMode) Serial.println("Conversation history cleared.");
         } else {
           speaker.stop(); // Stop any current playback before processing new request
           isSpeaking = false;
@@ -652,8 +674,8 @@ void handleSerialCommands() {
           String answer = llm.sendPrompt(inputBuffer, network);
           display.showThinking(false);
           
-          Serial.println("Answer:");
-          Serial.println(answer);
+          if (settings.debugMode) Serial.println("Answer:");
+          if (settings.debugMode) Serial.println(answer);
 
           display.showResponse("Speaking...");
           
@@ -721,7 +743,7 @@ void setup() {
       tempUrl.replace("/v1/chat/completions", "/api/chat/completions");
       strlcpy(settings.apiUrl, tempUrl.c_str(), sizeof(settings.apiUrl));
       settings.save();
-      Serial.println("Migrated API URL to /api/chat/completions");
+      if (settings.debugMode) Serial.println("Migrated API URL to /api/chat/completions");
   }
 
   llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
@@ -733,7 +755,7 @@ void setup() {
 
   // Check for chime file
   if (!LittleFS.exists(CHIME_FILENAME)) {
-      Serial.println("Warning: /chime.mp3 not found. Please upload it to LittleFS.");
+      if (settings.debugMode) Serial.println("Warning: /chime.mp3 not found. Please upload it to LittleFS.");
   }
 
   display.begin(settings.calibration);
@@ -746,12 +768,12 @@ void setup() {
 
   // Check for touch calibration status
   if (settings.calibration.isValid) {
-      Serial.println("Touch calibration found. Loading saved values...");
+      if (settings.debugMode) Serial.println("Touch calibration found. Loading saved values...");
   } else {
-      Serial.println("Touch calibration NOT found or reset. Starting calibration utility...");
+      if (settings.debugMode) Serial.println("Touch calibration NOT found or reset. Starting calibration utility...");
       display.calibrateTouch(settings.calibration);
       settings.save(); // Save the newly generated calibration to NVS
-      Serial.println("Touch calibration completed and saved.");
+      if (settings.debugMode) Serial.println("Touch calibration completed and saved.");
   }
 
   display.showBootLogo(); // Show the logo immediately
@@ -807,7 +829,7 @@ void setup() {
               }
           }
       }
-      Serial.println("WiFi Config Success: Saving to NVRAM.");
+      if (settings.debugMode) Serial.println("WiFi Config Success: Saving to NVRAM.");
       settings.save();
       
       // Configure Time (NTP)
@@ -874,7 +896,7 @@ void setup() {
                   }
               }
           }
-          Serial.println("WiFi Recovery Success: Saving to NVRAM.");
+          if (settings.debugMode) Serial.println("WiFi Recovery Success: Saving to NVRAM.");
           settings.save();
           
           // Configure Time (NTP)
@@ -892,7 +914,7 @@ void setup() {
   });
   server.begin();
   isWebServerActive = true;
-  Serial.println("Web Server started at http://aiesp.local or http://" + WiFi.localIP().toString());
+  if (settings.debugMode) Serial.println("Web Server started at http://aiesp.local or http://" + WiFi.localIP().toString());
 
   // Initialize Speech Recognition (I2S)
   speech.begin();
@@ -917,7 +939,7 @@ void setup() {
               delay(1); 
               
               if (millis() - lastLog > 2000) {
-                  Serial.println("Web Config Loop running...");
+                  if (settings.debugMode) Serial.println("Web Config Loop running...");
                   lastLog = millis();
               }
           }
@@ -933,7 +955,7 @@ void setup() {
           display.showStatus("Fetching Models...");
           String models = llm.getModels(network);
           if (!models.startsWith("Error")) {
-              Serial.println("API Verified: " + models);
+              if (settings.debugMode) Serial.println("API Verified: " + models);
               display.showStatus("API Verified|OK");
               modelOptions = models;
               delay(2000);
@@ -941,7 +963,7 @@ void setup() {
               break;
           }
           display.showStatus("API Check Failed|FAIL");
-          Serial.println("API Check Failed: " + models);
+          if (settings.debugMode) Serial.println("API Check Failed: " + models);
           delay(1000);
       }
 
@@ -954,7 +976,7 @@ void setup() {
           display.showStatus("API Connection Failed|FAIL");
           
           if (wifiRetries < 2) {
-              Serial.println("API Check Failed. Restarting WiFi...");
+              if (settings.debugMode) Serial.println("API Check Failed. Restarting WiFi...");
               display.showStatus("Restarting WiFi...|FAIL");
               network.connect();
               wifiRetries++;
@@ -973,7 +995,8 @@ void setup() {
   display.showMainUI(ttsVoice, settings.volume, voiceOptions);
   display.showStatus("Ready");
   
-  Serial.println("Boot complete. Type prompt in Serial.");
+  if (settings.debugMode) Serial.println("Boot complete. Type prompt in Serial.");
+  Serial.println("Type /help for commands");
   
   // Stop web server after boot configuration is complete to save cycles
   server.stop();
@@ -1002,7 +1025,7 @@ void loop() {
   // Check for Wake Word if not already speaking or in web config mode
   if (!isSpeaking && !isWebServerActive) {
       if (speech.detectWakeWord(wakeThreshold)) {
-          Serial.println("Wake Word Detected!");
+          if (settings.debugMode) Serial.println("Wake Word Detected!");
           speaker.playSpeechFromFile(CHIME_FILENAME);
           
           // Visual Wake Indication (Rainbow Cycle)

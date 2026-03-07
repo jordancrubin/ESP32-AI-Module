@@ -8,6 +8,9 @@
 #include "WiFiManager.h"
 #include <Arduino.h>
 #include <ESPmDNS.h>
+#include "SettingsManager.h"
+
+extern SettingsManager settings;
 
 WiFiManager::WiFiManager(const char* ssid, const char* password) 
     : _ssid(ssid), _password(password), _cachedIP(IPAddress(0,0,0,0)) {}
@@ -20,11 +23,11 @@ void WiFiManager::setCredentials(String ssid, String password) {
 void WiFiManager::connect() {
     if (_ssid == "" || _ssid == "YOUR_WIFI_SSID" ||
         _password == "" || _password == "YOUR_WIFI_PASSWORD") {
-        Serial.println("WiFi Error: Missing or default credentials. Aborting connection.");
+        if (settings.debugMode) Serial.println("WiFi Error: Missing or default credentials. Aborting connection.");
         return;
     }
 
-    Serial.println("Connecting to WiFi...");
+    if (settings.debugMode) Serial.println("Connecting to WiFi...");
     
     MDNS.end(); // Clean up previous mDNS instance
 
@@ -38,23 +41,25 @@ void WiFiManager::connect() {
     // Timeout after 15 seconds
     while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
         delay(500);
-        Serial.print(".");
+        if (settings.debugMode) Serial.print(".");
     }
     
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\nWiFi Connection Timeout.");
+        if (settings.debugMode) Serial.println("\nWiFi Connection Timeout.");
         return;
     }
 
-    Serial.println("\nWiFi Connected!");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
+    if (settings.debugMode) {
+        Serial.println("\nWiFi Connected!");
+        Serial.print("IP: ");
+        Serial.println(WiFi.localIP());
+    }
 
     if (!MDNS.begin("aiesp")) {
-        Serial.println("Error setting up MDNS responder!");
+        if (settings.debugMode) Serial.println("Error setting up MDNS responder!");
     } else {
         MDNS.addService("http", "tcp", 80);
-        Serial.println("mDNS responder started: http://aiesp.local");
+        if (settings.debugMode) Serial.println("mDNS responder started: http://aiesp.local");
     }
 }
 
@@ -93,9 +98,9 @@ String WiFiManager::resolveHost(String url) {
             _cachedHostname = hostname;
             _cachedIP = ip;
             url.replace(hostname, ip.toString());
-            Serial.println("Resolved " + hostname + " to " + ip.toString());
+            if (settings.debugMode) Serial.println("Resolved " + hostname + " to " + ip.toString());
         } else {
-            Serial.println("Error: Could not resolve mDNS hostname: " + hostname);
+            if (settings.debugMode) Serial.println("Error: Could not resolve mDNS hostname: " + hostname);
             return "";
         }
     }

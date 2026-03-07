@@ -209,9 +209,11 @@ void SpeechManager::begin() {
         Serial.println("SpeechManager: Failed to allocate inference buffer!");
     }
 
-    Serial.println("SpeechManager: ICS-43434 I2S Initialized");
-    Serial.printf("Edge Impulse: %d classification labels loaded.\n", EI_CLASSIFIER_LABEL_COUNT);
-    Serial.printf("Edge Impulse: Expected Sample Rate: %d Hz\n", EI_CLASSIFIER_FREQUENCY);
+    if (settings.debugMode) {
+        Serial.println("SpeechManager: ICS-43434 I2S Initialized");
+        Serial.printf("Edge Impulse: %d classification labels loaded.\n", EI_CLASSIFIER_LABEL_COUNT);
+        Serial.printf("Edge Impulse: Expected Sample Rate: %d Hz\n", EI_CLASSIFIER_FREQUENCY);
+    }
 
     // Initialize Speex AEC if in Stereo Mode (Mode 0)
     if (settings.micMode == 0) {
@@ -235,9 +237,9 @@ void SpeechManager::begin() {
         
         // Pin to Core 0 to prevent starving the UI/Main Loop on Core 1
         xTaskCreatePinnedToCore(feed_Task, "Speex_Feed", 10240, NULL, 5, NULL, 0);
-        Serial.println("SpeechManager: Speex AEC Task Started");
+        if (settings.debugMode) Serial.println("SpeechManager: Speex AEC Task Started");
     } else {
-        Serial.println("SpeechManager: AEC disabled (Not in Stereo Mode).");
+        if (settings.debugMode) Serial.println("SpeechManager: AEC disabled (Not in Stereo Mode).");
     }
 }
 
@@ -362,11 +364,13 @@ bool SpeechManager::detectWakeWord(float threshold) {
         }
 
         // Print Debug Info
-        Serial.printf("Raw: %d | L: %d R: %d | Time: %dms | ", max_audio_level, max_l_level, max_r_level, result.timing.dsp + result.timing.classification);
-        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-            Serial.printf("%s: %.2f ", result.classification[ix].label, result.classification[ix].value);
+        if (settings.debugMode) {
+            Serial.printf("Raw: %d | L: %d R: %d | Time: %dms | ", max_audio_level, max_l_level, max_r_level, result.timing.dsp + result.timing.classification);
+            for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+                Serial.printf("%s: %.2f ", result.classification[ix].label, result.classification[ix].value);
+            }
+            Serial.println();
         }
-        Serial.println();
         
         max_audio_level = 0;
         max_l_level = 0;
@@ -379,7 +383,7 @@ bool SpeechManager::detectWakeWord(float threshold) {
             if (result.classification[ix].value > threshold) {
                 const char* label = result.classification[ix].label;
                 if (strcmp(label, "noise") != 0 && strcmp(label, "unknown") != 0) {
-                    Serial.printf(">>> WAKE WORD DETECTED: %s (%.2f) <<<\n", label, result.classification[ix].value);
+                    if (settings.debugMode) Serial.printf(">>> WAKE WORD DETECTED: %s (%.2f) <<<\n", label, result.classification[ix].value);
                     wake_word_detected = true;
                 }
             }
@@ -472,7 +476,7 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
         while (i2s_channel_read(rx_handle, flushBuffer, sizeof(flushBuffer), &bytesRead, 0) == ESP_OK && bytesRead > 0);
     }
 
-    Serial.println("Recording...");
+    if (settings.debugMode) Serial.println("Recording...");
     int16_t* pcmBuffer = (int16_t*)(wavBuffer + sizeof(WavHeader));
     size_t samplesRead = 0;
     int32_t sampleBuffer[128 * 2]; // Buffer for 32-bit Stereo
@@ -529,11 +533,11 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
         } else {
             unsigned long silenceTime = millis() - silenceStart;
             if (voiceDetectedTotal && (silenceTime > SILENCE_DURATION)) {
-                Serial.println("Silence detected. Stopping recording.");
+                if (settings.debugMode) Serial.println("Silence detected. Stopping recording.");
                 break;
             }
             if (!voiceDetectedTotal && (silenceTime > MAX_INITIAL_SILENCE)) {
-                Serial.println("No speech detected (Timeout). Aborting.");
+                if (settings.debugMode) Serial.println("No speech detected (Timeout). Aborting.");
                 free(wavBuffer);
                 if (!useAec) s_is_recording = false;
                 return nullptr;
@@ -542,7 +546,7 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
     }
 
     if (!voiceDetectedTotal) {
-        Serial.println("No speech detected (Max Duration). Aborting.");
+        if (settings.debugMode) Serial.println("No speech detected (Max Duration). Aborting.");
         free(wavBuffer);
         if (!useAec) s_is_recording = false;
         return nullptr;
@@ -556,7 +560,7 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
     headerPtr->overallSize = actualFileSize - 8;
     
     *outSize = actualFileSize;
-    if (useAec) {
+    if (useAec && settings.debugMode) {
         Serial.println("\n--- AEC Buffer Health Report ---");
         Serial.printf("Total Bytes Written: %u\n", s_aec_bytes_written);
         Serial.printf("Overflows (Write Fails): %u\n", s_aec_overflows);

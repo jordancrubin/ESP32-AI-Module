@@ -823,15 +823,15 @@ void DisplayManager::showBootLogo() {
         TJpgDec.setCallback(tft_output);
         uint16_t w = 0, h = 0;
         if (TJpgDec.getJpgSize(&w, &h, boot_logo, sizeof(boot_logo)) == 0) {
-            Serial.printf("Boot Logo Size: %dx%d\n", w, h);
+            if (settings.debugMode) Serial.printf("Boot Logo Size: %dx%d\n", w, h);
             int x = (gfx->width() - w) / 2;
             int y = (gfx->height() - h) / 2;
             TJpgDec.drawJpg(x, y, boot_logo, sizeof(boot_logo));
         } else {
-            Serial.println("Boot Logo Error: Invalid JPG data.");
+            if (settings.debugMode) Serial.println("Boot Logo Error: Invalid JPG data.");
         }
     } else {
-        Serial.println("Boot Logo Error: Unknown format.");
+        if (settings.debugMode) Serial.println("Boot Logo Error: Unknown format.");
     }
 }
 
@@ -1214,7 +1214,7 @@ void DisplayManager::adminConfigEventHandler(lv_event_t * e) {
 void DisplayManager::setupEventHandler(lv_event_t * e) {
     DisplayManager* dm = (DisplayManager*)lv_event_get_user_data(e);
     if (dm) {
-        Serial.println("Setup button pressed. Web Server is active.");
+        if (settings.debugMode) Serial.println("Setup button pressed. Web Server is active.");
         if (setupModeCb) setupModeCb(true);
         dm->showWebConfig(WiFi.localIP().toString(), "aiesp.local");
     }
@@ -1286,7 +1286,7 @@ void DisplayManager::calibrateTouch(TouchCalibration& cal) {
         unsigned long lastBeat = 0;
         while(true) {
             if (Serial.available()) {
-                Serial.println("\nCalibration aborted via Serial.");
+                if (settings.debugMode) Serial.println("\nCalibration aborted via Serial.");
                 return false;
             }
             
