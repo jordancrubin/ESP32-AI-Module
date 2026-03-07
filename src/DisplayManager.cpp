@@ -390,8 +390,10 @@ static void idle_timer_cb(lv_timer_t * t) {
 }
 
 static void showClockScreen() {
+    // Use public method to reset private pointers (statusLabel)
+    if (static_dm) static_dm->showWiFiError("");
     lv_obj_clean(lv_scr_act());
-    if (static_dm) { static_dm->audio_vu_l = nullptr; static_dm->audio_vu_r = nullptr; }
+    boot_cont = nullptr;
 
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
 
@@ -498,8 +500,10 @@ static void showClockScreen() {
 }
 
 static void showVoiceModelConfig() {
+    // Use public method to reset private pointers (statusLabel)
+    if (static_dm) static_dm->showWiFiError("");
     lv_obj_clean(lv_scr_act());
-    if (static_dm) { static_dm->audio_vu_l = nullptr; static_dm->audio_vu_r = nullptr; }
+    boot_cont = nullptr;
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
 
     lv_obj_t * title = lv_label_create(lv_scr_act());
@@ -725,8 +729,9 @@ void DisplayManager::fadeBacklight(uint8_t target, int durationMs) {
 }
 
 static void setupBootScreen() {
+    // Use public method to reset private pointers (statusLabel)
+    if (static_dm) static_dm->showWiFiError("");
     lv_obj_clean(lv_scr_act());
-    if (static_dm) { static_dm->audio_vu_l = nullptr; static_dm->audio_vu_r = nullptr; }
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
     
     boot_cont = lv_obj_create(lv_scr_act());
@@ -904,6 +909,8 @@ void DisplayManager::setAPIConfigCallback(APIConfigCallback cb) {
 void DisplayManager::showAPIConfig(String currentKey) {
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
+    statusLabel = nullptr;
+    boot_cont = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "API Key Configuration");
@@ -1017,6 +1024,8 @@ void DisplayManager::setAPIUrlConfigCallback(APIUrlConfigCallback cb) {
 void DisplayManager::showAPIUrlConfig(String currentUrl) {
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
+    statusLabel = nullptr;
+    boot_cont = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "API URL Configuration");
@@ -1062,6 +1071,8 @@ void DisplayManager::setAdminConfigCallback(AdminConfigCallback cb) {
 void DisplayManager::showAdminConfig() {
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
+    statusLabel = nullptr;
+    boot_cont = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "Set Admin Password");
@@ -1093,6 +1104,8 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
 
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
+    statusLabel = nullptr;
+    boot_cont = nullptr;
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
     
     // Check if configuration is incomplete (default values or empty)
@@ -1155,6 +1168,8 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
 void DisplayManager::showWiFiError(const char* message) {
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
+    statusLabel = nullptr;
+    boot_cont = nullptr;
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, message);
     lv_obj_align(label, LV_ALIGN_CENTER, 0, -40);
@@ -1388,6 +1403,8 @@ void DisplayManager::showAudioConfig() {
     // Reset pointers
     audio_vu_l = nullptr;
     audio_vu_r = nullptr;
+    statusLabel = nullptr;
+    boot_cont = nullptr;
 
     lv_obj_t * title = lv_label_create(lv_scr_act());
     lv_label_set_text(title, "Audio Settings");
