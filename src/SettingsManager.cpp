@@ -24,6 +24,8 @@ SettingsManager::SettingsManager() {
     strlcpy(weatherLocation, "New York,US", sizeof(weatherLocation));
     micMode = 1; // Default to Left Channel Only (0=Stereo, 1=Left, 2=Right)
     debugMode = false;
+    inputBalance = 0; // Center
+    strlcpy(systemPrompt, "You are a helpful AI assistant running on an ESP32-S3.", sizeof(systemPrompt));
 }
 
 void SettingsManager::begin() {
@@ -47,6 +49,8 @@ void SettingsManager::load() {
     if (prefs.isKey("ow_loc")) prefs.getString("ow_loc", weatherLocation, sizeof(weatherLocation));
     micMode = prefs.getInt("mic_mode", micMode);
     debugMode = prefs.getBool("debug", debugMode);
+    inputBalance = prefs.getInt("in_bal", inputBalance);
+    if (prefs.isKey("sys_prompt")) prefs.getString("sys_prompt", systemPrompt, sizeof(systemPrompt));
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
         prefs.getBytes("cal", &calibration, sizeof(TouchCalibration));
@@ -69,4 +73,6 @@ void SettingsManager::save() {
     prefs.putString("ow_loc", weatherLocation);
     prefs.putInt("mic_mode", micMode);
     prefs.putBool("debug", debugMode);
+    prefs.putInt("in_bal", inputBalance);
+    prefs.putString("sys_prompt", systemPrompt);
 }

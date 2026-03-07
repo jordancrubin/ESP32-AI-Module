@@ -12,6 +12,7 @@ typedef void (*APIUrlConfigCallback)(String url);
 typedef void (*AdminConfigCallback)(String pass);
 typedef void (*VoiceCallback)(String voice);
 typedef void (*SetupModeCallback)(bool enabled);
+typedef void (*BalanceCallback)(int value);
 
 class DisplayManager {
 public:
@@ -44,6 +45,12 @@ public:
     void updateWeather(const char* temp, const char* desc);
     char _weatherTemp[16];
     char _weatherDesc[32];
+    void flashStatusAnimation();
+    void showAudioConfig();
+    void updateAudioVUMeter(int l, int r);
+    void setBalanceCallback(BalanceCallback cb);
+    lv_obj_t *audio_vu_l;
+    lv_obj_t *audio_vu_r;
 
 private:
     static void volumeEventHandler(lv_event_t * e);
@@ -55,6 +62,7 @@ private:
     static void setupEventHandler(lv_event_t * e);
     static void closeSetupEventHandler(lv_event_t * e);
     static void voiceEventHandler(lv_event_t * e);
+    static void balanceEventHandler(lv_event_t * e);
     static VolumeCallback volumeCb;
     static WiFiConfigCallback wifiCb;
     static APIConfigCallback apiCb;
@@ -62,6 +70,7 @@ private:
     static AdminConfigCallback adminCb;
     static VoiceCallback voiceCb;
     static SetupModeCallback setupModeCb;
+    static BalanceCallback balanceCb;
     Arduino_DataBus *bus;
     Arduino_GFX *gfx;
     XPT2046_Touchscreen *ts;

@@ -52,6 +52,8 @@ extern void setAecDebug(bool enable);
 extern void setAecDelay(int delay);
 extern void setAecGain(int gain);
 extern void setAecPhase(bool invert);
+extern void setInputBalance(int balance);
+extern void getAudioLevels(int* l, int* r);
 
 // Chime Configuration
 const char* CHIME_FILENAME = "/chime.mp3";
@@ -68,6 +70,12 @@ void onVolumeChange(int value) {
     settings.volume = value;
     Serial.printf("Volume: %d (Tone disabled)\n", settings.volume);
     speaker.setVolume(settings.volume);
+    settings.save();
+}
+
+void onBalanceChange(int value) {
+    settings.inputBalance = value;
+    setInputBalance(value);
     settings.save();
 }
 
@@ -232,6 +240,9 @@ void handleWebRoot() {
     html += "API Key: <input type='text' name='apiKey' value='" + String(settings.apiKey) + "'><br>";
     html += "API URL: <input type='text' name='apiUrl' value='" + String(settings.apiUrl) + "'><br>";
     
+    html += "System Prompt:<br>";
+    html += "<textarea name='systemPrompt' rows='3' style='width:100%'>" + String(settings.systemPrompt) + "</textarea><br>";
+
     html += "Timezone: <select name='timezone'>";
     String tzs[] = {"UTC0", "EST5EDT,M3.2.0,M11.1.0", "CST6CDT,M3.2.0,M11.1.0", "MST7MDT,M3.2.0,M11.1.0", "PST8PDT,M3.2.0,M11.1.0", "MST7", "GMT0BST,M3.5.0/1,M10.5.0", "CET-1CEST,M3.5.0,M10.5.0/3", "JST-9", "CST-8", "AEST-10AEDT,M10.1.0,M4.1.0/3"};
     String names[] = {"UTC", "US Eastern", "US Central", "US Mountain", "US Pacific", "US Arizona", "London", "Paris/Berlin", "Tokyo", "Shanghai", "Sydney"};
@@ -295,6 +306,7 @@ void handleWebSave() {
     String newColor = server.hasArg("clockColor") ? server.arg("clockColor") : settings.clockColor;
     String newOwKey = server.hasArg("owKey") ? server.arg("owKey") : settings.openWeatherKey;
     String newOwLoc = server.hasArg("owLoc") ? server.arg("owLoc") : settings.weatherLocation;
+    String newSysPrompt = server.hasArg("systemPrompt") ? server.arg("systemPrompt") : settings.systemPrompt;
 
     if (server.hasArg("wakeThreshold")) {
         float val = server.arg("wakeThreshold").toFloat();
@@ -324,6 +336,7 @@ void handleWebSave() {
     strlcpy(settings.clockColor, newColor.c_str(), sizeof(settings.clockColor));
     strlcpy(settings.openWeatherKey, newOwKey.c_str(), sizeof(settings.openWeatherKey));
     strlcpy(settings.weatherLocation, newOwLoc.c_str(), sizeof(settings.weatherLocation));
+    strlcpy(settings.systemPrompt, newSysPrompt.c_str(), sizeof(settings.systemPrompt));
     settings.save();
     
     forceConfig = false;
@@ -332,6 +345,7 @@ void handleWebSave() {
     llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
     setenv("TZ", settings.timeZone, 1);
     tzset();
+    llm.setSystemPrompt(settings.systemPrompt);
 
     // Refresh weather immediately if configured
     if (newOwKey.length() > 0) getWeather();
@@ -584,15 +598,6 @@ void handleSerialCommands() {
                 display.showResponse("TTS Failed");
             }
           }
-        } else if (inputBuffer.startsWith("/llm ")) {
-          String newModel = inputBuffer.substring(5);
-          newModel.trim();
-          if (newModel.length() > 0) {
-            strlcpy(settings.llmModel, newModel.c_str(), sizeof(settings.llmModel));
-            settings.save();
-            llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
-            Serial.println("LLM Model updated to: " + newModel);
-          }
         } else if (inputBuffer == "/test_mic" && settings.debugMode) {
           Serial.println("Testing Microphone (5s recording)...");
           display.showStatus("Recording (5s)...");
@@ -635,8 +640,6 @@ void handleSerialCommands() {
         } else if (inputBuffer == "/new") {
           llm.clearHistory();
           Serial.println("Conversation history cleared.");
-        } else if (inputBuffer == "/voices") {
-          updateVoiceList();
         } else {
           speaker.stop(); // Stop any current playback before processing new request
           isSpeaking = false;
@@ -739,6 +742,7 @@ void setup() {
   display.setAdminConfigCallback(onAdminConfig);
   display.setVoiceCallback(onVoiceChange);
   display.setSetupModeCallback(onSetupMode);
+  display.setBalanceCallback(onBalanceChange);
 
   // Check for touch calibration status
   if (settings.calibration.isValid) {
@@ -762,6 +766,7 @@ void setup() {
   adminPassword = adminPrefs.getString("pass", "");
   ttsVoice = adminPrefs.getString("voice", "alloy");
   wakeThreshold = adminPrefs.getFloat("wake_thresh", 0.8);
+  setInputBalance(settings.inputBalance);
   if (adminPassword == "") {
       display.showAdminConfig();
       while (adminPassword == "") {
@@ -962,7 +967,7 @@ void setup() {
   }
 
   // Set a system prompt using PSRAM allocation
-  llm.setSystemPrompt("You are a helpful AI assistant running on an ESP32-S3.");
+  llm.setSystemPrompt(settings.systemPrompt);
   
   // Final UI Load
   display.showMainUI(ttsVoice, settings.volume, voiceOptions);
@@ -979,6 +984,11 @@ void loop() {
   // Handle LVGL GUI - Skip updates during playback to prioritize audio bus bandwidth
   if (!isSpeaking) {
     lv_timer_handler();
+    
+    // Update VU Meter if active
+    int l, r;
+    getAudioLevels(&l, &r);
+    display.updateAudioVUMeter(l, r);
   }
 
   // Hourly Weather Update
@@ -1005,18 +1015,9 @@ void loop() {
               }
           }
           
-          // Flash border white twice
-          lv_obj_t * scr = lv_scr_act();
-          for (int i = 0; i < 2; i++) {
-              lv_obj_set_style_border_width(scr, 10, 0);
-              lv_obj_set_style_border_color(scr, lv_color_white(), 0);
-              lv_obj_set_style_border_side(scr, LV_BORDER_SIDE_FULL, 0);
-              lv_timer_handler();
-              delay(250);
-              lv_obj_set_style_border_width(scr, 0, 0);
-              lv_timer_handler();
-              delay(250);
-          }
+          // Flash Status Box instead of border
+          display.flashStatusAnimation();
+          
           onVoiceChange("TALK_ACTION");
       }
   }

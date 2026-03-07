@@ -228,6 +228,7 @@ APIUrlConfigCallback DisplayManager::apiUrlCb = nullptr;
 AdminConfigCallback DisplayManager::adminCb = nullptr;
 VoiceCallback DisplayManager::voiceCb = nullptr;
 SetupModeCallback DisplayManager::setupModeCb = nullptr;
+BalanceCallback DisplayManager::balanceCb = nullptr;
 
 // LVGL Flush Callback
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
@@ -245,6 +246,8 @@ DisplayManager::DisplayManager() {
     static_gfx = gfx; // Assign static pointer for callback
     static_dm = this;
     statusLabel = nullptr;
+    audio_vu_l = nullptr;
+    audio_vu_r = nullptr;
     spinner = nullptr;
     ts = nullptr;
     _lastVoice = "alloy";
@@ -388,6 +391,8 @@ static void idle_timer_cb(lv_timer_t * t) {
 
 static void showClockScreen() {
     lv_obj_clean(lv_scr_act());
+    if (static_dm) { static_dm->audio_vu_l = nullptr; static_dm->audio_vu_r = nullptr; }
+
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
 
     // Container to center the clock
@@ -494,6 +499,7 @@ static void showClockScreen() {
 
 static void showVoiceModelConfig() {
     lv_obj_clean(lv_scr_act());
+    if (static_dm) { static_dm->audio_vu_l = nullptr; static_dm->audio_vu_r = nullptr; }
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
 
     lv_obj_t * title = lv_label_create(lv_scr_act());
@@ -600,6 +606,7 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
 
     boot_cont = nullptr; // Clear boot container reference
     lv_obj_clean(lv_scr_act());
+    audio_vu_l = nullptr; audio_vu_r = nullptr;
     // Dark Theme Background
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
 
@@ -629,6 +636,19 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
         showVoiceModelConfig();
     }, LV_EVENT_CLICKED, NULL);
 
+    // Audio Config Button (Left of Config)
+    lv_obj_t *btnAudio = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btnAudio, 40, 40);
+    lv_obj_align_to(btnAudio, btnConfig, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+    lv_obj_set_style_bg_color(btnAudio, lv_color_make(60, 60, 60), 0);
+    lv_obj_set_style_radius(btnAudio, 20, 0);
+    lv_obj_t *lblAudio = lv_label_create(btnAudio);
+    lv_label_set_text(lblAudio, LV_SYMBOL_AUDIO);
+    lv_obj_center(lblAudio);
+    lv_obj_add_event_cb(btnAudio, [](lv_event_t * e){
+        if (static_dm) static_dm->showAudioConfig();
+    }, LV_EVENT_CLICKED, NULL);
+
     // --- Volume Area (Top Left) ---
 
     // Volume Label
@@ -639,7 +659,7 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
 
     // Volume Slider (Horizontal)
     lv_obj_t * slider_vol = lv_slider_create(lv_scr_act());
-    lv_obj_set_width(slider_vol, 140);
+    lv_obj_set_width(slider_vol, 100); // Reduced from 140 to fit new button
     lv_obj_set_height(slider_vol, 10);
     lv_obj_align(slider_vol, LV_ALIGN_TOP_LEFT, 40, 23);
     lv_slider_set_range(slider_vol, 0, 21);
@@ -706,6 +726,7 @@ void DisplayManager::fadeBacklight(uint8_t target, int durationMs) {
 
 static void setupBootScreen() {
     lv_obj_clean(lv_scr_act());
+    if (static_dm) { static_dm->audio_vu_l = nullptr; static_dm->audio_vu_r = nullptr; }
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
     
     boot_cont = lv_obj_create(lv_scr_act());
@@ -828,6 +849,7 @@ void DisplayManager::setWiFiConfigCallback(WiFiConfigCallback cb) {
 
 void DisplayManager::showWiFiConfig() {
     lv_obj_clean(lv_scr_act());
+    audio_vu_l = nullptr; audio_vu_r = nullptr;
     boot_cont = nullptr;
     statusLabel = nullptr;
     
@@ -881,6 +903,7 @@ void DisplayManager::setAPIConfigCallback(APIConfigCallback cb) {
 
 void DisplayManager::showAPIConfig(String currentKey) {
     lv_obj_clean(lv_scr_act());
+    audio_vu_l = nullptr; audio_vu_r = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "API Key Configuration");
@@ -993,6 +1016,7 @@ void DisplayManager::setAPIUrlConfigCallback(APIUrlConfigCallback cb) {
 
 void DisplayManager::showAPIUrlConfig(String currentUrl) {
     lv_obj_clean(lv_scr_act());
+    audio_vu_l = nullptr; audio_vu_r = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "API URL Configuration");
@@ -1037,6 +1061,7 @@ void DisplayManager::setAdminConfigCallback(AdminConfigCallback cb) {
 
 void DisplayManager::showAdminConfig() {
     lv_obj_clean(lv_scr_act());
+    audio_vu_l = nullptr; audio_vu_r = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "Set Admin Password");
@@ -1067,6 +1092,7 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
     }
 
     lv_obj_clean(lv_scr_act());
+    audio_vu_l = nullptr; audio_vu_r = nullptr;
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
     
     // Check if configuration is incomplete (default values or empty)
@@ -1128,6 +1154,7 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
 
 void DisplayManager::showWiFiError(const char* message) {
     lv_obj_clean(lv_scr_act());
+    audio_vu_l = nullptr; audio_vu_r = nullptr;
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, message);
     lv_obj_align(label, LV_ALIGN_CENTER, 0, -40);
@@ -1323,4 +1350,130 @@ void DisplayManager::calibrateTouch(TouchCalibration& cal) {
 void DisplayManager::updateWeather(const char* temp, const char* desc) {
     strlcpy(_weatherTemp, temp, sizeof(_weatherTemp));
     strlcpy(_weatherDesc, desc, sizeof(_weatherDesc));
+}
+
+void DisplayManager::flashStatusAnimation() {
+    // Ensure we are on the Main UI (wakes from clock if needed)
+    if (g_clockTimer) {
+        showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+        // Allow UI to settle/render so the box exists
+        lv_timer_handler(); 
+    }
+
+    if (!statusLabel) return;
+    
+    lv_obj_t * cont = lv_obj_get_parent(statusLabel);
+    if (!cont) return;
+
+    // Flash loop
+    for (int i = 0; i < 2; i++) {
+        // Invert: Box White, Text Black
+        lv_obj_set_style_bg_color(cont, lv_color_white(), 0);
+        lv_obj_set_style_text_color(statusLabel, lv_color_black(), 0);
+        lv_timer_handler();
+        delay(250);
+        
+        // Restore: Box Dark Grey (50,50,50), Text White
+        lv_obj_set_style_bg_color(cont, lv_color_make(50, 50, 50), 0);
+        lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
+        lv_timer_handler();
+        delay(250);
+    }
+}
+
+void DisplayManager::showAudioConfig() {
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
+    
+    // Reset pointers
+    audio_vu_l = nullptr;
+    audio_vu_r = nullptr;
+
+    lv_obj_t * title = lv_label_create(lv_scr_act());
+    lv_label_set_text(title, "Audio Settings");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+    // VU Meters
+    // If Stereo (0) or Left (1), show Left
+    if (settings.micMode == 0 || settings.micMode == 1) {
+        audio_vu_l = lv_bar_create(lv_scr_act());
+        lv_obj_set_size(audio_vu_l, 200, 15);
+        lv_obj_align(audio_vu_l, LV_ALIGN_TOP_MID, 0, 50);
+        lv_bar_set_range(audio_vu_l, 0, 32767);
+        lv_obj_set_style_bg_color(audio_vu_l, lv_color_make(40, 40, 40), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(audio_vu_l, lv_palette_main(LV_PALETTE_GREEN), LV_PART_INDICATOR);
+        
+        lv_obj_t * l_lbl = lv_label_create(lv_scr_act());
+        lv_label_set_text(l_lbl, "L");
+        lv_obj_align_to(l_lbl, audio_vu_l, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+        lv_obj_set_style_text_color(l_lbl, lv_color_white(), 0);
+    }
+
+    // If Stereo (0) or Right (2), show Right
+    if (settings.micMode == 0 || settings.micMode == 2) {
+        audio_vu_r = lv_bar_create(lv_scr_act());
+        lv_obj_set_size(audio_vu_r, 200, 15);
+        int y_offset = (settings.micMode == 0) ? 80 : 50;
+        lv_obj_align(audio_vu_r, LV_ALIGN_TOP_MID, 0, y_offset);
+        lv_bar_set_range(audio_vu_r, 0, 32767);
+        lv_obj_set_style_bg_color(audio_vu_r, lv_color_make(40, 40, 40), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(audio_vu_r, lv_palette_main(LV_PALETTE_RED), LV_PART_INDICATOR);
+
+        lv_obj_t * r_lbl = lv_label_create(lv_scr_act());
+        lv_label_set_text(r_lbl, "R");
+        lv_obj_align_to(r_lbl, audio_vu_r, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+        lv_obj_set_style_text_color(r_lbl, lv_color_white(), 0);
+    }
+
+    // Balance Slider
+    lv_obj_t * label_bal = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_bal, "Input Balance");
+    lv_obj_set_style_text_color(label_bal, lv_color_white(), 0);
+    lv_obj_align(label_bal, LV_ALIGN_CENTER, 0, 20);
+
+    lv_obj_t * slider_bal = lv_slider_create(lv_scr_act());
+    lv_obj_set_width(slider_bal, 200);
+    lv_obj_align(slider_bal, LV_ALIGN_CENTER, 0, 50);
+    lv_slider_set_range(slider_bal, -100, 100);
+    lv_slider_set_value(slider_bal, settings.inputBalance, LV_ANIM_OFF);
+    lv_obj_add_event_cb(slider_bal, balanceEventHandler, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t * lbl_l = lv_label_create(lv_scr_act());
+    lv_label_set_text(lbl_l, "L");
+    lv_obj_align_to(lbl_l, slider_bal, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+    lv_obj_set_style_text_color(lbl_l, lv_color_white(), 0);
+
+    lv_obj_t * lbl_r = lv_label_create(lv_scr_act());
+    lv_label_set_text(lbl_r, "R");
+    lv_obj_align_to(lbl_r, slider_bal, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    lv_obj_set_style_text_color(lbl_r, lv_color_white(), 0);
+
+    // Close Button
+    lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btnClose, 80, 40);
+    lv_obj_align(btnClose, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_t *lblClose = lv_label_create(btnClose);
+    lv_label_set_text(lblClose, "Close");
+    lv_obj_center(lblClose);
+    lv_obj_add_event_cb(btnClose, [](lv_event_t * e){
+        if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+    }, LV_EVENT_CLICKED, NULL);
+}
+
+void DisplayManager::updateAudioVUMeter(int l, int r) {
+    if (audio_vu_l) lv_bar_set_value(audio_vu_l, l, LV_ANIM_OFF);
+    if (audio_vu_r) lv_bar_set_value(audio_vu_r, r, LV_ANIM_OFF);
+}
+
+void DisplayManager::setBalanceCallback(BalanceCallback cb) {
+    balanceCb = cb;
+}
+
+void DisplayManager::balanceEventHandler(lv_event_t * e) {
+    if (balanceCb) {
+        lv_obj_t * slider = lv_event_get_target(e);
+        balanceCb(lv_slider_get_value(slider));
+    }
 }

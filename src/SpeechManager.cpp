@@ -29,12 +29,17 @@ static volatile bool s_debug_aec = false;
 static volatile int s_aec_target_delay = 640; // Default ~40ms (Aligned with user suggestion)
 static volatile int s_aec_gain = 2; // Default Gain 2x to match Mic levels
 static volatile bool s_aec_invert = false; // Phase inversion flag
+static volatile int s_input_balance = 0; // -100 to 100
+static volatile int32_t s_peak_l = 0;
+static volatile int32_t s_peak_r = 0;
 
 // Global functions for main.cpp to call
 void setAecDebug(bool enable) { s_debug_aec = enable; Serial.printf("AEC Debug: %s\n", enable ? "ON" : "OFF"); }
 void setAecDelay(int delay) { s_aec_target_delay = delay; Serial.printf("AEC Target Delay: %d samples\n", delay); }
 void setAecGain(int gain) { s_aec_gain = gain; Serial.printf("AEC Ref Gain: %d\n", gain); }
 void setAecPhase(bool invert) { s_aec_invert = invert; Serial.printf("AEC Phase Invert: %s\n", invert ? "ON" : "OFF"); }
+void setInputBalance(int balance) { s_input_balance = balance; }
+void getAudioLevels(int* l, int* r) { *l = s_peak_l; *r = s_peak_r; }
 
 static RingbufHandle_t s_processed_ringbuf = NULL; // Buffer for clean audio
 static i2s_chan_handle_t s_rx_handle = NULL;
@@ -78,17 +83,30 @@ void feed_Task(void *arg) {
             // We need FRAME_SIZE samples. Stereo * 32-bit = 8 bytes per sample.
             if (i2s_channel_read(s_rx_handle, i2s_raw_buff, sizeof(i2s_raw_buff), &bytes_read, portMAX_DELAY) == ESP_OK) {
                 
+                // Apply Input Balance
+                if (s_input_balance != 0) {
+                    float gainL = 1.0f;
+                    float gainR = 1.0f;
+                    if (s_input_balance < 0) gainR = 1.0f - ((float)abs(s_input_balance) / 100.0f);
+                    else if (s_input_balance > 0) gainL = 1.0f - ((float)s_input_balance / 100.0f);
+
+                    for (int i = 0; i < FRAME_SIZE; i++) {
+                        i2s_raw_buff[i*2] = (int32_t)(i2s_raw_buff[i*2] * gainL);
+                        i2s_raw_buff[i*2+1] = (int32_t)(i2s_raw_buff[i*2+1] * gainR);
+                    }
+                }
+                
                 // Debug: Analyze Stereo Input Levels
                 int32_t max_l = 0;
                 int32_t max_r = 0;
-                if (s_debug_aec) {
-                    for (int i = 0; i < FRAME_SIZE; i++) {
-                        int32_t l = abs(i2s_raw_buff[i*2] >> 13);
-                        int32_t r = abs(i2s_raw_buff[i*2+1] >> 13);
-                        if (l > max_l) max_l = l;
-                        if (r > max_r) max_r = r;
-                    }
+                for (int i = 0; i < FRAME_SIZE; i++) {
+                    int32_t l = abs(i2s_raw_buff[i*2] >> 14);
+                    int32_t r = abs(i2s_raw_buff[i*2+1] >> 14);
+                    if (l > max_l) max_l = l;
+                    if (r > max_r) max_r = r;
                 }
+                s_peak_l = max_l;
+                s_peak_r = max_r;
 
                 // 2. Read Reference from Circular Buffer
                 bool has_ref = false;
@@ -279,6 +297,8 @@ bool SpeechManager::detectWakeWord(float threshold) {
     
     // Use static to persist peak level across multiple calls until inference runs
     static int32_t max_audio_level = 0;
+    static int32_t max_l_level = 0;
+    static int32_t max_r_level = 0;
     static float dc_offset = 0.0f;
     static int32_t debug_min_val = 32767;
     static int32_t debug_max_val = -32768;
@@ -289,10 +309,15 @@ bool SpeechManager::detectWakeWord(float threshold) {
         if (processed_buff) {
             // Speex returns 16-bit clean audio
             raw = processed_buff[i];
+            // Capture AEC peaks if available (snapshot from feed_Task)
+            if (s_peak_l > max_l_level) max_l_level = s_peak_l;
+            if (s_peak_r > max_r_level) max_r_level = s_peak_r;
         } else {
             // Fallback processing: Convert 32-bit Stereo to 16-bit Mono
             int32_t l = raw_i2s_buffer[i*2] >> 14;
             int32_t r = raw_i2s_buffer[i*2+1] >> 14;
+            if (abs(l) > max_l_level) max_l_level = abs(l);
+            if (abs(r) > max_r_level) max_r_level = abs(r);
             raw = (l + r) / 2; 
 
             // DC Offset removal (High-pass filter)
@@ -337,13 +362,15 @@ bool SpeechManager::detectWakeWord(float threshold) {
         }
 
         // Print Debug Info
-        Serial.printf("Raw: %d | Time: %dms | ", max_audio_level, result.timing.dsp + result.timing.classification);
+        Serial.printf("Raw: %d | L: %d R: %d | Time: %dms | ", max_audio_level, max_l_level, max_r_level, result.timing.dsp + result.timing.classification);
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
             Serial.printf("%s: %.2f ", result.classification[ix].label, result.classification[ix].value);
         }
         Serial.println();
         
         max_audio_level = 0;
+        max_l_level = 0;
+        max_r_level = 0;
         debug_min_val = 32767;
         debug_max_val = -32768;
 
