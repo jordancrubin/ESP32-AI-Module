@@ -26,6 +26,7 @@ A fully integrated, voice-controlled AI assistant running on the ESP32-S3. This 
 | ![Main UI](images/ui_main.jpg) | ![Clock](images/ui_clock.jpg) | ![Config](images/web_config.jpg) |
 
 ![Early development](images/early_dev.jpg)
+<img src="images/early_dev.jpg" width="50%">
 *Early development*
 
 ## Hardware Requirements
