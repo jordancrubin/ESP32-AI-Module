@@ -22,9 +22,9 @@
 #define I2S_SD     40 // DOUT
 
 // I2S Speaker Pins (MAX98357)
-#define SPEAKER_SCK 17 // BCLK
-#define SPEAKER_WS  16 // LRC
-#define SPEAKER_SD  15 // DIN
+#define SPEAKER_SCK 7 // BCLK
+#define SPEAKER_WS  6 // LRC
+#define SPEAKER_SD  5 // DIN
 
 // Color Definitions
 #define RED   0xF800

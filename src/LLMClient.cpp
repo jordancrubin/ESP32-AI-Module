@@ -12,6 +12,27 @@
 
 extern SettingsManager settings;
 
+String LLMClient::getTtsBaseUrl() {
+    if (settings.ttsProvider == 1 && strlen(settings.ttsUrl) > 0) {
+        // Direct Mode: Use the specified URL
+        return String(settings.ttsUrl);
+    } else {
+        // OpenWebUI Mode: Derive from main API URL (preserve port/host)
+        String url = _apiUrl;
+        
+        // Strip the specific chat endpoint to get the base
+        // e.g. http://192.168.1.50:3000/api/chat/completions -> http://192.168.1.50:3000/api
+        int split = url.indexOf("/chat/completions");
+        if (split != -1) url = url.substring(0, split);
+
+        if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+        // If the base ends in /v1, strip it because downloadTTS appends /v1/audio/speech
+        if (url.endsWith("/v1")) url = url.substring(0, url.length() - 3);
+
+        return url;
+    }
+}
+
 LLMClient::LLMClient(const char* apiUrl, const char* apiKey, const char* model)
     : _apiUrl(apiUrl), _apiKey(apiKey), _model(model), _systemPrompt(nullptr) {
     _history = _historyDoc.to<JsonArray>();
@@ -128,6 +149,21 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     doc["model"] = _model;
     doc["stream"] = false;
     doc["messages"] = _history;
+    
+    if (settings.enableWebSearch) {
+        doc["features"]["web_search"] = true;
+        
+        // Dynamically append web search rules to the system prompt for this request
+        if (doc["messages"].size() > 0 && doc["messages"][0]["role"] == "system") {
+            String sysText = doc["messages"][0]["content"].as<String>();
+            sysText += " Use web search ONLY for real-time info. For basic facts or math, answer immediately. IMPORTANT: Provide direct answers only. Never mention 'searching the web,' 'according to the website,' or 'my search results.' Do not use phrases like 'I'll do a web search' or 'Searching online.' If you find information via tools, integrate it naturally into your speech as if you already knew it. No citations or [1] brackets. Short, conversational responses only.";
+            doc["messages"][0]["content"] = sysText;
+        }
+    }
+
+    if (settings.enableMemory) {
+        doc["features"]["memory"] = true;
+    }
 
     // Serialize to PSRAM to save Internal RAM
     size_t requestSize = measureJson(doc);
@@ -191,19 +227,25 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
     (void)cb; // Mark unused to prevent compiler warnings
     if (!netMgr.isConnected()) return false;
 
-    // Construct TTS URL based on Docker configuration (Port 8880)
-    String url = _apiUrl;
-    
-    // Extract base URL (protocol + host)
-    int doubleSlash = url.indexOf("//");
-    int pathStart = url.indexOf("/", doubleSlash + 2);
-    String base = (pathStart == -1) ? url : url.substring(0, pathStart);
-    
-    // Strip existing port if present (e.g. :3000) and add :8880 for Kokoro TTS
-    int portSep = base.lastIndexOf(":");
-    if (portSep > doubleSlash) base = base.substring(0, portSep);
+    // Construct TTS URL using helper
+    String baseUrl = getTtsBaseUrl();
+    if (baseUrl.length() == 0) {
+        if (settings.debugMode) Serial.println("TTS Error: TTS URL is not configured for Direct mode.");
+        return false;
+    }
 
-    url = base + ":8880/v1/audio/speech";
+    String url = baseUrl;
+
+    // Only modify URL if we are in OpenWebUI mode (0).
+    // In Direct Mode (1), we use the URL exactly as input.
+    if (settings.ttsProvider == 0) {
+        int voicesIdx = url.indexOf("/v1/audio/voices");
+        if (voicesIdx != -1) url = url.substring(0, voicesIdx);
+
+        if (url.indexOf("/v1/audio/speech") == -1) {
+            url += (url.endsWith("/") ? "" : "/") + String("v1/audio/speech");
+        }
+    }
 
     String serverPath = netMgr.resolveHost(url);
     if (serverPath == "") return false;
@@ -427,19 +469,21 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
 String LLMClient::getVoices(WiFiManager& netMgr) {
     if (!netMgr.isConnected()) return "Error: WiFi not connected";
 
-    // Construct TTS URL based on Docker configuration (Port 8880)
-    String url = _apiUrl;
-    
-    // Extract base URL (protocol + host)
-    int doubleSlash = url.indexOf("//");
-    int pathStart = url.indexOf("/", doubleSlash + 2);
-    String base = (pathStart == -1) ? url : url.substring(0, pathStart);
-    
-    // Strip existing port if present (e.g. :3000) and add :8880 for Kokoro TTS
-    int portSep = base.lastIndexOf(":");
-    if (portSep > doubleSlash) base = base.substring(0, portSep);
+    // Construct TTS URL using helper
+    String baseUrl = getTtsBaseUrl();
+    if (baseUrl.length() == 0) {
+        if (settings.debugMode) Serial.println("GetVoices Error: TTS URL is not configured for Direct mode.");
+        return "Error: TTS URL not configured";
+    }
 
-    url = base + ":8880/v1/audio/voices";
+    // Sanitize: If user pasted the speech URL into config by mistake, strip it
+    int speechIdx = baseUrl.indexOf("/v1/audio/speech");
+    if (speechIdx != -1) baseUrl = baseUrl.substring(0, speechIdx);
+
+    String url = baseUrl;
+    if (url.indexOf("/v1/audio/voices") == -1) {
+        url += (url.endsWith("/") ? "" : "/") + String("v1/audio/voices");
+    }
 
     String serverPath = netMgr.resolveHost(url);
     if (serverPath == "") return "Error: Host resolution failed";

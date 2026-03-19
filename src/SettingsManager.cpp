@@ -26,6 +26,10 @@ SettingsManager::SettingsManager() {
     debugMode = false;
     inputBalance = 0; // Center
     strlcpy(systemPrompt, "You are a helpful AI assistant running on an ESP32-S3.", sizeof(systemPrompt));
+    ttsProvider = 0; // Default to OpenWebUI
+    ttsUrl[0] = '\0';
+    enableWebSearch = false; // Default to false
+    enableMemory = false;
 }
 
 void SettingsManager::begin() {
@@ -51,6 +55,10 @@ void SettingsManager::load() {
     debugMode = prefs.getBool("debug", debugMode);
     inputBalance = prefs.getInt("in_bal", inputBalance);
     if (prefs.isKey("sys_prompt")) prefs.getString("sys_prompt", systemPrompt, sizeof(systemPrompt));
+    ttsProvider = prefs.getInt("tts_prov", ttsProvider);
+    if (prefs.isKey("tts_url")) prefs.getString("tts_url", ttsUrl, sizeof(ttsUrl));
+    enableWebSearch = prefs.getBool("web_srch", enableWebSearch);
+    enableMemory = prefs.getBool("mem_en", enableMemory);
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
         prefs.getBytes("cal", &calibration, sizeof(TouchCalibration));
@@ -75,4 +83,8 @@ void SettingsManager::save() {
     prefs.putBool("debug", debugMode);
     prefs.putInt("in_bal", inputBalance);
     prefs.putString("sys_prompt", systemPrompt);
+    prefs.putInt("tts_prov", ttsProvider);
+    prefs.putString("tts_url", ttsUrl);
+    prefs.putBool("web_srch", enableWebSearch);
+    prefs.putBool("mem_en", enableMemory);
 }

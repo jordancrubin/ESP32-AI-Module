@@ -25,6 +25,9 @@ static TouchCalibration _currentCal;
 static bool is_touch_active = false;
 static bool touch_disabled = false;
 
+extern bool isProcessing;
+extern bool isSpeaking;
+
 // Global state for Clock/Idle handling
 static String g_lastVoice = "alloy";
 static int g_lastVolume = 21;
@@ -379,6 +382,12 @@ static void clock_click_cb(lv_event_t * e) {
 
 // Callback to check for inactivity
 static void idle_timer_cb(lv_timer_t * t) {
+    // Prevent clock screen during active interactions
+    if (isProcessing || isSpeaking) {
+        lv_disp_trig_activity(NULL);
+        return;
+    }
+
     // If inactive for 30 seconds, switch to clock
     if (lv_disp_get_inactive_time(NULL) > 30000) {
         if (g_idleTimer) {
@@ -594,6 +603,7 @@ static void showVoiceModelConfig() {
 }
 
 void DisplayManager::showMainUI(String currentVoice, int currentVolume, String voiceOptions) {
+    lv_disp_trig_activity(NULL); // Reset idle timer to keep screen awake
     if (g_clockTimer) {
         lv_timer_del(g_clockTimer);
         g_clockTimer = nullptr;
@@ -691,7 +701,7 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(statusLabel, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
-    if (g_lastStatus.length() < 20) {
+    if (g_lastStatus.length() < 13) {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
     } else {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
@@ -745,6 +755,7 @@ static void setupBootScreen() {
 }
 
 void DisplayManager::showStatus(const char* message) {
+    lv_disp_trig_activity(NULL); // Reset idle timer
     g_lastStatus = message;
     
     // If no UI is active (e.g. transitioning from WiFi config), recreate boot screen
@@ -789,7 +800,7 @@ void DisplayManager::showStatus(const char* message) {
     }
     if (statusLabel) {
         lv_label_set_text(statusLabel, message);
-        if (String(message).length() < 20) {
+        if (String(message).length() < 13) {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
         } else {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
@@ -798,13 +809,14 @@ void DisplayManager::showStatus(const char* message) {
 }
 
 void DisplayManager::showResponse(const String& response) {
+    lv_disp_trig_activity(NULL); // Reset idle timer
     g_lastStatus = response;
     if (g_clockTimer) {
         showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
     }
     if (statusLabel) {
         lv_label_set_text(statusLabel, response.c_str());
-        if (response.length() < 20) {
+        if (response.length() < 13) {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
         } else {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
@@ -836,6 +848,7 @@ void DisplayManager::showBootLogo() {
 }
 
 void DisplayManager::showThinking(bool active) {
+    lv_disp_trig_activity(NULL); // Reset idle timer
     if (g_clockTimer) {
         showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
     }
@@ -1131,6 +1144,13 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
     lv_obj_align(note, LV_ALIGN_TOP_LEFT, 10, 75);
 
+    lv_obj_t * update_label = lv_label_create(lv_scr_act());
+    String updateStr = "OTA Update: http://" + hostname + "/update";
+    lv_label_set_text(update_label, updateStr.c_str());
+    lv_obj_set_style_text_font(update_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(update_label, lv_color_make(180, 180, 180), 0);
+    lv_obj_align(update_label, LV_ALIGN_TOP_LEFT, 10, 100);
+
     // Debug Toggle Row (Left Aligned)
     lv_obj_t * sw_lbl = lv_label_create(lv_scr_act());
     lv_label_set_text(sw_lbl, "Debug");
@@ -1367,35 +1387,6 @@ void DisplayManager::updateWeather(const char* temp, const char* desc) {
     strlcpy(_weatherDesc, desc, sizeof(_weatherDesc));
 }
 
-void DisplayManager::flashStatusAnimation() {
-    // Ensure we are on the Main UI (wakes from clock if needed)
-    if (g_clockTimer) {
-        showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
-        // Allow UI to settle/render so the box exists
-        lv_timer_handler(); 
-    }
-
-    if (!statusLabel) return;
-    
-    lv_obj_t * cont = lv_obj_get_parent(statusLabel);
-    if (!cont) return;
-
-    // Flash loop
-    for (int i = 0; i < 2; i++) {
-        // Invert: Box White, Text Black
-        lv_obj_set_style_bg_color(cont, lv_color_white(), 0);
-        lv_obj_set_style_text_color(statusLabel, lv_color_black(), 0);
-        lv_timer_handler();
-        delay(250);
-        
-        // Restore: Box Dark Grey (50,50,50), Text White
-        lv_obj_set_style_bg_color(cont, lv_color_make(50, 50, 50), 0);
-        lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
-        lv_timer_handler();
-        delay(250);
-    }
-}
-
 void DisplayManager::showAudioConfig() {
     lv_obj_clean(lv_scr_act());
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
@@ -1407,7 +1398,7 @@ void DisplayManager::showAudioConfig() {
     boot_cont = nullptr;
 
     lv_obj_t * title = lv_label_create(lv_scr_act());
-    lv_label_set_text(title, "Audio Settings");
+    lv_label_set_text(title, "Audio & Display Settings");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
@@ -1417,7 +1408,7 @@ void DisplayManager::showAudioConfig() {
     if (settings.micMode == 0 || settings.micMode == 1) {
         audio_vu_l = lv_bar_create(lv_scr_act());
         lv_obj_set_size(audio_vu_l, 200, 15);
-        lv_obj_align(audio_vu_l, LV_ALIGN_TOP_MID, 0, 50);
+        lv_obj_align(audio_vu_l, LV_ALIGN_TOP_MID, 0, 35);
         lv_bar_set_range(audio_vu_l, 0, 32767);
         lv_obj_set_style_bg_color(audio_vu_l, lv_color_make(40, 40, 40), LV_PART_MAIN);
         lv_obj_set_style_bg_color(audio_vu_l, lv_palette_main(LV_PALETTE_GREEN), LV_PART_INDICATOR);
@@ -1432,7 +1423,7 @@ void DisplayManager::showAudioConfig() {
     if (settings.micMode == 0 || settings.micMode == 2) {
         audio_vu_r = lv_bar_create(lv_scr_act());
         lv_obj_set_size(audio_vu_r, 200, 15);
-        int y_offset = (settings.micMode == 0) ? 80 : 50;
+        int y_offset = (settings.micMode == 0) ? 55 : 35;
         lv_obj_align(audio_vu_r, LV_ALIGN_TOP_MID, 0, y_offset);
         lv_bar_set_range(audio_vu_r, 0, 32767);
         lv_obj_set_style_bg_color(audio_vu_r, lv_color_make(40, 40, 40), LV_PART_MAIN);
@@ -1448,11 +1439,11 @@ void DisplayManager::showAudioConfig() {
     lv_obj_t * label_bal = lv_label_create(lv_scr_act());
     lv_label_set_text(label_bal, "Input Balance");
     lv_obj_set_style_text_color(label_bal, lv_color_white(), 0);
-    lv_obj_align(label_bal, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_align(label_bal, LV_ALIGN_CENTER, 0, -25);
 
     lv_obj_t * slider_bal = lv_slider_create(lv_scr_act());
     lv_obj_set_width(slider_bal, 200);
-    lv_obj_align(slider_bal, LV_ALIGN_CENTER, 0, 50);
+    lv_obj_align(slider_bal, LV_ALIGN_CENTER, 0, 0);
     lv_slider_set_range(slider_bal, -100, 100);
     lv_slider_set_value(slider_bal, settings.inputBalance, LV_ANIM_OFF);
     lv_obj_add_event_cb(slider_bal, balanceEventHandler, LV_EVENT_VALUE_CHANGED, NULL);
@@ -1467,6 +1458,25 @@ void DisplayManager::showAudioConfig() {
     lv_obj_align_to(lbl_r, slider_bal, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
     lv_obj_set_style_text_color(lbl_r, lv_color_white(), 0);
 
+    // Brightness Slider
+    lv_obj_t * label_bri = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_bri, "Screen Brightness");
+    lv_obj_set_style_text_color(label_bri, lv_color_white(), 0);
+    lv_obj_align(label_bri, LV_ALIGN_CENTER, 0, 35);
+
+    lv_obj_t * slider_bri = lv_slider_create(lv_scr_act());
+    lv_obj_set_width(slider_bri, 200);
+    lv_obj_align(slider_bri, LV_ALIGN_CENTER, 0, 60);
+    lv_slider_set_range(slider_bri, 10, 255); // Hard limit minimum of 10
+    lv_slider_set_value(slider_bri, settings.brightness, LV_ANIM_OFF);
+    lv_obj_add_event_cb(slider_bri, [](lv_event_t * e){
+        if (static_dm) {
+            int val = lv_slider_get_value(lv_event_get_target(e));
+            settings.brightness = val;
+            static_dm->setBacklight(val); // Adjusts display hardware dynamically
+        }
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
     // Close Button
     lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
     lv_obj_set_size(btnClose, 80, 40);
@@ -1475,6 +1485,7 @@ void DisplayManager::showAudioConfig() {
     lv_label_set_text(lblClose, "Close");
     lv_obj_center(lblClose);
     lv_obj_add_event_cb(btnClose, [](lv_event_t * e){
+        settings.save(); // Save to NVRAM when menu is closed
         if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
     }, LV_EVENT_CLICKED, NULL);
 }
@@ -1493,4 +1504,73 @@ void DisplayManager::balanceEventHandler(lv_event_t * e) {
         lv_obj_t * slider = lv_event_get_target(e);
         balanceCb(lv_slider_get_value(slider));
     }
+}
+
+// --- Easter Egg ---
+void renderBSOD() {
+    if (g_clockTimer) {
+        lv_timer_del(g_clockTimer);
+        g_clockTimer = nullptr;
+    }
+    if (g_idleTimer) {
+        lv_timer_del(g_idleTimer);
+        g_idleTimer = nullptr;
+    }
+
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(0, 0, 170), 0); // Classic BSOD Blue
+
+    lv_obj_t * label = lv_label_create(lv_scr_act());
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(label, 310);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(label,
+        "A problem has been detected and ESP32 has been shut down to prevent damage to your MCU.\n\n"
+        "DRIVER_IRQL_NOT_LESS_OR_EQUAL\n\n"
+        "If this is the first time you've seen this stop error screen, restart your device. If this screen appears again, follow these steps:\n\n"
+        "Check to make sure any new hardware is properly installed and your wiring is correct.\n\n"
+        "Technical information:\n\n"
+        "*** STOP: 0x000000D1 (0x0000000C, 0x00000002, 0x00000000, 0xF86B5A89)\n"
+        "***  ESP32_HAL.sys - Address F86B5A89 base at F86B5000\n\n"
+        "Beginning dump of physical memory...");
+    
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 5, 5);
+    lv_timer_handler(); // Force the screen to draw instantly
+}
+
+void renderGuruMeditation() {
+    if (g_clockTimer) {
+        lv_timer_del(g_clockTimer);
+        g_clockTimer = nullptr;
+    }
+    if (g_idleTimer) {
+        lv_timer_del(g_idleTimer);
+        g_idleTimer = nullptr;
+    }
+
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
+
+    lv_obj_t * box = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(box, 300, 60);
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_set_style_bg_color(box, lv_color_black(), 0);
+    lv_obj_set_style_border_color(box, lv_color_make(255, 0, 0), 0);
+    lv_obj_set_style_border_width(box, 4, 0);
+    lv_obj_set_style_radius(box, 0, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * label = lv_label_create(box);
+    lv_label_set_text(label, "Software Failure.  Press left mouse button to continue.\nGuru Meditation #00000004.0000AAC0");
+    lv_obj_set_style_text_color(label, lv_color_make(255, 0, 0), 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_center(label);
+    
+    lv_timer_handler(); // Force the screen to draw instantly
+}
+
+void forceClockScreen() {
+    showClockScreen();
 }

@@ -140,11 +140,18 @@ void feed_Task(void *arg) {
 
                 // 3. Prepare Mic Frame (Convert 32-bit Stereo to 16-bit Mono)
                 for (int i = 0; i < FRAME_SIZE; i++) {
-                    // Use Left Channel (or mix)
-                    int32_t raw = i2s_raw_buff[i*2] >> 14; // Scale 24-bit to 16-bit (Lower gain to prevent clipping)
-                    if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
-                    if (s_aec_invert) raw = -raw; // Optional Phase Inversion
-                    mic_frame[i] = (int16_t)raw;
+                    // Prepare Mono Frame for AEC based on Mic Mode
+                    int32_t l = i2s_raw_buff[i*2] >> 14;
+                    int32_t r = i2s_raw_buff[i*2+1] >> 14;
+                    int32_t val = 0;
+
+                    if (settings.micMode == 2) val = r;      // Right
+                    else if (settings.micMode == 1) val = l; // Left
+                    else val = (l + r) / 2;                  // Stereo Mix
+
+                    if (val > 32767) val = 32767; else if (val < -32768) val = -32768;
+                    if (s_aec_invert) val = -val;
+                    mic_frame[i] = (int16_t)val;
                 }
 
                 // 4. Run Echo Cancellation
@@ -215,32 +222,27 @@ void SpeechManager::begin() {
         Serial.printf("Edge Impulse: Expected Sample Rate: %d Hz\n", EI_CLASSIFIER_FREQUENCY);
     }
 
-    // Initialize Speex AEC if in Stereo Mode (Mode 0)
-    if (settings.micMode == 0) {
-        s_ref_mutex = xSemaphoreCreateMutex();
-        s_processed_ringbuf = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_BYTEBUF); // Increased to 16KB
-        
-        int sampleRate = 16000;
-        int frameSize = 256; // Power of 2 often better for FFT
-        int filterLen = 1024; // ~64ms tail length (Requires synced reference)
+    // Initialize Speex AEC (Enabled for all modes)
+    s_ref_mutex = xSemaphoreCreateMutex();
+    s_processed_ringbuf = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_BYTEBUF); // Increased to 16KB
+    
+    int sampleRate = 16000;
+    int frameSize = 256;
+    int filterLen = 1024; // ~64ms tail length
 
-        st = speex_echo_state_init(frameSize, filterLen);
-        den = speex_preprocess_state_init(frameSize, sampleRate);
-        
-        speex_echo_ctl(st, SPEEX_ECHO_SET_SAMPLING_RATE, &sampleRate);
-        speex_preprocess_ctl(den, SPEEX_PREPROCESS_SET_ECHO_STATE, st);
+    st = speex_echo_state_init(frameSize, filterLen);
+    den = speex_preprocess_state_init(frameSize, sampleRate);
+    
+    speex_echo_ctl(st, SPEEX_ECHO_SET_SAMPLING_RATE, &sampleRate);
+    speex_preprocess_ctl(den, SPEEX_PREPROCESS_SET_ECHO_STATE, st);
 
-        // Optional: Enable AGC and Noise Suppression explicitly
-        int i = 1;
-        speex_preprocess_ctl(den, SPEEX_PREPROCESS_SET_DENOISE, &i);
-        // speex_preprocess_ctl(den, SPEEX_PREPROCESS_SET_AGC, &i); // Uncomment if volume is too low
-        
-        // Pin to Core 0 to prevent starving the UI/Main Loop on Core 1
-        xTaskCreatePinnedToCore(feed_Task, "Speex_Feed", 10240, NULL, 5, NULL, 0);
-        if (settings.debugMode) Serial.println("SpeechManager: Speex AEC Task Started");
-    } else {
-        if (settings.debugMode) Serial.println("SpeechManager: AEC disabled (Not in Stereo Mode).");
-    }
+    // Optional: Enable AGC and Noise Suppression explicitly
+    int i = 1;
+    speex_preprocess_ctl(den, SPEEX_PREPROCESS_SET_DENOISE, &i);
+    
+    // Pin to Core 0 to prevent starving the UI/Main Loop on Core 1
+    xTaskCreatePinnedToCore(feed_Task, "Speex_Feed", 10240, NULL, 5, NULL, 0);
+    if (settings.debugMode) Serial.println("SpeechManager: Speex AEC Task Started");
 }
 
 void SpeechManager::setupI2S() {
@@ -318,9 +320,14 @@ bool SpeechManager::detectWakeWord(float threshold) {
             // Fallback processing: Convert 32-bit Stereo to 16-bit Mono
             int32_t l = raw_i2s_buffer[i*2] >> 14;
             int32_t r = raw_i2s_buffer[i*2+1] >> 14;
+            
             if (abs(l) > max_l_level) max_l_level = abs(l);
             if (abs(r) > max_r_level) max_r_level = abs(r);
-            raw = (l + r) / 2; 
+            
+            // Respect Microphone Mode setting
+            if (settings.micMode == 2) raw = r;      // Right
+            else if (settings.micMode == 1) raw = l; // Left
+            else raw = (l + r) / 2;                  // Stereo Mix
 
             // DC Offset removal (High-pass filter)
             dc_offset = (dc_offset * 0.995f) + ((float)raw * 0.005f);
@@ -404,7 +411,7 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
 void SpeechManager::feedReference(const int16_t *data, size_t samples) {
     // Feed reference data to the Ring Buffer
-    if (s_ref_mutex && settings.micMode == 0) {
+    if (s_ref_mutex) {
         xSemaphoreTake(s_ref_mutex, portMAX_DELAY);
         for (size_t i = 0; i < samples; i++) {
             s_ref_buffer[s_ref_write_index] = data[i];
@@ -419,7 +426,7 @@ void SpeechManager::feedReference(const int16_t *data, size_t samples) {
 }
 
 uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThreshold) {
-    bool useAec = (settings.micMode == 0);
+    bool useAec = (s_processed_ringbuf != NULL);
 
     if (!useAec) {
         s_is_recording = true; // Pause the AEC feed task only if NOT using AEC
@@ -514,15 +521,21 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
             if (i2s_channel_read(rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
                 int samplesInBatch = bytesRead / 8; // 8 bytes per stereo frame
                 for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i++) {
-                    // Convert 32-bit Stereo to 16-bit Mono (Left Channel)
-                    int32_t raw = sampleBuffer[i*2] >> 14;
-                    if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
+                    int32_t l = sampleBuffer[i*2] >> 14;
+                    int32_t r = sampleBuffer[i*2+1] >> 14;
+                    int32_t val = 0;
                     
-                    if (abs(raw) > silenceThreshold) {
+                    if (settings.micMode == 2) val = r;
+                    else if (settings.micMode == 1) val = l;
+                    else val = (l + r) / 2;
+
+                    if (val > 32767) val = 32767; else if (val < -32768) val = -32768;
+                    
+                    if (abs(val) > silenceThreshold) {
                         voiceDetectedInBatch = true;
                         voiceDetectedTotal = true;
                     }
-                    pcmBuffer[samplesRead++] = (int16_t)raw;
+                    pcmBuffer[samplesRead++] = (int16_t)val;
                 }
             }
         }

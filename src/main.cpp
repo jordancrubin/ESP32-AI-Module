@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <WebServer.h>
+#include <Update.h>
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
@@ -20,6 +21,7 @@
 #include "SpeechManager.h"
 #include "SpeakerManager.h"
 #include "SettingsManager.h"
+#include "CommandProcessor.h"
 
 DisplayManager display;
 WiFiManager network("YOUR_WIFI_SSID", "YOUR_WIFI_PASSWORD");
@@ -44,7 +46,7 @@ unsigned long lastWeatherUpdate = 0;
 bool shouldConnectWiFi = false;
 String pendingSSID = "";
 String pendingPass = "";
-static bool isProcessing = false;
+bool isProcessing = false;
 static bool stopRequested = false;
 
 // External functions from SpeechManager.cpp
@@ -54,6 +56,12 @@ extern void setAecGain(int gain);
 extern void setAecPhase(bool invert);
 extern void setInputBalance(int balance);
 extern void getAudioLevels(int* l, int* r);
+extern void renderBSOD();
+extern void renderGuruMeditation();
+extern void forceClockScreen();
+
+// Forward declarations
+void testAEC();
 
 // Chime Configuration
 const char* CHIME_FILENAME = "/chime.mp3";
@@ -111,6 +119,7 @@ void onVoiceChange(String voice) {
 
         isProcessing = true;
         stopRequested = false;
+        bool triggeredEasterEgg = false;
 
         while (!stopRequested) {
             // 1. Record
@@ -137,12 +146,30 @@ void onVoiceChange(String voice) {
                 } else {
                     if (settings.debugMode) Serial.println("Transcription: " + text);
                     
-                    // 3. Send to LLM
-                    display.showStatus("Thinking...");
-                    lv_timer_handler();
-                    
-                    String answer = llm.sendPrompt(text, network);
-                    if (settings.debugMode) Serial.println("Answer: " + answer);
+                    // Process local commands
+                    CommandResult cmd = CommandProcessor::processCommand(text);
+                    bool handledLocally = cmd.handled;
+                    String localResponse = cmd.response;
+                    bool runAecTest = cmd.runAecTest;
+                    bool systemReboot = cmd.systemReboot;
+                    bool showBSOD = cmd.showBSOD;
+                    bool showGuruMeditation = cmd.showGuruMeditation;
+                    if (showBSOD || showGuruMeditation) triggeredEasterEgg = true;
+
+                    String answer;
+                    if (handledLocally) {
+                        display.showStatus("Local Command...");
+                        lv_timer_handler();
+                        answer = localResponse;
+                        if (settings.debugMode) Serial.println("Local Action: " + answer);
+                    } else {
+                        // 3. Send to LLM
+                        display.showStatus("Thinking...");
+                        lv_timer_handler();
+                        
+                        answer = llm.sendPrompt(text, network);
+                        if (settings.debugMode) Serial.println("Answer: " + answer);
+                    }
                     
                     // 4. TTS
                     display.showStatus("Speaking...");
@@ -159,6 +186,30 @@ void onVoiceChange(String voice) {
                             delay(50);
                         }
                         isSpeaking = false;
+                        
+                        if (runAecTest) {
+                            display.showStatus("Running AEC Test...");
+                            lv_timer_handler();
+                            testAEC();
+                        }
+                        
+                        if (systemReboot) {
+                            display.showStatus("Rebooting...");
+                            delay(1000);
+                            ESP.restart();
+                        }
+                        
+                        if (showBSOD) {
+                            renderBSOD();
+                            delay(5000); // Show BSOD for 5 seconds
+                            break;       // End the conversation loop
+                        }
+                        
+                        if (showGuruMeditation) {
+                            renderGuruMeditation();
+                            delay(5000); // Show Guru Meditation for 5 seconds
+                            break;       // End the conversation loop
+                        }
                     } else {
                         display.showStatus("TTS Failed");
                         break;
@@ -176,7 +227,11 @@ void onVoiceChange(String voice) {
         }
         
         isProcessing = false;
-        display.showStatus("Ready");
+        if (triggeredEasterEgg) {
+            forceClockScreen(); // Jump straight to the clock
+        } else {
+            display.showStatus("Ready"); // Normal recovery
+        }
         setLedColor(0, 0, 0); // LED Off
     } else {
         ttsVoice = voice;
@@ -197,13 +252,37 @@ void onSetupMode(bool enabled) {
     }
 }
 
+// Helper to URL encode the input string
+String urlEncode(String str) {
+    String encodedString = "";
+    char c;
+    char code0;
+    char code1;
+    for (int i = 0; i < str.length(); i++) {
+        c = str.charAt(i);
+        if (isalnum(c)) {
+            encodedString += c;
+        } else {
+            code1 = (c & 0xf) + '0';
+            if ((c & 0xf) > 9) code1 = (c & 0xf) - 10 + 'A';
+            c = (c >> 4) & 0xf;
+            code0 = c + '0';
+            if (c > 9) code0 = c - 10 + 'A';
+            encodedString += '%';
+            encodedString += code0;
+            encodedString += code1;
+        }
+    }
+    return encodedString;
+}
+
 bool getWeather() {
     if (strlen(settings.openWeatherKey) == 0) return false;
     if (!network.isConnected()) return false;
 
     HTTPClient http;
     String url = "http://api.openweathermap.org/data/2.5/weather?q=" + 
-                 String(settings.weatherLocation) + "&appid=" + 
+                 urlEncode(String(settings.weatherLocation)) + "&appid=" + 
                  String(settings.openWeatherKey) + "&units=metric";
     
     http.begin(url);
@@ -219,6 +298,11 @@ bool getWeather() {
         snprintf(tempBuf, sizeof(tempBuf), "%.0fC", temp);
         display.updateWeather(tempBuf, desc);
         success = true;
+    } else {
+        if (settings.debugMode) {
+            Serial.printf("Weather Update Failed. HTTP Code: %d\n", httpCode);
+            Serial.println("Response: " + http.getString());
+        }
     }
     http.end();
     return success;
@@ -236,9 +320,17 @@ void handleWebRoot() {
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<style>body{font-family:sans-serif;padding:20px;} input, select{width:100%;padding:10px;margin:5px 0;} .btn{background-color:#4CAF50;color:white;border:none;cursor:pointer;} .btn-blue{background-color:#008CBA;color:white;border:none;cursor:pointer;padding:10px;width:100%;margin:5px 0;}</style></head><body>";
     html += "<h2>Configuration</h2>";
+    html += "<div style='background:#e9ecef; padding:10px; margin-bottom:15px; border-radius:5px;'><b>System Update:</b> Navigate to <a href='/update'>/update</a> to upload new Firmware or Filesystem images.</div>";
     html += "<form action='/save' method='POST'>";
     html += "API Key: <input type='text' name='apiKey' value='" + String(settings.apiKey) + "'><br>";
     html += "API URL: <input type='text' name='apiUrl' value='" + String(settings.apiUrl) + "'><br>";
+    
+    html += "TTS Provider: <select name='ttsProvider'>";
+    html += "<option value='0'" + String(settings.ttsProvider == 0 ? " selected" : "") + ">OpenWebUI (Kokoro)</option>";
+    html += "<option value='1'" + String(settings.ttsProvider == 1 ? " selected" : "") + ">Direct</option>";
+    html += "</select><br>";
+    html += "Direct TTS URL: <input type='text' name='ttsUrl' value='" + String(settings.ttsUrl) + "' placeholder='e.g., http://host:port'><br>";
+    html += "<small>Used when TTS Provider is 'Direct'. Must be full base URL.</small><br><br>";
     
     html += "System Prompt:<br>";
     html += "<textarea name='systemPrompt' rows='3' style='width:100%'>" + String(settings.systemPrompt) + "</textarea><br>";
@@ -272,6 +364,9 @@ void handleWebRoot() {
 
     html += "Silence Threshold (300-2000): <input type='number' name='silenceThreshold' value='" + String(settings.silenceThreshold) + "' step='50' min='300' max='2000'><br>";
 
+    html += "Screen Brightness: <input type='range' name='brightness' min='10' max='255' value='" + String(settings.brightness) + "' oninput='this.nextElementSibling.value = this.value'> <output>" + String(settings.brightness) + "</output><br>";
+    html += "<small>Adjusts display backlight (10-255)</small><br>";
+
     html += "Microphone Mode: <select name='micMode'>";
     String micModes[] = {"Stereo (Beamforming)", "Left Channel Only", "Right Channel Only"};
     for (int i = 0; i < 3; i++) {
@@ -280,6 +375,12 @@ void handleWebRoot() {
         html += ">" + micModes[i] + "</option>";
     }
     html += "</select><br>";
+
+    html += "<h3>AI Features</h3>";
+    html += "Enable Web Search: <input type='checkbox' name='webSearch' value='1'" + String(settings.enableWebSearch ? " checked" : "") + "><br>";
+    html += "<small>Allows supported models to search the internet for real-time information.</small><br>";
+    html += "Enable Memory: <input type='checkbox' name='memory' value='1'" + String(settings.enableMemory ? " checked" : "") + "><br>";
+    html += "<small>Allows the AI to remember user details across sessions.</small><br>";
 
     html += "<h3>Debug</h3>";
     html += "Enable Debug Logging: <input type='checkbox' name='debugMode' value='1'" + String(settings.debugMode ? " checked" : "") + "><br>";
@@ -308,6 +409,16 @@ void handleWebSave() {
     String newOwLoc = server.hasArg("owLoc") ? server.arg("owLoc") : settings.weatherLocation;
     String newSysPrompt = server.hasArg("systemPrompt") ? server.arg("systemPrompt") : settings.systemPrompt;
 
+    // TTS Settings
+    int newTtsProvider = server.hasArg("ttsProvider") ? server.arg("ttsProvider").toInt() : settings.ttsProvider;
+    String newTtsUrl = server.hasArg("ttsUrl") ? server.arg("ttsUrl") : settings.ttsUrl;
+
+    // If Direct is chosen but URL is empty, revert to OpenWebUI
+    if (newTtsProvider == 1 && newTtsUrl.length() == 0) {
+        newTtsProvider = 0;
+    }
+    settings.ttsProvider = newTtsProvider;
+
     if (server.hasArg("wakeThreshold")) {
         float val = server.arg("wakeThreshold").toFloat();
         if (val >= 0.1 && val <= 1.0) {
@@ -323,11 +434,21 @@ void handleWebSave() {
         }
     }
 
+    if (server.hasArg("brightness")) {
+        int val = server.arg("brightness").toInt();
+        if (val < 10) val = 10; // Prevent setting brightness to 0
+        if (val > 255) val = 255;
+        settings.brightness = val;
+        display.setBacklight(settings.brightness);
+    }
+
     if (server.hasArg("micMode")) {
         settings.micMode = server.arg("micMode").toInt();
     }
 
     settings.debugMode = server.hasArg("debugMode");
+    settings.enableWebSearch = server.hasArg("webSearch");
+    settings.enableMemory = server.hasArg("memory");
 
     // Save to NVRAM immediately
     strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
@@ -337,6 +458,7 @@ void handleWebSave() {
     strlcpy(settings.openWeatherKey, newOwKey.c_str(), sizeof(settings.openWeatherKey));
     strlcpy(settings.weatherLocation, newOwLoc.c_str(), sizeof(settings.weatherLocation));
     strlcpy(settings.systemPrompt, newSysPrompt.c_str(), sizeof(settings.systemPrompt));
+    strlcpy(settings.ttsUrl, newTtsUrl.c_str(), sizeof(settings.ttsUrl));
     settings.save();
     
     forceConfig = false;
@@ -367,30 +489,6 @@ void onWiFiConfig(String ssid, String pass) {
     shouldConnectWiFi = true;
 }
 
-// Helper to URL encode the input string
-String urlEncode(String str) {
-    String encodedString = "";
-    char c;
-    char code0;
-    char code1;
-    for (int i = 0; i < str.length(); i++) {
-        c = str.charAt(i);
-        if (isalnum(c)) {
-            encodedString += c;
-        } else {
-            code1 = (c & 0xf) + '0';
-            if ((c & 0xf) > 9) code1 = (c & 0xf) - 10 + 'A';
-            c = (c >> 4) & 0xf;
-            code0 = c + '0';
-            if (c > 9) code0 = c - 10 + 'A';
-            encodedString += '%';
-            encodedString += code0;
-            encodedString += code1;
-        }
-    }
-    return encodedString;
-}
-
 void updateVoiceList() {
     String jsonResponse = llm.getVoices(network);
     if (jsonResponse.startsWith("Error")) {
@@ -417,7 +515,13 @@ void updateVoiceList() {
     newOptions.reserve(1024);
 
     for (JsonVariant v : voices) {
-        const char* voiceName = v.as<const char*>();
+        const char* voiceName = nullptr;
+        if (v.is<JsonObject>()) {
+            voiceName = v["id"];
+        } else {
+            voiceName = v.as<const char*>();
+        }
+
         if (voiceName && strlen(voiceName) > 0) {
             char firstChar = voiceName[0];
             if (firstChar == 'a' || firstChar == 'b' || firstChar == 'd') {
@@ -571,7 +675,11 @@ void handleSerialCommands() {
           Serial.printf("Mic Mode:   %d\n", settings.micMode);
           Serial.printf("Input Bal:  %d\n", settings.inputBalance);
           Serial.printf("Debug Mode: %s\n", settings.debugMode ? "ON" : "OFF");
+          Serial.printf("Web Search: %s\n", settings.enableWebSearch ? "ON" : "OFF");
+          Serial.printf("Memory:     %s\n", settings.enableMemory ? "ON" : "OFF");
           Serial.printf("Sys Prompt: %s\n", settings.systemPrompt);
+          Serial.printf("TTS Provider: %s\n", settings.ttsProvider == 0 ? "OpenWebUI" : "Direct");
+          Serial.printf("TTS URL:    %s\n", settings.ttsUrl);
           Serial.printf("Weather Key:******\n");
           Serial.printf("Weather Loc:%s\n", settings.weatherLocation);
           Serial.println("Note: Redacted values can be viewed from the configuration web page.");
@@ -665,6 +773,7 @@ void handleSerialCommands() {
         } else {
           speaker.stop(); // Stop any current playback before processing new request
           isSpeaking = false;
+                  isProcessing = true;
           display.showThinking(true);
           display.showStatus("Thinking...");
           // Force UI update before the blocking API call
@@ -686,6 +795,7 @@ void handleSerialCommands() {
           } else {
               display.showResponse("TTS Failed");
           }
+                  isProcessing = false;
         }
       }
       inputBuffer = "";
@@ -697,31 +807,45 @@ void handleSerialCommands() {
 
 void setup() {
   Serial.begin(115200);
+
   pinMode(0, INPUT_PULLUP); // Initialize BOOT button (GPIO 0)
   setCpuFrequencyMhz(240); // Lock CPU at 240MHz for maximum performance
-  
   // Initialize LED
   pixels.begin();
   pixels.setBrightness(20); // Low brightness
-  pixels.clear();
+  pixels.setPixelColor(0, pixels.Color(0, 0, 255)); // Blue = Boot Window
   pixels.show();
 
   unsigned long start = millis();
     while (!Serial && (millis() - start < 3000));
 
   Serial.printf("System Starting at %d MHz...\n", getCpuFrequencyMhz());
-
   // Initialize File System
   if (!LittleFS.begin(true)) {
       Serial.println("LittleFS Mount Failed");
   }
-
   // Load Settings
   settings.begin();
   adminPrefs.begin("admin", false);
 
-  // Check for Factory Reset (BOOT button held during startup)
-  if (digitalRead(0) == LOW) {
+  Serial.println("Waiting 3 seconds... Press BOOT button now for Factory Reset.");
+  bool factoryReset = false;
+  start = millis();
+  while (millis() - start < 3000) {
+      if (digitalRead(0) == LOW) {
+          factoryReset = true;
+          pixels.setPixelColor(0, pixels.Color(255, 0, 0)); // Red = Reset triggered
+          pixels.show();
+          break;
+      }
+      delay(10);
+  }
+
+  pixels.clear();
+  pixels.show();
+
+  // Check for Factory Reset
+  if (factoryReset) {
       Serial.println("BOOT button held: Performing Factory Reset...");
       settings.wifiSSID[0] = '\0';
       settings.wifiPass[0] = '\0';
@@ -736,7 +860,6 @@ void setup() {
 
   // Apply loaded settings
   network.setCredentials(settings.wifiSSID, settings.wifiPass);
-  
   // Migration: Fix API URL suffix in NVRAM if it matches the old format
   if (String(settings.apiUrl).endsWith("/v1/chat/completions")) {
       String tempUrl = settings.apiUrl;
@@ -765,6 +888,9 @@ void setup() {
   display.setVoiceCallback(onVoiceChange);
   display.setSetupModeCallback(onSetupMode);
   display.setBalanceCallback(onBalanceChange);
+  
+  // Apply saved brightness
+  display.setBacklight(settings.brightness);
 
   // Check for touch calibration status
   if (settings.calibration.isValid) {
@@ -912,9 +1038,60 @@ void setup() {
   server.onNotFound([]() {
       server.send(404, "text/plain", "Not Found");
   });
+
+  // OTA Update Endpoints
+  server.on("/update", HTTP_GET, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      server.sendHeader("Connection", "close");
+      String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+      html += "<style>body{font-family:sans-serif;padding:20px;} input[type=submit]{background-color:#4CAF50;color:white;border:none;cursor:pointer;padding:10px;margin-top:10px;} a{color:#008CBA;text-decoration:none;}</style></head>";
+      html += "<body><h2>System Update</h2>";
+      html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+      html += "Firmware: <input type='file' name='firmware' accept='.bin'><br><br>";
+      html += "Filesystem: <input type='file' name='filesystem' accept='.bin'><br><br>";
+      html += "<input type='submit' value='Upload & Update'></form>";
+      html += "<br><a href='/'>&larr; Back to Configuration</a></body></html>";
+      server.send(200, "text/html", html);
+  });
+
+  server.on("/update", HTTP_POST, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      server.sendHeader("Connection", "close");
+      server.send(200, "text/plain", (Update.hasError()) ? "UPDATE FAILED" : "UPDATE SUCCESS. Device is rebooting...");
+      delay(1000);
+      ESP.restart();
+  }, []() {
+      HTTPUpload& upload = server.upload();
+      
+      // If a file input is left blank, skip it entirely
+      if (upload.filename.length() == 0) return;
+
+      if (upload.status == UPLOAD_FILE_START) {
+          if (settings.debugMode) Serial.printf("OTA Update Started: %s (Type: %s)\n", upload.filename.c_str(), upload.name.c_str());
+          
+          int command = (upload.name == "filesystem") ? U_SPIFFS : U_FLASH;
+          display.showStatus((command == U_SPIFFS) ? "Updating File System..." : "Updating Firmware...");
+          
+          if (!Update.begin(UPDATE_SIZE_UNKNOWN, command)) Update.printError(Serial);
+      } else if (upload.status == UPLOAD_FILE_WRITE) {
+          if (Update.isRunning()) {
+              if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
+          }
+      } else if (upload.status == UPLOAD_FILE_END) {
+          if (Update.isRunning()) {
+              if (Update.end(true)) {
+                  if (settings.debugMode) Serial.printf("OTA Update Success: %u bytes\n", upload.totalSize);
+              } else { Update.printError(Serial); }
+          }
+      }
+  });
+
   server.begin();
   isWebServerActive = true;
-  if (settings.debugMode) Serial.println("Web Server started at http://aiesp.local or http://" + WiFi.localIP().toString());
+  if (settings.debugMode) {
+      Serial.println("Web Server started at http://aiesp.local or http://" + WiFi.localIP().toString());
+      Serial.println("OTA Update URL: http://aiesp.local/update");
+  }
 
   // Initialize Speech Recognition (I2S)
   speech.begin();
@@ -1028,18 +1205,11 @@ void loop() {
           if (settings.debugMode) Serial.println("Wake Word Detected!");
           speaker.playSpeechFromFile(CHIME_FILENAME);
           
-          // Visual Wake Indication (Rainbow Cycle)
-          // Run for approx 1 second (6 cycles)
-          for(int j=0; j<6; j++) {
-              for(int i=0; i<256; i+=8) {
-                  pixels.setPixelColor(0, pixels.ColorHSV(i*256));
-                  pixels.show();
-                  delay(5);
-              }
+          // Wait for chime to finish playing before proceeding to record
+          // Wait for any remaining chime to finish playing before proceeding to record
+          while(speaker.isRunning()) {
+              delay(30);
           }
-          
-          // Flash Status Box instead of border
-          display.flashStatusAnimation();
           
           onVoiceChange("TALK_ACTION");
       }

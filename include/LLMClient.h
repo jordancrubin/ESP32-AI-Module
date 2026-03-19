@@ -19,6 +19,7 @@ public:
     String transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& netMgr);
 
 private:
+    String getTtsBaseUrl();
     String _apiUrl;
     String _apiKey;
     String _model;

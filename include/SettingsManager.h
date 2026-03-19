@@ -42,6 +42,10 @@ public:
     int inputBalance; // -100 (Left) to 100 (Right)
     bool debugMode;
     char systemPrompt[512];
+    int ttsProvider;
+    char ttsUrl[256];
+    bool enableWebSearch;
+    bool enableMemory;
 
 private:
     Preferences prefs;
