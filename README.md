@@ -8,6 +8,8 @@ A fully integrated, voice-controlled AI assistant running on the ESP32-S3. This 
 
 *   **Voice Activation**: On-device wake word detection using Edge Impulse (default: "Hey Espy").
 *   **Conversational AI**: Integrates with OpenAI-compatible APIs. Designed for local LLM servers (Ollama, LocalAI) but compatible with cloud providers.
+    *   **Web Search & Memory**: Optional toggles to grant supported models internet access and conversation context memory.
+*   **Local Commands**: Intercepts specific spoken phrases (like volume control or system reboots) locally to skip API latency.
 *   **Advanced Audio Pipeline**:
     *   **Input**: I2S Microphone support (ICS-43434) with software Acoustic Echo Cancellation (AEC) and Beamforming.
     *   **Output**: I2S Amplifier (MAX98357A) for high-quality Text-to-Speech playback.
@@ -17,6 +19,7 @@ A fully integrated, voice-controlled AI assistant running on the ESP32-S3. This 
     *   Real-time clock, live weather updates (OpenWeatherMap), and WiFi signal status.
     *   Visual feedback: Audio VU meters, thinking animations, and status logs.
 *   **Web Configuration**: Comprehensive web interface for setting up WiFi, API keys, System Prompts, and Audio tuning.
+*   **OTA Updates**: Update Firmware and Filesystem images wirelessly directly from your browser.
 *   **Customizable**: Change wake sensitivity, system prompts, voices, and volume on the fly.
 
 ## Gallery
@@ -42,24 +45,24 @@ A fully integrated, voice-controlled AI assistant running on the ESP32-S3. This 
 | Component | Pin (ESP32-S3) | Description |
 | :--- | :--- | :--- |
 | **Display** | | |
-| TFT_CS | 15 | Chip Select |
-| TFT_DC | 2 | Data/Command |
-| TFT_RST | -1 | Reset (or 3.3V) |
-| TFT_SCK | 14 | SPI Clock |
-| TFT_MOSI | 13 | SPI MOSI |
-| TFT_MISO | 12 | SPI MISO |
+| TFT_CS | 10 | Chip Select |
+| TFT_DC | 9 | Data/Command |
+| TFT_RST | 46 | Reset |
+| TFT_SCK | 12 | SPI Clock |
+| TFT_MOSI | 11 | SPI MOSI |
+| TFT_MISO | 13 | SPI MISO |
 | TFT_BL | 4 | Backlight (PWM) |
 | **Touch** | | |
-| TOUCH_CS | 33 | Chip Select |
-| TOUCH_IRQ | 36 | Interrupt |
+| TOUCH_CS | 14 | Chip Select |
+| TOUCH_IRQ | 255 | Interrupt (Disabled / Polling) |
 | **Audio In** | | |
 | I2S_SCK | 42 | BCLK |
 | I2S_WS | 41 | LRCLK |
 | I2S_SD | 40 | DIN |
 | **Audio Out** | | |
-| SPK_SCK | 18 | BCLK |
-| SPK_WS | 17 | LRCLK |
-| SPK_SD | 16 | DOUT |
+| SPK_SCK | 7 | BCLK |
+| SPK_WS | 6 | LRCLK |
+| SPK_SD | 5 | DOUT |
 
 ## Software Architecture
 
@@ -67,8 +70,9 @@ The system operates in a continuous loop:
 1.  **Listen**: The ESP32 listens for the wake word using a lightweight Edge Impulse model running on the DSP.
 2.  **Record**: Upon trigger, audio is recorded to PSRAM. AEC is applied in real-time to cancel out any system audio (like music or previous speech).
 3.  **Transcribe**: The recorded WAV is sent via HTTP POST to a Speech-to-Text (STT) endpoint (e.g., Whisper).
-4.  **Think**: The transcribed text is sent to an LLM endpoint (e.g., Llama 3.2 via Ollama).
-5.  **Speak**: The AI's response is sent to a Text-to-Speech (TTS) endpoint (e.g., Kokoro-82M) and played back via I2S.
+4.  **Process Local**: The transcribed text is checked against a list of local commands. If matched, the ESP32 executes it immediately without consulting the API.
+5.  **Think**: If no local command is matched, the text is sent to an LLM endpoint (e.g., Llama 3.2 via Ollama).
+6.  **Speak**: The AI's response is sent to a Text-to-Speech (TTS) endpoint (e.g., Kokoro-82M) and played back via I2S.
 
 ## Setup & Installation
 
@@ -93,14 +97,30 @@ The device requires an OpenAI-compatible API backend. A recommended local setup 
 4.  Navigate to `http://aiesp.local` or the device IP address.
 5.  **Default Login**: `admin` (Password is set on first boot via Serial or Touch UI).
 
+### 4. Over-The-Air (OTA) Updates
+The device supports wireless firmware and filesystem updates via the Web Interface.
+1. Tap the Setup Gear icon on the display to enter Configuration Mode.
+2. Navigate to `http://aiesp.local/update` in your browser.
+3. Select your compiled `firmware.bin` or `littlefs.bin` file and upload.
+
 ## Configuration Guide
+
+### Local Spoken Commands
+The device intercepts specific phrases immediately after transcription to control hardware quickly:
+*   `"Set volume to [0-10]"` / `"Raise/Lower the volume"`
+*   `"System reboot"`
+*   `"Test AEC"` (Runs the Acoustic Echo Cancellation diagnostic sequence)
+*   `"Help"` (Lists available commands)
+*   *(Plus a few retro Easter Eggs!)*
 
 ### Web Interface
 Access `http://aiesp.local` to configure:
-*   **API Settings**: URL and Key for your LLM backend.
+*   **API Settings**: URL and Key for your LLM backend, plus TTS routing (OpenWebUI or Direct URL).
 *   **System Prompt**: Define the personality of your assistant.
+*   **Timezone**: Configure your local timezone for the idle clock screen.
 *   **Weather**: OpenWeatherMap API key and location.
 *   **Audio**: Microphone mode (Stereo/Left/Right), Wake Word sensitivity, and Silence threshold.
+*   **AI Features**: Enable Web Search or Conversation Memory via function calling blocks.
 *   **Debug**: Enable verbose serial logging.
 
 ### Serial Commands
@@ -116,6 +136,9 @@ Connect via USB Serial (115200 baud) for advanced control:
 | `/debug_aec` | Toggle Acoustic Echo Cancellation debug stats |
 | `/test_mic` | Record a 5s clip and play it back (Debug mode only) |
 | `/test_aec` | Run a full AEC diagnostic suite (Debug mode only) |
+| `/aec_delay <n>` | Tune the AEC delay buffer alignment |
+| `/aec_gain <n>` | Tune the AEC reference gain multiplier |
+| `/aec_invert` | Toggle AEC phase inversion |
 
 ## Troubleshooting
 
