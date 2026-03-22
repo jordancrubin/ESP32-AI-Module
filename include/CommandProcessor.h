@@ -6,12 +6,14 @@
 #include <Arduino.h>
 
 struct CommandResult {
-    bool handled;
-    String response;
-    bool runAecTest;
-    bool systemReboot;
-    bool showBSOD;
-    bool showGuruMeditation;
+    bool handled = false;
+    String response = "";
+    bool runAecTest = false;
+    bool systemReboot = false;
+    bool showBSOD = false;
+    bool showGuruMeditation = false;
+    bool calibrateTouch = false;
+    bool enterConfigMode = false;
 };
 
 class CommandProcessor {

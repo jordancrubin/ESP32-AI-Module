@@ -165,6 +165,11 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
         doc["features"]["memory"] = true;
     }
 
+    if (strlen(settings.knowledgeId) > 0) {
+        doc["files"][0]["type"] = "collection";
+        doc["files"][0]["id"] = settings.knowledgeId;
+    }
+
     // Serialize to PSRAM to save Internal RAM
     size_t requestSize = measureJson(doc);
     char* requestBuffer = (char*)ps_malloc(requestSize + 1);
@@ -353,18 +358,18 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
     String boundary = "------------------------ESP32Boundary" + String(millis());
     
     // 2. Construct the Body Parts
-    // Part 1: File Header (Audio) - Send FILE first for better compatibility
+    // Part 1: Model + File Header (Audio) - Send Model first for strict form parsers (like FastAPI/OpenWebUI)
     String part1 = "--" + boundary + "\r\n" +
+                   "Content-Disposition: form-data; name=\"model\"\r\n" +
+                   "\r\n" +
+                   "whisper-1\r\n" +
+                   "--" + boundary + "\r\n" +
                    "Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n" +
                    "Content-Type: audio/wav\r\n" +
                    "\r\n";
                    
-    // Part 2: Model + Footer
-    String part2 = "\r\n--" + boundary + "\r\n" +
-                   "Content-Disposition: form-data; name=\"model\"\r\n" +
-                   "\r\n" +
-                   "whisper-1\r\n" +
-                   "--" + boundary + "--\r\n";
+    // Part 2: Footer
+    String part2 = "\r\n--" + boundary + "--\r\n";
 
     // 3. Calculate Total Length
     size_t totalLength = part1.length() + size + part2.length();

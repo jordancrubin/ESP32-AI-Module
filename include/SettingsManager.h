@@ -46,6 +46,7 @@ public:
     char ttsUrl[256];
     bool enableWebSearch;
     bool enableMemory;
+    char knowledgeId[64];
 
 private:
     Preferences prefs;

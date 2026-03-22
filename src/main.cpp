@@ -62,6 +62,7 @@ extern void forceClockScreen();
 
 // Forward declarations
 void testAEC();
+void onSetupMode(bool enabled);
 
 // Chime Configuration
 const char* CHIME_FILENAME = "/chime.mp3";
@@ -154,6 +155,8 @@ void onVoiceChange(String voice) {
                     bool systemReboot = cmd.systemReboot;
                     bool showBSOD = cmd.showBSOD;
                     bool showGuruMeditation = cmd.showGuruMeditation;
+                    bool calibrateTouch = cmd.calibrateTouch;
+                    bool enterConfigMode = cmd.enterConfigMode;
                     if (showBSOD || showGuruMeditation) triggeredEasterEgg = true;
 
                     String answer;
@@ -210,6 +213,19 @@ void onVoiceChange(String voice) {
                             delay(5000); // Show Guru Meditation for 5 seconds
                             break;       // End the conversation loop
                         }
+                        
+                        if (calibrateTouch) {
+                            display.calibrateTouch(settings.calibration);
+                            settings.save();
+                            display.showMainUI(ttsVoice, settings.volume, voiceOptions);
+                            break;       // End the conversation loop
+                        }
+                        
+                        if (enterConfigMode) {
+                            onSetupMode(true);
+                            display.showWebConfig(WiFi.localIP().toString(), "aiesp.local");
+                            break;       // End the conversation loop
+                        }
                     } else {
                         display.showStatus("TTS Failed");
                         break;
@@ -229,7 +245,7 @@ void onVoiceChange(String voice) {
         isProcessing = false;
         if (triggeredEasterEgg) {
             forceClockScreen(); // Jump straight to the clock
-        } else {
+        } else if (!isWebServerActive) {
             display.showStatus("Ready"); // Normal recovery
         }
         setLedColor(0, 0, 0); // LED Off
@@ -381,6 +397,8 @@ void handleWebRoot() {
     html += "<small>Allows supported models to search the internet for real-time information.</small><br>";
     html += "Enable Memory: <input type='checkbox' name='memory' value='1'" + String(settings.enableMemory ? " checked" : "") + "><br>";
     html += "<small>Allows the AI to remember user details across sessions.</small><br>";
+    html += "Knowledge ID: <input type='text' name='knowledgeId' value='" + String(settings.knowledgeId) + "' placeholder='e.g., collection_id or document_id'><br>";
+    html += "<small>OpenWebUI Collection/File ID to enable RAG/Knowledge features.</small><br>";
 
     html += "<h3>Debug</h3>";
     html += "Enable Debug Logging: <input type='checkbox' name='debugMode' value='1'" + String(settings.debugMode ? " checked" : "") + "><br>";
@@ -408,6 +426,7 @@ void handleWebSave() {
     String newOwKey = server.hasArg("owKey") ? server.arg("owKey") : settings.openWeatherKey;
     String newOwLoc = server.hasArg("owLoc") ? server.arg("owLoc") : settings.weatherLocation;
     String newSysPrompt = server.hasArg("systemPrompt") ? server.arg("systemPrompt") : settings.systemPrompt;
+    String newKnowledgeId = server.hasArg("knowledgeId") ? server.arg("knowledgeId") : settings.knowledgeId;
 
     // TTS Settings
     int newTtsProvider = server.hasArg("ttsProvider") ? server.arg("ttsProvider").toInt() : settings.ttsProvider;
@@ -459,6 +478,7 @@ void handleWebSave() {
     strlcpy(settings.weatherLocation, newOwLoc.c_str(), sizeof(settings.weatherLocation));
     strlcpy(settings.systemPrompt, newSysPrompt.c_str(), sizeof(settings.systemPrompt));
     strlcpy(settings.ttsUrl, newTtsUrl.c_str(), sizeof(settings.ttsUrl));
+    strlcpy(settings.knowledgeId, newKnowledgeId.c_str(), sizeof(settings.knowledgeId));
     settings.save();
     
     forceConfig = false;
@@ -677,6 +697,7 @@ void handleSerialCommands() {
           Serial.printf("Debug Mode: %s\n", settings.debugMode ? "ON" : "OFF");
           Serial.printf("Web Search: %s\n", settings.enableWebSearch ? "ON" : "OFF");
           Serial.printf("Memory:     %s\n", settings.enableMemory ? "ON" : "OFF");
+          Serial.printf("Knowledge:  %s\n", settings.knowledgeId);
           Serial.printf("Sys Prompt: %s\n", settings.systemPrompt);
           Serial.printf("TTS Provider: %s\n", settings.ttsProvider == 0 ? "OpenWebUI" : "Direct");
           Serial.printf("TTS URL:    %s\n", settings.ttsUrl);
@@ -718,18 +739,24 @@ void handleSerialCommands() {
             if (settings.debugMode) Serial.println("Direct TTS: " + textToSay);
             speaker.stop();
             isSpeaking = false;
+            display.showMainUI(ttsVoice, settings.volume, voiceOptions);
             display.showStatus("Direct TTS...");
             
             // Download TTS to file, then play
             if (llm.downloadTTS(textToSay, network, "/speech.mp3", ttsVoice)) {
                 speaker.playSpeechFromFile("/speech.mp3");
                 isSpeaking = true;
+                lv_timer_handler();
+                while(speaker.isRunning()) delay(50);
+                isSpeaking = false;
             } else {
                 display.showResponse("TTS Failed");
             }
+            display.showStatus("Ready");
           }
         } else if (inputBuffer == "/test_mic" && settings.debugMode) {
           Serial.println("Testing Microphone (5s recording)...");
+          display.showMainUI(ttsVoice, settings.volume, voiceOptions);
           display.showStatus("Recording (5s)...");
           speaker.stop(); // Stop any playback
           
@@ -756,6 +783,9 @@ void handleSerialCommands() {
                   display.showStatus("Playing back...");
                   speaker.playSpeechFromFile("/mic_test.wav");
                   isSpeaking = true;
+                  lv_timer_handler();
+                  while(speaker.isRunning()) delay(50);
+                  isSpeaking = false;
               } else {
                   Serial.println("Failed to open file for writing");
                   display.showStatus("Save Failed");
@@ -765,6 +795,7 @@ void handleSerialCommands() {
               Serial.println("Recording failed");
               display.showStatus("Record Failed");
           }
+          display.showStatus("Ready");
         } else if (inputBuffer == "/test_mic" && !settings.debugMode) {
             Serial.println("Debug mode disabled. Enable debug to run mic test.");
         } else if (inputBuffer == "/new") {
@@ -773,7 +804,8 @@ void handleSerialCommands() {
         } else {
           speaker.stop(); // Stop any current playback before processing new request
           isSpeaking = false;
-                  isProcessing = true;
+          isProcessing = true;
+          display.showMainUI(ttsVoice, settings.volume, voiceOptions);
           display.showThinking(true);
           display.showStatus("Thinking...");
           // Force UI update before the blocking API call
@@ -792,10 +824,14 @@ void handleSerialCommands() {
           if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
               speaker.playSpeechFromFile("/speech.mp3");
               isSpeaking = true;
+              lv_timer_handler();
+              while(speaker.isRunning()) delay(50);
+              isSpeaking = false;
           } else {
               display.showResponse("TTS Failed");
           }
-                  isProcessing = false;
+          isProcessing = false;
+          display.showStatus("Ready");
         }
       }
       inputBuffer = "";

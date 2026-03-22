@@ -35,6 +35,7 @@ static String g_voiceOptions = "alloy";
 static String g_lastStatus = "Ready";
 static lv_timer_t * g_clockTimer = nullptr;
 static lv_timer_t * g_idleTimer = nullptr;
+static uint32_t g_idleTimeout = 10000; // Dynamic idle timeout variable
 static void showVoiceModelConfig();
 static void setupBootScreen();
 static lv_obj_t * boot_cont = nullptr;
@@ -388,8 +389,8 @@ static void idle_timer_cb(lv_timer_t * t) {
         return;
     }
 
-    // If inactive for 30 seconds, switch to clock
-    if (lv_disp_get_inactive_time(NULL) > 30000) {
+    // If inactive for current timeout, switch to clock
+    if (lv_disp_get_inactive_time(NULL) > g_idleTimeout) {
         if (g_idleTimer) {
              lv_timer_del(g_idleTimer);
              g_idleTimer = nullptr;
@@ -511,6 +512,7 @@ static void showClockScreen() {
 static void showVoiceModelConfig() {
     // Use public method to reset private pointers (statusLabel)
     if (static_dm) static_dm->showWiFiError("");
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     boot_cont = nullptr;
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
@@ -608,6 +610,7 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
         lv_timer_del(g_clockTimer);
         g_clockTimer = nullptr;
     }
+    g_idleTimeout = 10000; // 10 seconds on Ready screen
 
     _lastVoice = currentVoice;
     _lastVolume = currentVolume;
@@ -866,6 +869,7 @@ void DisplayManager::setWiFiConfigCallback(WiFiConfigCallback cb) {
 }
 
 void DisplayManager::showWiFiConfig() {
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     boot_cont = nullptr;
@@ -920,6 +924,7 @@ void DisplayManager::setAPIConfigCallback(APIConfigCallback cb) {
 }
 
 void DisplayManager::showAPIConfig(String currentKey) {
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
@@ -1035,6 +1040,7 @@ void DisplayManager::setAPIUrlConfigCallback(APIUrlConfigCallback cb) {
 }
 
 void DisplayManager::showAPIUrlConfig(String currentUrl) {
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
@@ -1082,6 +1088,7 @@ void DisplayManager::setAdminConfigCallback(AdminConfigCallback cb) {
 }
 
 void DisplayManager::showAdminConfig() {
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
@@ -1114,6 +1121,7 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
         lv_timer_del(g_idleTimer);
         g_idleTimer = nullptr;
     }
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
 
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
@@ -1186,6 +1194,7 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
 }
 
 void DisplayManager::showWiFiError(const char* message) {
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
@@ -1388,6 +1397,7 @@ void DisplayManager::updateWeather(const char* temp, const char* desc) {
 }
 
 void DisplayManager::showAudioConfig() {
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
     
