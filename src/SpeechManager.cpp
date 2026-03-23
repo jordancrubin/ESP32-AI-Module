@@ -41,6 +41,12 @@ void setAecPhase(bool invert) { s_aec_invert = invert; Serial.printf("AEC Phase 
 void setInputBalance(int balance) { s_input_balance = balance; }
 void getAudioLevels(int* l, int* r) { *l = s_peak_l; *r = s_peak_r; }
 
+static volatile bool s_interrupt_mode = false;
+static volatile bool s_aec_bypass = false; // Flag to force raw recording
+
+void setInterruptMode(bool mode) { s_interrupt_mode = mode; }
+void setAecBypass(bool bypass) { s_aec_bypass = bypass; }
+
 static RingbufHandle_t s_processed_ringbuf = NULL; // Buffer for clean audio
 static i2s_chan_handle_t s_rx_handle = NULL;
 static volatile bool s_is_recording = false; // Flag to pause AEC task
@@ -335,6 +341,12 @@ bool SpeechManager::detectWakeWord(float threshold) {
             if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
         }
 
+        // Lower microphone sensitivity specifically during Voice Interrupt (Barge-in)
+        // to help prevent the AI's own early echo from triggering the wake word
+        if (s_interrupt_mode) {
+            raw = raw / 8; // Attenuate volume by 87.5%
+        }
+
         if (abs(raw) > max_audio_level) max_audio_level = abs(raw);
         if (raw < debug_min_val) debug_min_val = raw;
         if (raw > debug_max_val) debug_max_val = raw;
@@ -387,12 +399,23 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
         bool wake_word_detected = false;
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-            if (result.classification[ix].value > threshold) {
+            // During active playback (interrupt mode), make the threshold slightly stricter (+0.10) 
+            // to prevent the AI's own voice from causing false positives through the AEC.
+            float active_threshold = s_interrupt_mode ? (threshold + 0.10f) : threshold;
+            if (active_threshold > 0.95f) active_threshold = 0.95f;
+            
+            if (result.classification[ix].value > active_threshold) {
                 const char* label = result.classification[ix].label;
                 if (strcmp(label, "noise") != 0 && strcmp(label, "unknown") != 0) {
                     if (settings.debugMode) Serial.printf(">>> WAKE WORD DETECTED: %s (%.2f) <<<\n", label, result.classification[ix].value);
                     wake_word_detected = true;
                 }
+            }
+            
+            // Voice Barge-in Detection (Trigger on ANY loud speech "unknown" if confidence is 0.92+)
+            if (s_interrupt_mode && strcmp(result.classification[ix].label, "unknown") == 0 && result.classification[ix].value >= 0.92f) {
+                if (settings.debugMode) Serial.printf(">>> INTERRUPT (UNKNOWN) DETECTED: %s (%.2f) <<<\n", result.classification[ix].label, result.classification[ix].value);
+                wake_word_detected = true;
             }
         }
         
@@ -426,7 +449,7 @@ void SpeechManager::feedReference(const int16_t *data, size_t samples) {
 }
 
 uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThreshold) {
-    bool useAec = (s_processed_ringbuf != NULL);
+    bool useAec = (s_processed_ringbuf != NULL) && !s_aec_bypass;
 
     if (!useAec) {
         s_is_recording = true; // Pause the AEC feed task only if NOT using AEC

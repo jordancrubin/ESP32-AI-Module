@@ -25,9 +25,13 @@ static bool isWav = false;
 static bool s_i2s_enabled = false;
 static int s_fade_samples = 0;
 const int FADE_LEN = 2000; // ~80ms fade-in at 24kHz (Faster attack for chimes)
+static volatile bool s_is_interrupted = false;
+static bool s_mp3_started = false;
 
 // Helix Decoder Callback
 void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
+    if (s_is_interrupted) return; // Drop audio instantly to bypass I2S blocking during interrupt
+
     // Handle Stereo -> Mono conversion if needed
     if (info.nChans == 2) {
         for (size_t i = 0; i < len / 2; i++) {
@@ -85,9 +89,9 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
         s_i2s_enabled = true;
     }
     // 3. Write to I2S (Blocking if buffer full)
-    if (s_tx_handle) {
+    if (s_tx_handle && s_i2s_enabled && !s_is_interrupted) {
         size_t bytes_written;
-        i2s_channel_write(s_tx_handle, pcm_buffer, len * sizeof(int16_t), &bytes_written, portMAX_DELAY);
+        i2s_channel_write(s_tx_handle, pcm_buffer, len * sizeof(int16_t), &bytes_written, pdMS_TO_TICKS(100));
     }
 }
 
@@ -126,6 +130,7 @@ void SpeakerManager::begin() {
     s_tx_handle = tx_handle; // Save to static for callback
     
     mp3.begin();
+    s_mp3_started = true;
 
     xTaskCreatePinnedToCore(
         audioTask,
@@ -145,6 +150,7 @@ void SpeakerManager::setVolume(int volume) {
 }
 
 void SpeakerManager::playSpeechFromFile(const char* filename) {
+    s_is_interrupted = false;
     xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     
     if (settings.debugMode) Serial.printf("Playing TTS from file: %s\n", filename);
@@ -188,20 +194,24 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
         i2s_channel_enable(tx_handle);
         s_i2s_enabled = true;
         
-        // Prime with 500ms of silence to wake up amp and prevent start cutoff
-        // 24000Hz * 2 bytes/sample * 0.5s = 24000 bytes
-        // We use a 1024 byte buffer, so ~24 chunks
+        // Prime with a tiny burst of silence (50ms) to wake up amp and clear artifacts
         size_t bytes_written;
         const uint8_t silence_chunk[1024] = {0};
-        int silence_chunks = (sampleRate * 2 * 0.5) / sizeof(silence_chunk); // 500ms
+        int silence_chunks = (sampleRate * 2 * 0.05) / sizeof(silence_chunk); // 50ms
+        if (silence_chunks < 1) silence_chunks = 1;
         
         for (int i = 0; i < silence_chunks; i++) {
-            i2s_channel_write(tx_handle, silence_chunk, sizeof(silence_chunk), &bytes_written, 100);
+            i2s_channel_write(tx_handle, silence_chunk, sizeof(silence_chunk), &bytes_written, 10);
         }
     }
     
     if (!isWav) {
+        if (s_mp3_started) {
+            mp3.end(); // Safely flush the internal decoder buffers
+            s_mp3_started = false;
+        }
         mp3.begin();
+        s_mp3_started = true;
     }
     
     // Reset stream
@@ -218,21 +228,27 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
 }
 
 void SpeakerManager::stop() {
+    s_is_interrupted = true; // Signal callback to dump audio instantly
     xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    if (s_mp3_started) {
+        mp3.end(); // Clear internal decoder buffers (flushes remainder) immediately on stop
+        s_mp3_started = false;
+    }
     if (tx_handle && s_i2s_enabled) {
         i2s_channel_disable(tx_handle); // Disable I2S output
         s_i2s_enabled = false;
     }
     if (audioFile) audioFile.close();
     _isPlaying = false;
+    s_is_interrupted = false; // Reset flag
     xSemaphoreGiveRecursive(_mutex);
 }
 
 void SpeakerManager::loop() {
     if (xSemaphoreTakeRecursive(_mutex, 0) == pdTRUE) {
-        if (_isPlaying) {
+        if (_isPlaying && !s_is_interrupted) {
             if (audioFile && audioFile.available()) {
-                static uint8_t buff[4096]; // Increased buffer size for smoother playback
+                static uint8_t buff[4096]; // 4096 is required for fast LittleFS reads and Helix decoding
                 int bytesRead = audioFile.read(buff, sizeof(buff));
                 if (bytesRead > 0) {
                     if (isWav) {
@@ -274,9 +290,9 @@ void SpeakerManager::loop() {
                         }
 
                         // Write to I2S
-                        if (tx_handle) {
+                        if (tx_handle && !s_is_interrupted) {
                             size_t bytes_written;
-                            i2s_channel_write(tx_handle, pcm, bytesRead, &bytes_written, portMAX_DELAY);
+                            i2s_channel_write(tx_handle, pcm, bytesRead, &bytes_written, pdMS_TO_TICKS(100));
                         }
                     } else {
                         mp3.write(buff, bytesRead);
@@ -286,6 +302,11 @@ void SpeakerManager::loop() {
                 // End of file
                 _isPlaying = false;
                 
+                if (s_mp3_started) {
+                    mp3.end(); // Clean up buffer on natural finish (flushes remaining audio)
+                    s_mp3_started = false;
+                }
+
                 // Flush tail with silence before disabling to prevent artifacts
                 if (tx_handle && s_i2s_enabled) {
                     size_t bytes_written;
@@ -298,7 +319,6 @@ void SpeakerManager::loop() {
                     s_i2s_enabled = false;
                 }
                 if (audioFile) audioFile.close();
-                LittleFS.remove("/speech.mp3");
             }
         }
         xSemaphoreGiveRecursive(_mutex);
@@ -312,7 +332,7 @@ bool SpeakerManager::isRunning() {
 void SpeakerManager::audioTask(void* parameter) {
     SpeakerManager* manager = static_cast<SpeakerManager*>(parameter);
     while (true) {
-        if (manager->isRunning()) {
+        if (manager->isRunning() && !s_is_interrupted) {
             manager->loop();
             // No delay here to keep I2S buffer full (prevents stuttering)
         } else {

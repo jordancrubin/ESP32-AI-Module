@@ -56,6 +56,8 @@ extern void setAecGain(int gain);
 extern void setAecPhase(bool invert);
 extern void setInputBalance(int balance);
 extern void getAudioLevels(int* l, int* r);
+extern void setInterruptMode(bool mode);
+extern void setAecBypass(bool bypass);
 extern void renderBSOD();
 extern void renderGuruMeditation();
 extern void forceClockScreen();
@@ -184,12 +186,35 @@ void onVoiceChange(String voice) {
                         isSpeaking = true;
                         lv_timer_handler(); // Update UI once to show "Speaking"
                         
-                        // Wait for playback to finish (Blocking UI to prevent audio glitches)
+                        bool interrupted = false;
+                        if (settings.enableInterrupt) setInterruptMode(true);
+                        unsigned long playbackStart = millis();
+
+                        // Wait for playback to finish, or poll for interruptions
                         while (speaker.isRunning()) {
-                            delay(50);
+                            if (settings.enableInterrupt) {
+                                bool triggered = speech.detectWakeWord(wakeThreshold);
+                                if (triggered && (millis() - playbackStart > 2000)) {
+                                    if (settings.debugMode) Serial.println("Playback interrupted by user!");
+                                    speaker.stop();
+                                    speaker.playSpeechFromFile(CHIME_FILENAME);
+                                    while(speaker.isRunning()) delay(30);
+                                    interrupted = true;
+                                    break;
+                                }
+                                delay(5); // Fast loop to drain AEC buffer safely
+                            } else {
+                                delay(50);
+                            }
                         }
+                        
+                        if (settings.enableInterrupt) setInterruptMode(false);
                         isSpeaking = false;
                         
+                        if (interrupted) {
+                            continue; // Skip the rest, loop back to "Listening..."
+                        }
+
                         if (runAecTest) {
                             display.showStatus("Running AEC Test...");
                             lv_timer_handler();
@@ -397,6 +422,8 @@ void handleWebRoot() {
     html += "<small>Allows supported models to search the internet for real-time information.</small><br>";
     html += "Enable Memory: <input type='checkbox' name='memory' value='1'" + String(settings.enableMemory ? " checked" : "") + "><br>";
     html += "<small>Allows the AI to remember user details across sessions.</small><br>";
+    html += "Enable Voice Interrupt: <input type='checkbox' name='interrupt' value='1'" + String(settings.enableInterrupt ? " checked" : "") + "><br>";
+    html += "<small>Allows you to interrupt the AI by speaking over it.</small><br>";
     html += "Knowledge ID: <input type='text' name='knowledgeId' value='" + String(settings.knowledgeId) + "' placeholder='e.g., collection_id or document_id'><br>";
     html += "<small>OpenWebUI Collection/File ID to enable RAG/Knowledge features.</small><br>";
 
@@ -468,6 +495,7 @@ void handleWebSave() {
     settings.debugMode = server.hasArg("debugMode");
     settings.enableWebSearch = server.hasArg("webSearch");
     settings.enableMemory = server.hasArg("memory");
+    settings.enableInterrupt = server.hasArg("interrupt");
 
     // Save to NVRAM immediately
     strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
@@ -613,8 +641,7 @@ void testAEC() {
 
     // --- Test 2: Without AEC (Raw) ---
     Serial.println("\n--- Test 2: Without AEC (Raw Input) ---");
-    int originalMicMode = settings.micMode;
-    settings.micMode = 1; // Force Left Channel Only (Bypasses AEC logic in record())
+    setAecBypass(true); // Force SpeechManager to bypass the Speex Ringbuffer
     
     Serial.println("Playing TTS & Recording (10s)...");
     speaker.playSpeechFromFile(ttsFile);
@@ -623,7 +650,7 @@ void testAEC() {
     uint8_t* wavData2 = speech.record(10000, &wavSize2, 0);
     
     speaker.stop();
-    settings.micMode = originalMicMode; // Restore settings
+    setAecBypass(false); // Restore normal AEC operation
 
     if (wavData2 && wavSize2 > 0) {
         File f = LittleFS.open("/aec_raw.wav", "w");
@@ -697,6 +724,7 @@ void handleSerialCommands() {
           Serial.printf("Debug Mode: %s\n", settings.debugMode ? "ON" : "OFF");
           Serial.printf("Web Search: %s\n", settings.enableWebSearch ? "ON" : "OFF");
           Serial.printf("Memory:     %s\n", settings.enableMemory ? "ON" : "OFF");
+          Serial.printf("Interrupt:  %s\n", settings.enableInterrupt ? "ON" : "OFF");
           Serial.printf("Knowledge:  %s\n", settings.knowledgeId);
           Serial.printf("Sys Prompt: %s\n", settings.systemPrompt);
           Serial.printf("TTS Provider: %s\n", settings.ttsProvider == 0 ? "OpenWebUI" : "Direct");
@@ -747,7 +775,23 @@ void handleSerialCommands() {
                 speaker.playSpeechFromFile("/speech.mp3");
                 isSpeaking = true;
                 lv_timer_handler();
-                while(speaker.isRunning()) delay(50);
+                if (settings.enableInterrupt) setInterruptMode(true);
+                unsigned long playbackStart = millis();
+                while(speaker.isRunning()) {
+                    if (settings.enableInterrupt) {
+                        bool triggered = speech.detectWakeWord(wakeThreshold);
+                        if (triggered && (millis() - playbackStart > 2000)) {
+                            speaker.stop();
+                            speaker.playSpeechFromFile(CHIME_FILENAME);
+                            while(speaker.isRunning()) delay(30);
+                            break;
+                        }
+                        delay(5);
+                    } else {
+                        delay(50);
+                    }
+                }
+                if (settings.enableInterrupt) setInterruptMode(false);
                 isSpeaking = false;
             } else {
                 display.showResponse("TTS Failed");
@@ -825,7 +869,23 @@ void handleSerialCommands() {
               speaker.playSpeechFromFile("/speech.mp3");
               isSpeaking = true;
               lv_timer_handler();
-              while(speaker.isRunning()) delay(50);
+              if (settings.enableInterrupt) setInterruptMode(true);
+              unsigned long playbackStart = millis();
+              while(speaker.isRunning()) {
+                  if (settings.enableInterrupt) {
+                      bool triggered = speech.detectWakeWord(wakeThreshold);
+                      if (triggered && (millis() - playbackStart > 2000)) {
+                          speaker.stop();
+                          speaker.playSpeechFromFile(CHIME_FILENAME);
+                          while(speaker.isRunning()) delay(30);
+                          break;
+                      }
+                      delay(5);
+                  } else {
+                      delay(50);
+                  }
+              }
+              if (settings.enableInterrupt) setInterruptMode(false);
               isSpeaking = false;
           } else {
               display.showResponse("TTS Failed");

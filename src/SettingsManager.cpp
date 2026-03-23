@@ -30,6 +30,7 @@ SettingsManager::SettingsManager() {
     ttsUrl[0] = '\0';
     enableWebSearch = false; // Default to false
     enableMemory = false;
+    enableInterrupt = false;
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
 }
 
@@ -60,6 +61,7 @@ void SettingsManager::load() {
     if (prefs.isKey("tts_url")) prefs.getString("tts_url", ttsUrl, sizeof(ttsUrl));
     enableWebSearch = prefs.getBool("web_srch", enableWebSearch);
     enableMemory = prefs.getBool("mem_en", enableMemory);
+    enableInterrupt = prefs.getBool("int_en", enableInterrupt);
     if (prefs.isKey("know_id")) prefs.getString("know_id", knowledgeId, sizeof(knowledgeId));
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
@@ -89,5 +91,6 @@ void SettingsManager::save() {
     prefs.putString("tts_url", ttsUrl);
     prefs.putBool("web_srch", enableWebSearch);
     prefs.putBool("mem_en", enableMemory);
+    prefs.putBool("int_en", enableInterrupt);
     prefs.putString("know_id", knowledgeId);
 }

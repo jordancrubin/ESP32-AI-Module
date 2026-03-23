@@ -1487,6 +1487,22 @@ void DisplayManager::showAudioConfig() {
         }
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
+    // Voice Interrupt Toggle
+    lv_obj_t * label_int = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_int, "Interrupt");
+    lv_obj_set_style_text_color(label_int, lv_color_white(), 0);
+    lv_obj_align(label_int, LV_ALIGN_CENTER, -30, 95);
+
+    lv_obj_t * sw_int = lv_switch_create(lv_scr_act());
+    lv_obj_set_size(sw_int, 40, 20);
+    lv_obj_align_to(sw_int, label_int, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    if (settings.enableInterrupt) lv_obj_add_state(sw_int, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw_int, [](lv_event_t * e){
+        if (static_dm) {
+            settings.enableInterrupt = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+        }
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
     // Close Button
     lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
     lv_obj_set_size(btnClose, 80, 40);
