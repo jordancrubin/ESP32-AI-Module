@@ -48,6 +48,7 @@ String pendingSSID = "";
 String pendingPass = "";
 bool isProcessing = false;
 static bool stopRequested = false;
+extern bool g_isSubMenuActive;
 
 // External functions from SpeechManager.cpp
 extern void setAecDebug(bool enable);
@@ -56,14 +57,20 @@ extern void setAecGain(int gain);
 extern void setAecPhase(bool invert);
 extern void setInputBalance(int balance);
 extern void getAudioLevels(int* l, int* r);
+extern void setAecAttenuation(int atten);
+extern void setAecCutoff(int cutoff);
 extern void setInterruptMode(bool mode);
 extern void setAecBypass(bool bypass);
 extern void renderBSOD();
 extern void renderGuruMeditation();
 extern void forceClockScreen();
+extern void showAecTuningUI();
+extern void updateAecTuningUI(int percent, const char* msg);
+extern void showHelpScreen();
 
 // Forward declarations
 void testAEC();
+void tuneAEC();
 void onSetupMode(bool enabled);
 
 // Chime Configuration
@@ -159,12 +166,16 @@ void onVoiceChange(String voice) {
                     bool showGuruMeditation = cmd.showGuruMeditation;
                     bool calibrateTouch = cmd.calibrateTouch;
                     bool enterConfigMode = cmd.enterConfigMode;
-                    if (showBSOD || showGuruMeditation) triggeredEasterEgg = true;
+                    bool tuneAEC_flag = cmd.tuneAEC;
+                    bool showHelp = cmd.showHelp;
+                    if (showBSOD || showGuruMeditation || showHelp) triggeredEasterEgg = true;
 
                     String answer;
                     if (handledLocally) {
-                        display.showStatus("Local Command...");
-                        lv_timer_handler();
+                        if (!showHelp) {
+                            display.showStatus("Local Command...");
+                            lv_timer_handler();
+                        }
                         answer = localResponse;
                         if (settings.debugMode) Serial.println("Local Action: " + answer);
                     } else {
@@ -177,7 +188,11 @@ void onVoiceChange(String voice) {
                     }
                     
                     // 4. TTS
-                    display.showStatus("Speaking...");
+                    if (showHelp) {
+                        showHelpScreen();
+                    } else {
+                        display.showStatus("Speaking...");
+                    }
                     // Ensure any previous TTS file is removed to free space before downloading
                     if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
                     
@@ -219,6 +234,12 @@ void onVoiceChange(String voice) {
                             display.showStatus("Running AEC Test...");
                             lv_timer_handler();
                             testAEC();
+                        }
+
+                        if (tuneAEC_flag) {
+                            display.showStatus("Auto-Tuning AEC...");
+                            lv_timer_handler();
+                            tuneAEC();
                         }
                         
                         if (systemReboot) {
@@ -417,6 +438,15 @@ void handleWebRoot() {
     }
     html += "</select><br>";
 
+    html += "AEC Target Delay: <input type='number' name='aecDelay' value='" + String(settings.aecDelay) + "' step='10' min='160' max='1600'><br>";
+    html += "<small>Echo alignment in samples. You can Auto-Tune this via voice command.</small><br>";
+
+    html += "AEC Attenuation (Divisor): <input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='1' max='32'><br>";
+    html += "<small>Reduces mic sensitivity during AI playback (1 = 0%, 2 = 50%, 4 = 75%, 8 = 87%).</small><br>";
+
+    html += "AEC Barge-in Cutoff: <input type='number' name='aecCutoff' value='" + String(settings.aecCutoff) + "' min='0' max='32767'><br>";
+    html += "<small>Minimum raw volume required to interrupt the AI. 0 disables the volume gate.</small><br>";
+
     html += "<h3>AI Features</h3>";
     html += "Enable Web Search: <input type='checkbox' name='webSearch' value='1'" + String(settings.enableWebSearch ? " checked" : "") + "><br>";
     html += "<small>Allows supported models to search the internet for real-time information.</small><br>";
@@ -437,6 +467,13 @@ void handleWebRoot() {
 
     html += "<input type='submit' value='Save & Verify' class='btn'>";
     html += "</form>";
+
+    html += "<hr><h3>Edge Impulse</h3>";
+    html += "<p>Use this mode to collect raw microphone data via USB using the <b>edge-impulse-data-forwarder</b> CLI.</p>";
+    html += "<form action='/ei_mode' method='POST'>";
+    html += "<input type='submit' value='Reboot to Data Collection Mode' class='btn-blue' style='background-color:#ff9800;'>";
+    html += "</form>";
+
     html += "</body></html>";
     server.send(200, "text/html", html);
 }
@@ -477,6 +514,30 @@ void handleWebSave() {
         int val = server.arg("silenceThreshold").toInt();
         if (val >= 300 && val <= 2000) {
             settings.silenceThreshold = val;
+        }
+    }
+
+    if (server.hasArg("aecDelay")) {
+        int val = server.arg("aecDelay").toInt();
+        if (val >= 160 && val <= 1600) {
+            settings.aecDelay = val;
+            setAecDelay(val);
+        }
+    }
+
+    if (server.hasArg("aecAttenuation")) {
+        int val = server.arg("aecAttenuation").toInt();
+        if (val >= 1 && val <= 32) {
+            settings.aecAttenuation = val;
+            setAecAttenuation(val);
+        }
+    }
+
+    if (server.hasArg("aecCutoff")) {
+        int val = server.arg("aecCutoff").toInt();
+        if (val >= 0 && val <= 32767) {
+            settings.aecCutoff = val;
+            setAecCutoff(val);
         }
     }
 
@@ -678,6 +739,237 @@ void testAEC() {
     Serial.println("\nAEC Test Complete.");
 }
 
+void tuneAEC() {
+    Serial.println("\n--- Starting AEC Auto-Tuning ---");
+    showAecTuningUI(); // Load graphical UI
+    
+    Serial.println("Downloading TTS for AEC Tuning...");
+    // Repetitive diagnostic phrase ensures active audio during the 2.5s cut-off window
+    String testPhrase = "Testing alignment. Testing alignment. Testing alignment. Testing alignment. Testing alignment.";
+    const char* ttsFile = "/aec_tune.mp3";
+    
+    if (!network.isConnected()) { Serial.println("WiFi not connected."); return; }
+    if (!llm.downloadTTS(testPhrase, network, ttsFile, ttsVoice)) { Serial.println("TTS Download failed."); return; }
+    if (!network.isConnected()) { 
+        Serial.println("WiFi not connected."); 
+        display.showStatus("Tuning Failed\nNo WiFi");
+        return; 
+    }
+    if (!llm.downloadTTS(testPhrase, network, ttsFile, ttsVoice)) { 
+        Serial.println("TTS Download failed."); 
+        display.showStatus("Tuning Failed\nTTS Error");
+        return; 
+    }
+
+    // Test range: 10ms to 70ms (160 to 1120 samples at 16kHz)
+    int testDelays[] = {160, 320, 480, 640, 800, 960, 1120}; 
+    long avgScores[7] = {0};
+    int bestDelay = 640;
+    long bestScore = 99999999; // Lower amplitude is better
+
+    Serial.println("Please remain completely silent for about a minute...");
+    
+    int totalSteps = 9 * 3 + 5 + 1; // 7 coarse + 2 fine + 5 attenuation + 1 cutoff
+    int currentStep = 0;
+
+    // Define the test sequence as a reusable lambda function
+    auto runDelayTest = [&](int d) -> long {
+        setAecDelay(d);
+        
+        long totalScore = 0;
+        int validRuns = 0;
+        Serial.printf("\nTesting Delay: %d samples (~%d ms)\n", d, d/16);
+
+        for (int run = 0; run < 3; run++) {
+            Serial.printf("  Run %d/3... ", run + 1);
+            
+            int percent = (currentStep * 100) / totalSteps;
+            String uiMsg = "Testing Delay: " + String(d/16) + "ms (" + String(run+1) + "/3)";
+            updateAecTuningUI(percent, uiMsg.c_str());
+            
+            speaker.playSpeechFromFile(ttsFile);
+            
+            // Discard first 1 second of audio to let the AEC filter adapt to the room
+            size_t discardSize = 0;
+            uint8_t* discardData = speech.record(1000, &discardSize, 0);
+            if (discardData) free(discardData);
+
+            // Record 1.5 seconds for actual measurement
+            size_t wavSize = 0;
+            uint8_t* wavData = speech.record(1500, &wavSize, 0);
+            
+            speaker.stop();
+            
+            long score = 99999999;
+            if (wavData && wavSize > 44) {
+                long sum = 0;
+                int16_t* samples = (int16_t*)(wavData + 44);
+                int sampleCount = (wavSize - 44) / 2;
+                for(int j=0; j<sampleCount; j++) sum += abs(samples[j]);
+                score = sum / sampleCount; // Calculate average absolute amplitude
+                free(wavData);
+                
+                totalScore += score;
+                validRuns++;
+                Serial.printf("Score: %ld\n", score);
+            } else {
+                Serial.println("Failed to record.");
+            }
+
+            currentStep++;
+            
+            percent = (currentStep * 100) / totalSteps;
+            uiMsg = "Testing Delay: " + String(d/16) + "ms (" + String(run+1) + "/3)\nWaiting for room echo to settle...";
+            updateAecTuningUI(percent, uiMsg.c_str());
+
+            delay(2000); // 2 second pause between tests to let room echo settle
+        }
+        
+        if (validRuns > 0) {
+            return totalScore / validRuns;
+        } else {
+            return 99999999;
+        }
+    };
+
+    // 1. Coarse Tuning Pass
+    for (int i = 0; i < 7; i++) {
+        avgScores[i] = runDelayTest(testDelays[i]);
+    }
+
+    Serial.println("\n--- Coarse Tuning Results ---");
+    for (int i = 0; i < 7; i++) {
+        Serial.printf("Delay %d samples (~%d ms) -> Average Score: %ld\n", testDelays[i], testDelays[i]/16, avgScores[i]);
+        if (avgScores[i] < bestScore) {
+            bestScore = avgScores[i];
+            bestDelay = testDelays[i];
+        }
+    }
+
+    // 2. Fine Tuning Pass (+/- 80 samples)
+    int fineDelays[] = {bestDelay - 80, bestDelay + 80};
+    if (fineDelays[0] < 0) fineDelays[0] = 0; // Prevent negative delays
+    
+    long fineScores[2] = {0};
+    Serial.printf("\nBest Coarse Delay: %d samples. Starting Fine-Tuning (+/- 80 samples)...\n", bestDelay);
+
+    for (int i = 0; i < 2; i++) {
+        fineScores[i] = runDelayTest(fineDelays[i]);
+    }
+
+    Serial.println("\n--- Fine Tuning Results ---");
+    for (int i = 0; i < 2; i++) {
+        Serial.printf("Delay %d samples (~%d ms) -> Average Score: %ld\n", fineDelays[i], fineDelays[i]/16, fineScores[i]);
+        if (fineScores[i] < bestScore) {
+            bestScore = fineScores[i];
+            bestDelay = fineDelays[i];
+        }
+    }
+    
+    // 3. Attenuation Tuning Pass
+    Serial.println("\n--- Attenuation Tuning Pass (Target Max Amp < 150) ---");
+    int testAttenuations[] = {2, 4, 8, 16, 32}; // Removed 1 to guarantee baseline attenuation
+    int bestAtten = 16; // Default to safest high value
+    
+    for (int i = 0; i < 5; i++) {
+        int att = testAttenuations[i];
+        Serial.printf("Testing Attenuation: %d%%... ", 100 - (100 / att));
+        
+        int percent = (currentStep * 100) / totalSteps;
+        String uiMsg = "Testing Attenuation: " + String(100 - (100 / att)) + "%";
+        updateAecTuningUI(percent, uiMsg.c_str());
+        
+        speaker.playSpeechFromFile(ttsFile);
+        
+        size_t discardSize = 0;
+        uint8_t* discardData = speech.record(1000, &discardSize, 0);
+        if (discardData) free(discardData);
+
+        size_t wavSize = 0;
+        uint8_t* wavData = speech.record(1500, &wavSize, 0);
+        
+        speaker.stop();
+        
+        long max_amp = 0;
+        if (wavData && wavSize > 44) {
+            int16_t* samples = (int16_t*)(wavData + 44);
+            int sampleCount = (wavSize - 44) / 2;
+            for(int j=0; j<sampleCount; j++) {
+                long val = abs(samples[j]) / att; // Simulate the mathematical attenuation
+                if (val > max_amp) max_amp = val;
+            }
+            free(wavData);
+            Serial.printf("Max Amp: %ld\n", max_amp);
+        } else {
+            Serial.println("Failed to record.");
+        }
+
+        currentStep++;
+        delay(2000);
+        
+        if (max_amp > 0 && max_amp < 150) {
+            bestAtten = att;
+            Serial.printf("Found optimal attenuation: %d%%\n", 100 - (100 / bestAtten));
+            currentStep += (4 - i); // Fast-forward progress bar for skipped steps
+            break;
+        }
+    }
+
+    // 4. Cutoff Tuning Pass
+    Serial.println("\n--- Cutoff Tuning Pass ---");
+    Serial.printf("Testing final max amplitude with Attenuation %d%%... ", 100 - (100 / bestAtten));
+    
+    int percent = (currentStep * 100) / totalSteps;
+    updateAecTuningUI(percent, "Measuring Amplitude Cutoff...");
+    
+    speaker.playSpeechFromFile(ttsFile);
+    size_t discardSize = 0;
+    uint8_t* discardData = speech.record(1000, &discardSize, 0);
+    if (discardData) free(discardData);
+
+    size_t wavSize = 0;
+    uint8_t* wavData = speech.record(1500, &wavSize, 0);
+    speaker.stop();
+    
+    long final_max_amp = 0;
+    if (wavData && wavSize > 44) {
+        int16_t* samples = (int16_t*)(wavData + 44);
+        int sampleCount = (wavSize - 44) / 2;
+        for(int j=0; j<sampleCount; j++) {
+            long val = abs(samples[j]) / bestAtten;
+            if (val > final_max_amp) final_max_amp = val;
+        }
+        free(wavData);
+        Serial.printf("Final Max Amp: %ld\n", final_max_amp);
+    }
+    
+    currentStep++;
+    int bestCutoff = final_max_amp + 500; // Add generous safety margin to prevent self-interruptions
+    if (bestCutoff < 1000) bestCutoff = 1000; // Hard minimum floor so AI never triggers itself
+
+    Serial.println("----------------------------------");
+    Serial.printf("Ultimate Best AEC Delay: %d samples\n", bestDelay);
+    Serial.printf("Ultimate Best Attenuation: %d%%\n", 100 - (100 / bestAtten));
+    Serial.printf("Ultimate Best Cutoff: %d\n", bestCutoff);
+    
+    settings.aecDelay = bestDelay;
+    settings.aecAttenuation = bestAtten;
+    settings.aecCutoff = bestCutoff;
+    settings.save();
+    
+    setAecDelay(bestDelay); // Lock it in
+    setAecAttenuation(bestAtten);
+    setAecCutoff(bestCutoff);
+    Serial.println("Saved to NVRAM and applied!");
+    
+    // Display Final Results
+    String resultMsg = "Tuning Complete!\nBest Delay: " + String(bestDelay) + " samples\nAtten: " + String(100 - (100 / bestAtten)) + "% | Cutoff: " + String(bestCutoff);
+    updateAecTuningUI(100, resultMsg.c_str());
+    delay(5000);
+    delay(30000); // Wait 30 seconds so the user can read the results before it clears
+    display.showMainUI(ttsVoice, settings.volume, voiceOptions); // Return to default UI
+}
+
 void handleSerialCommands() {
   while (Serial.available()) {
     char c = (char)Serial.read();
@@ -693,6 +985,7 @@ void handleSerialCommands() {
           Serial.println("/new            - Clear conversation history");
           Serial.println("/test_mic       - Record 5s clip to test mic (Debug only)");
           Serial.println("/test_aec       - Run AEC diagnostics (Debug only)");
+          Serial.println("/tune_aec       - Auto-tune AEC delay alignment");
           Serial.println("/debug_aec      - Toggle AEC debug stats");
           Serial.println("/aec_delay <n>  - Set AEC delay samples");
           Serial.println("/aec_gain <n>   - Set AEC gain multiplier");
@@ -721,6 +1014,9 @@ void handleSerialCommands() {
             settings.calibration.xMax, settings.calibration.yMax);
           Serial.printf("Mic Mode:   %d\n", settings.micMode);
           Serial.printf("Input Bal:  %d\n", settings.inputBalance);
+          Serial.printf("AEC Delay:  %d samples\n", settings.aecDelay);
+          Serial.printf("AEC Atten:  %d%%\n", 100 - (100 / settings.aecAttenuation));
+          Serial.printf("AEC Cutoff: %d\n", settings.aecCutoff);
           Serial.printf("Debug Mode: %s\n", settings.debugMode ? "ON" : "OFF");
           Serial.printf("Web Search: %s\n", settings.enableWebSearch ? "ON" : "OFF");
           Serial.printf("Memory:     %s\n", settings.enableMemory ? "ON" : "OFF");
@@ -739,7 +1035,11 @@ void handleSerialCommands() {
           setAecDebug(d);
         } else if (inputBuffer.startsWith("/aec_delay ")) {
           int d = inputBuffer.substring(11).toInt();
-          if (d > 0) setAecDelay(d);
+          if (d > 0) {
+              settings.aecDelay = d;
+              settings.save();
+              setAecDelay(d);
+          }
         } else if (inputBuffer.startsWith("/aec_gain ")) {
           int g = inputBuffer.substring(10).toInt();
           if (g > 0) setAecGain(g);
@@ -760,6 +1060,8 @@ void handleSerialCommands() {
           Serial.println("Calibration reset. Restart the device to recalibrate.");
         } else if (inputBuffer == "/test_aec") {
           testAEC();
+        } else if (inputBuffer == "/tune_aec") {
+          tuneAEC();
         } else if (inputBuffer.startsWith("/say ")) {
           String textToSay = inputBuffer.substring(5);
           textToSay.trim();
@@ -1006,6 +1308,24 @@ void setup() {
   display.showStatus("Powered by Edge Impulse");
   display.showStatus("UI by LVGL");
 
+    if (adminPrefs.getBool("ei_mode", false)) {
+        adminPrefs.putBool("ei_mode", false); // Clear immediately for next boot
+        display.showStatus("Edge Impulse Mode\nReady for CLI\nReboot to Exit");
+        
+        Serial.println("\n==================================================");
+        Serial.println("Edge Impulse Data Forwarder Mode active.");
+        Serial.println("IMPORTANT: You must CLOSE this Serial Monitor now!");
+        Serial.println("Then, open a fresh terminal and run:");
+        Serial.println("  edge-impulse-data-forwarder");
+        Serial.println("==================================================\n");
+        delay(3000); // Give user a moment to read before blasting raw data
+        
+        speech.begin();
+        extern void runEdgeImpulseForwarder();
+        runEdgeImpulseForwarder(); 
+        // Never returns. User must physically reset the board to exit.
+    }
+
   // Admin Password Check
   adminPassword = adminPrefs.getString("pass", "");
   ttsVoice = adminPrefs.getString("voice", "alloy");
@@ -1135,6 +1455,15 @@ void setup() {
       server.send(404, "text/plain", "Not Found");
   });
 
+  server.on("/ei_mode", HTTP_POST, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      adminPrefs.putBool("ei_mode", true);
+      server.sendHeader("Connection", "close");
+      server.send(200, "text/plain", "Rebooting to Edge Impulse Mode... The next reboot will return to normal operation.");
+      delay(1000);
+      ESP.restart();
+  });
+
   // OTA Update Endpoints
   server.on("/update", HTTP_GET, []() {
       if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
@@ -1191,6 +1520,9 @@ void setup() {
 
   // Initialize Speech Recognition (I2S)
   speech.begin();
+  setAecDelay(settings.aecDelay); // Apply the saved tuning
+  setAecAttenuation(settings.aecAttenuation);
+  setAecCutoff(settings.aecCutoff);
   display.showStatus("Speech Init|OK");
 
   // API Configuration Loop (Web Based)
@@ -1295,8 +1627,8 @@ void loop() {
       }
   }
   
-  // Check for Wake Word if not already speaking or in web config mode
-  if (!isSpeaking && !isWebServerActive) {
+  // Check for Wake Word if not already speaking, in web config mode, or in a sub-menu
+  if (!isSpeaking && !isWebServerActive && !g_isSubMenuActive) {
       if (speech.detectWakeWord(wakeThreshold)) {
           if (settings.debugMode) Serial.println("Wake Word Detected!");
           speaker.playSpeechFromFile(CHIME_FILENAME);

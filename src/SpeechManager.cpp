@@ -32,10 +32,14 @@ static volatile bool s_aec_invert = false; // Phase inversion flag
 static volatile int s_input_balance = 0; // -100 to 100
 static volatile int32_t s_peak_l = 0;
 static volatile int32_t s_peak_r = 0;
+static volatile int s_aec_attenuation = 4;
+static volatile int s_aec_cutoff = 600;
 
 // Global functions for main.cpp to call
 void setAecDebug(bool enable) { s_debug_aec = enable; Serial.printf("AEC Debug: %s\n", enable ? "ON" : "OFF"); }
 void setAecDelay(int delay) { s_aec_target_delay = delay; Serial.printf("AEC Target Delay: %d samples\n", delay); }
+void setAecAttenuation(int atten) { s_aec_attenuation = atten > 0 ? atten : 1; }
+void setAecCutoff(int cutoff) { s_aec_cutoff = cutoff >= 0 ? cutoff : 0; }
 void setAecGain(int gain) { s_aec_gain = gain; Serial.printf("AEC Ref Gain: %d\n", gain); }
 void setAecPhase(bool invert) { s_aec_invert = invert; Serial.printf("AEC Phase Invert: %s\n", invert ? "ON" : "OFF"); }
 void setInputBalance(int balance) { s_input_balance = balance; }
@@ -344,7 +348,7 @@ bool SpeechManager::detectWakeWord(float threshold) {
         // Lower microphone sensitivity specifically during Voice Interrupt (Barge-in)
         // to help prevent the AI's own early echo from triggering the wake word
         if (s_interrupt_mode) {
-            raw = raw / 8; // Attenuate volume by 87.5%
+            raw = raw / s_aec_attenuation; 
         }
 
         if (abs(raw) > max_audio_level) max_audio_level = abs(raw);
@@ -391,6 +395,8 @@ bool SpeechManager::detectWakeWord(float threshold) {
             Serial.println();
         }
         
+        int32_t current_max_level = max_audio_level; // Capture before reset
+
         max_audio_level = 0;
         max_l_level = 0;
         max_r_level = 0;
@@ -412,10 +418,12 @@ bool SpeechManager::detectWakeWord(float threshold) {
                 }
             }
             
-            // Voice Barge-in Detection (Trigger on ANY loud speech "unknown" if confidence is 0.92+)
-            if (s_interrupt_mode && strcmp(result.classification[ix].label, "unknown") == 0 && result.classification[ix].value >= 0.92f) {
-                if (settings.debugMode) Serial.printf(">>> INTERRUPT (UNKNOWN) DETECTED: %s (%.2f) <<<\n", result.classification[ix].label, result.classification[ix].value);
-                wake_word_detected = true;
+            // Voice Barge-in Detection (Trigger on ANY loud speech "unknown" if confidence is 0.95+)
+            if (s_interrupt_mode && strcmp(result.classification[ix].label, "unknown") == 0 && result.classification[ix].value >= 0.95f) {
+                if (current_max_level > s_aec_cutoff) { // Amplitude gate to block AEC speaker bleed
+                    if (settings.debugMode) Serial.printf(">>> INTERRUPT (UNKNOWN) DETECTED: %s (%.2f) <<<\n", result.classification[ix].label, result.classification[ix].value);
+                    wake_word_detected = true;
+                }
             }
         }
         
@@ -607,4 +615,26 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
         s_is_recording = false; // Resume AEC task if it was paused
     }
     return wavBuffer;
+}
+
+void runEdgeImpulseForwarder() {
+    s_is_recording = true; // Pause the background AEC task
+    
+    int32_t sampleBuffer[128 * 2]; // 128 stereo frames
+    size_t bytesRead;
+    
+    // Flush any initial stale data from hardware buffers
+    while (i2s_channel_read(s_rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, 0) == ESP_OK && bytesRead > 0);
+
+    while (true) {
+        if (i2s_channel_read(s_rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
+            int samples = bytesRead / 8; // 8 bytes per 32-bit stereo frame
+            for (int i = 0; i < samples; i++) {
+                int32_t l = sampleBuffer[i*2] >> 14;
+                int32_t r = sampleBuffer[i*2+1] >> 14;
+                int32_t val = (settings.micMode == 2) ? r : (settings.micMode == 1) ? l : ((l + r) / 2);
+                Serial.println(val); // Data Forwarder requires one sample per line
+            }
+        }
+    }
 }

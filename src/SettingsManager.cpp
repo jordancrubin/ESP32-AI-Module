@@ -31,6 +31,9 @@ SettingsManager::SettingsManager() {
     enableWebSearch = false; // Default to false
     enableMemory = false;
     enableInterrupt = false;
+    aecDelay = 640; // Default ~40ms
+    aecAttenuation = 4; // Default /4 (75% attenuation)
+    aecCutoff = 1000; // Default 1000 raw amplitude
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
 }
 
@@ -62,6 +65,9 @@ void SettingsManager::load() {
     enableWebSearch = prefs.getBool("web_srch", enableWebSearch);
     enableMemory = prefs.getBool("mem_en", enableMemory);
     enableInterrupt = prefs.getBool("int_en", enableInterrupt);
+    aecDelay = prefs.getInt("aec_dly", aecDelay);
+    aecAttenuation = prefs.getInt("aec_att", aecAttenuation);
+    aecCutoff = prefs.getInt("aec_cut", aecCutoff);
     if (prefs.isKey("know_id")) prefs.getString("know_id", knowledgeId, sizeof(knowledgeId));
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
@@ -92,5 +98,8 @@ void SettingsManager::save() {
     prefs.putBool("web_srch", enableWebSearch);
     prefs.putBool("mem_en", enableMemory);
     prefs.putBool("int_en", enableInterrupt);
+    prefs.putInt("aec_dly", aecDelay);
+    prefs.putInt("aec_att", aecAttenuation);
+    prefs.putInt("aec_cut", aecCutoff);
     prefs.putString("know_id", knowledgeId);
 }

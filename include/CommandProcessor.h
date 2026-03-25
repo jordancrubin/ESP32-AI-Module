@@ -14,6 +14,8 @@ struct CommandResult {
     bool showGuruMeditation = false;
     bool calibrateTouch = false;
     bool enterConfigMode = false;
+    bool tuneAEC = false;
+    bool showHelp = false;
 };
 
 class CommandProcessor {

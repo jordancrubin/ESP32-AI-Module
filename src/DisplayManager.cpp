@@ -24,6 +24,7 @@ static DisplayManager *static_dm = nullptr;
 static TouchCalibration _currentCal;
 static bool is_touch_active = false;
 static bool touch_disabled = false;
+bool g_isSubMenuActive = false;
 
 extern bool isProcessing;
 extern bool isSpeaking;
@@ -37,6 +38,7 @@ static lv_timer_t * g_clockTimer = nullptr;
 static lv_timer_t * g_idleTimer = nullptr;
 static uint32_t g_idleTimeout = 10000; // Dynamic idle timeout variable
 static void showVoiceModelConfig();
+static void showMicAecConfig();
 static void setupBootScreen();
 static lv_obj_t * boot_cont = nullptr;
 static VoiceCallback g_voiceCb = nullptr;
@@ -400,6 +402,7 @@ static void idle_timer_cb(lv_timer_t * t) {
 }
 
 static void showClockScreen() {
+    g_isSubMenuActive = false;
     // Use public method to reset private pointers (statusLabel)
     if (static_dm) static_dm->showWiFiError("");
     lv_obj_clean(lv_scr_act());
@@ -510,6 +513,7 @@ static void showClockScreen() {
 }
 
 static void showVoiceModelConfig() {
+    g_isSubMenuActive = true;
     // Use public method to reset private pointers (statusLabel)
     if (static_dm) static_dm->showWiFiError("");
     g_idleTimeout = 60000; // 60 seconds on sub-screens
@@ -605,6 +609,7 @@ static void showVoiceModelConfig() {
 }
 
 void DisplayManager::showMainUI(String currentVoice, int currentVolume, String voiceOptions) {
+    g_isSubMenuActive = false;
     lv_disp_trig_activity(NULL); // Reset idle timer to keep screen awake
     if (g_clockTimer) {
         lv_timer_del(g_clockTimer);
@@ -629,42 +634,29 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
 
     // --- Header / Top Right ---
 
-    // Setup Button (Icon)
-    lv_obj_t *btnSetup = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(btnSetup, 40, 40);
-    lv_obj_align(btnSetup, LV_ALIGN_TOP_RIGHT, -10, 10);
-    lv_obj_set_style_bg_color(btnSetup, lv_color_make(60, 60, 60), 0);
-    lv_obj_set_style_radius(btnSetup, 20, 0); // Circle
-    lv_obj_t *lblSetup = lv_label_create(btnSetup);
-    lv_label_set_text(lblSetup, LV_SYMBOL_SETTINGS);
-    lv_obj_center(lblSetup);
-    lv_obj_add_event_cb(btnSetup, setupEventHandler, LV_EVENT_CLICKED, this);
-
-    // Config Button (Left of Setup)
-    lv_obj_t *btnConfig = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(btnConfig, 40, 40);
-    lv_obj_align_to(btnConfig, btnSetup, LV_ALIGN_OUT_LEFT_MID, -10, 0);
-    lv_obj_set_style_bg_color(btnConfig, lv_color_make(60, 60, 60), 0);
-    lv_obj_set_style_radius(btnConfig, 20, 0);
-    lv_obj_t *lblConfig = lv_label_create(btnConfig);
-    lv_label_set_text(lblConfig, LV_SYMBOL_LIST);
-    lv_obj_center(lblConfig);
-    lv_obj_add_event_cb(btnConfig, [](lv_event_t * e){
-        showVoiceModelConfig();
-    }, LV_EVENT_CLICKED, NULL);
-
-    // Audio Config Button (Left of Config)
-    lv_obj_t *btnAudio = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(btnAudio, 40, 40);
-    lv_obj_align_to(btnAudio, btnConfig, LV_ALIGN_OUT_LEFT_MID, -10, 0);
-    lv_obj_set_style_bg_color(btnAudio, lv_color_make(60, 60, 60), 0);
-    lv_obj_set_style_radius(btnAudio, 20, 0);
-    lv_obj_t *lblAudio = lv_label_create(btnAudio);
-    lv_label_set_text(lblAudio, LV_SYMBOL_AUDIO);
-    lv_obj_center(lblAudio);
-    lv_obj_add_event_cb(btnAudio, [](lv_event_t * e){
-        if (static_dm) static_dm->showAudioConfig();
-    }, LV_EVENT_CLICKED, NULL);
+    // Hamburger Dropdown Menu
+    lv_obj_t * dd_menu = lv_dropdown_create(lv_scr_act());
+    lv_dropdown_set_options(dd_menu, "Voice & Model\nAudio & Interrupt\nMic Mode & AEC\nSystem Setup");
+    lv_dropdown_set_text(dd_menu, LV_SYMBOL_LIST); // Static icon text
+    lv_dropdown_set_symbol(dd_menu, NULL); // Hide standard down arrow
+    lv_dropdown_set_dir(dd_menu, LV_DIR_LEFT); // Expand to the left so it stays on screen
+    lv_obj_set_size(dd_menu, 40, 40);
+    lv_obj_align(dd_menu, LV_ALIGN_TOP_RIGHT, -10, 10);
+    lv_obj_set_style_bg_color(dd_menu, lv_color_make(60, 60, 60), 0);
+    lv_obj_set_style_radius(dd_menu, 20, 0); // Circle
+    lv_obj_set_style_text_align(dd_menu, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_pad_right(dd_menu, 0, 0); // Remove arrow padding to perfectly center the icon
+    lv_obj_add_event_cb(dd_menu, [](lv_event_t * e){
+        uint16_t idx = lv_dropdown_get_selected(lv_event_get_target(e));
+        if (idx == 0) showVoiceModelConfig();
+        else if (idx == 1 && static_dm) static_dm->showAudioConfig();
+        else if (idx == 2) showMicAecConfig();
+        else if (idx == 3 && static_dm) {
+            if (settings.debugMode) Serial.println("Setup menu pressed. Web Server active.");
+            if (DisplayManager::setupModeCb) DisplayManager::setupModeCb(true);
+            static_dm->showWebConfig(WiFi.localIP().toString(), "aiesp.local");
+        }
+    }, LV_EVENT_VALUE_CHANGED, NULL);
 
     // --- Volume Area (Top Left) ---
 
@@ -672,24 +664,49 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_t * label_vol = lv_label_create(lv_scr_act());
     lv_label_set_text(label_vol, LV_SYMBOL_VOLUME_MAX);
     lv_obj_set_style_text_color(label_vol, lv_color_make(200, 200, 200), 0);
-    lv_obj_align(label_vol, LV_ALIGN_TOP_LEFT, 10, 20);
+    lv_obj_align(label_vol, LV_ALIGN_TOP_LEFT, 10, 18);
 
     // Volume Slider (Horizontal)
     lv_obj_t * slider_vol = lv_slider_create(lv_scr_act());
-    lv_obj_set_width(slider_vol, 100); // Reduced from 140 to fit new button
+    lv_obj_set_width(slider_vol, 200); // Expanded width
     lv_obj_set_height(slider_vol, 10);
-    lv_obj_align(slider_vol, LV_ALIGN_TOP_LEFT, 40, 23);
+    lv_obj_align(slider_vol, LV_ALIGN_TOP_LEFT, 40, 21);
     lv_slider_set_range(slider_vol, 0, 21);
     lv_slider_set_value(slider_vol, currentVolume, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(slider_vol, lv_color_make(60, 60, 60), LV_PART_MAIN);
     lv_obj_set_style_bg_color(slider_vol, lv_palette_main(LV_PALETTE_BLUE), LV_PART_INDICATOR);
     lv_obj_add_event_cb(slider_vol, volumeEventHandler, LV_EVENT_VALUE_CHANGED, NULL);
 
+    // --- Brightness Area (Top Left, Below Volume) ---
+    lv_obj_t * label_bri = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_bri, LV_SYMBOL_EYE_OPEN); // Eye icon representing display/visuals
+    lv_obj_set_style_text_color(label_bri, lv_color_make(200, 200, 200), 0);
+    lv_obj_align(label_bri, LV_ALIGN_TOP_LEFT, 10, 48);
+
+    lv_obj_t * slider_bri = lv_slider_create(lv_scr_act());
+    lv_obj_set_width(slider_bri, 200);
+    lv_obj_set_height(slider_bri, 10);
+    lv_obj_align(slider_bri, LV_ALIGN_TOP_LEFT, 40, 51);
+    lv_slider_set_range(slider_bri, 10, 255);
+    lv_slider_set_value(slider_bri, settings.brightness, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(slider_bri, lv_color_make(60, 60, 60), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider_bri, lv_color_make(255, 200, 0), LV_PART_INDICATOR); // Yellow
+    lv_obj_add_event_cb(slider_bri, [](lv_event_t * e){
+        if (static_dm) {
+            int val = lv_slider_get_value(lv_event_get_target(e));
+            settings.brightness = val;
+            static_dm->setBacklight(val); // Adjust hardware dynamically
+        }
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(slider_bri, [](lv_event_t * e){
+        settings.save(); // Save to NVRAM safely on finger release
+    }, LV_EVENT_RELEASED, NULL);
+
     // --- Status Area (Center/Bottom) ---
 
     // Status Container (Visual background for text, no interaction)
     lv_obj_t * statusCont = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(statusCont, 300, 160);
+    lv_obj_set_size(statusCont, 300, 140); // Shorter to make room for brightness slider
     lv_obj_align(statusCont, LV_ALIGN_BOTTOM_MID, 0, -10);
     lv_obj_set_style_bg_color(statusCont, lv_color_make(50, 50, 50), 0);
     lv_obj_set_style_radius(statusCont, 10, 0);
@@ -706,6 +723,8 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
     if (g_lastStatus.length() < 13) {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
+    } else if (g_lastStatus.length() < 20) {
+        lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_28, 0);
     } else {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
     }
@@ -805,6 +824,8 @@ void DisplayManager::showStatus(const char* message) {
         lv_label_set_text(statusLabel, message);
         if (String(message).length() < 13) {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
+        } else if (String(message).length() < 20) {
+            lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_28, 0);
         } else {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
         }
@@ -821,6 +842,8 @@ void DisplayManager::showResponse(const String& response) {
         lv_label_set_text(statusLabel, response.c_str());
         if (response.length() < 13) {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
+        } else if (response.length() < 20) {
+            lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_28, 0);
         } else {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
         }
@@ -869,6 +892,7 @@ void DisplayManager::setWiFiConfigCallback(WiFiConfigCallback cb) {
 }
 
 void DisplayManager::showWiFiConfig() {
+    g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
@@ -924,6 +948,7 @@ void DisplayManager::setAPIConfigCallback(APIConfigCallback cb) {
 }
 
 void DisplayManager::showAPIConfig(String currentKey) {
+    g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
@@ -1040,6 +1065,7 @@ void DisplayManager::setAPIUrlConfigCallback(APIUrlConfigCallback cb) {
 }
 
 void DisplayManager::showAPIUrlConfig(String currentUrl) {
+    g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
@@ -1088,6 +1114,7 @@ void DisplayManager::setAdminConfigCallback(AdminConfigCallback cb) {
 }
 
 void DisplayManager::showAdminConfig() {
+    g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
@@ -1117,6 +1144,7 @@ void DisplayManager::showAdminConfig() {
 }
 
 void DisplayManager::showWebConfig(String ip, String hostname) {
+    g_isSubMenuActive = true;
     if (g_idleTimer) {
         lv_timer_del(g_idleTimer);
         g_idleTimer = nullptr;
@@ -1194,6 +1222,7 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
 }
 
 void DisplayManager::showWiFiError(const char* message) {
+    g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
@@ -1397,6 +1426,7 @@ void DisplayManager::updateWeather(const char* temp, const char* desc) {
 }
 
 void DisplayManager::showAudioConfig() {
+    g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
     lv_obj_clean(lv_scr_act());
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
@@ -1408,7 +1438,7 @@ void DisplayManager::showAudioConfig() {
     boot_cont = nullptr;
 
     lv_obj_t * title = lv_label_create(lv_scr_act());
-    lv_label_set_text(title, "Audio & Display Settings");
+    lv_label_set_text(title, "Audio & Interrupt Settings");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
@@ -1418,8 +1448,8 @@ void DisplayManager::showAudioConfig() {
     if (settings.micMode == 0 || settings.micMode == 1) {
         audio_vu_l = lv_bar_create(lv_scr_act());
         lv_obj_set_size(audio_vu_l, 200, 15);
-        lv_obj_align(audio_vu_l, LV_ALIGN_TOP_MID, 0, 35);
-        lv_bar_set_range(audio_vu_l, 0, 32767);
+        lv_obj_align(audio_vu_l, LV_ALIGN_TOP_MID, 0, 40);
+        lv_bar_set_range(audio_vu_l, 0, 10000); // Scaled for normal speech instead of absolute max
         lv_obj_set_style_bg_color(audio_vu_l, lv_color_make(40, 40, 40), LV_PART_MAIN);
         lv_obj_set_style_bg_color(audio_vu_l, lv_palette_main(LV_PALETTE_GREEN), LV_PART_INDICATOR);
         
@@ -1433,9 +1463,9 @@ void DisplayManager::showAudioConfig() {
     if (settings.micMode == 0 || settings.micMode == 2) {
         audio_vu_r = lv_bar_create(lv_scr_act());
         lv_obj_set_size(audio_vu_r, 200, 15);
-        int y_offset = (settings.micMode == 0) ? 55 : 35;
+        int y_offset = (settings.micMode == 0) ? 65 : 40;
         lv_obj_align(audio_vu_r, LV_ALIGN_TOP_MID, 0, y_offset);
-        lv_bar_set_range(audio_vu_r, 0, 32767);
+        lv_bar_set_range(audio_vu_r, 0, 10000); // Scaled for normal speech instead of absolute max
         lv_obj_set_style_bg_color(audio_vu_r, lv_color_make(40, 40, 40), LV_PART_MAIN);
         lv_obj_set_style_bg_color(audio_vu_r, lv_palette_main(LV_PALETTE_RED), LV_PART_INDICATOR);
 
@@ -1449,11 +1479,11 @@ void DisplayManager::showAudioConfig() {
     lv_obj_t * label_bal = lv_label_create(lv_scr_act());
     lv_label_set_text(label_bal, "Input Balance");
     lv_obj_set_style_text_color(label_bal, lv_color_white(), 0);
-    lv_obj_align(label_bal, LV_ALIGN_CENTER, 0, -25);
+    lv_obj_align(label_bal, LV_ALIGN_CENTER, 0, -10);
 
     lv_obj_t * slider_bal = lv_slider_create(lv_scr_act());
     lv_obj_set_width(slider_bal, 200);
-    lv_obj_align(slider_bal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(slider_bal, LV_ALIGN_CENTER, 0, 15);
     lv_slider_set_range(slider_bal, -100, 100);
     lv_slider_set_value(slider_bal, settings.inputBalance, LV_ANIM_OFF);
     lv_obj_add_event_cb(slider_bal, balanceEventHandler, LV_EVENT_VALUE_CHANGED, NULL);
@@ -1468,30 +1498,11 @@ void DisplayManager::showAudioConfig() {
     lv_obj_align_to(lbl_r, slider_bal, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
     lv_obj_set_style_text_color(lbl_r, lv_color_white(), 0);
 
-    // Brightness Slider
-    lv_obj_t * label_bri = lv_label_create(lv_scr_act());
-    lv_label_set_text(label_bri, "Screen Brightness");
-    lv_obj_set_style_text_color(label_bri, lv_color_white(), 0);
-    lv_obj_align(label_bri, LV_ALIGN_CENTER, 0, 35);
-
-    lv_obj_t * slider_bri = lv_slider_create(lv_scr_act());
-    lv_obj_set_width(slider_bri, 200);
-    lv_obj_align(slider_bri, LV_ALIGN_CENTER, 0, 60);
-    lv_slider_set_range(slider_bri, 10, 255); // Hard limit minimum of 10
-    lv_slider_set_value(slider_bri, settings.brightness, LV_ANIM_OFF);
-    lv_obj_add_event_cb(slider_bri, [](lv_event_t * e){
-        if (static_dm) {
-            int val = lv_slider_get_value(lv_event_get_target(e));
-            settings.brightness = val;
-            static_dm->setBacklight(val); // Adjusts display hardware dynamically
-        }
-    }, LV_EVENT_VALUE_CHANGED, NULL);
-
     // Voice Interrupt Toggle
     lv_obj_t * label_int = lv_label_create(lv_scr_act());
     lv_label_set_text(label_int, "Interrupt");
     lv_obj_set_style_text_color(label_int, lv_color_white(), 0);
-    lv_obj_align(label_int, LV_ALIGN_CENTER, -30, 95);
+    lv_obj_align(label_int, LV_ALIGN_CENTER, -30, 65);
 
     lv_obj_t * sw_int = lv_switch_create(lv_scr_act());
     lv_obj_set_size(sw_int, 40, 20);
@@ -1514,6 +1525,192 @@ void DisplayManager::showAudioConfig() {
         settings.save(); // Save to NVRAM when menu is closed
         if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
     }, LV_EVENT_CLICKED, NULL);
+}
+
+static void showMicAecConfig() {
+    g_isSubMenuActive = true;
+    g_idleTimeout = 60000; // 60 seconds on sub-screens
+    if (static_dm) static_dm->showWiFiError("");
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
+    boot_cont = nullptr;
+
+    lv_obj_t * title = lv_label_create(lv_scr_act());
+    lv_label_set_text(title, "Mic Mode & AEC");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+    lv_obj_t * btnBack = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btnBack, 50, 40);
+    lv_obj_align(btnBack, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btnBack, lv_color_make(60, 60, 60), 0);
+    lv_obj_t * lblBack = lv_label_create(btnBack);
+    lv_label_set_text(lblBack, LV_SYMBOL_LEFT);
+    lv_obj_center(lblBack);
+    lv_obj_add_event_cb(btnBack, [](lv_event_t * e){
+        settings.save();
+        if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Scrollable container for the settings
+    lv_obj_t * cont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(cont, 300, 170);
+    lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(cont, 5, 0);
+    lv_obj_set_style_pad_gap(cont, 15, 0);
+
+    lv_obj_t * kb = lv_keyboard_create(lv_scr_act());
+    lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+
+    // Auto-Tune Button
+    lv_obj_t * btnTune = lv_btn_create(cont);
+    lv_obj_set_size(btnTune, 270, 40);
+    lv_obj_set_style_bg_color(btnTune, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_t * lblTune = lv_label_create(btnTune);
+    lv_label_set_text(lblTune, "Auto-Tune AEC");
+    lv_obj_center(lblTune);
+    lv_obj_add_event_cb(btnTune, [](lv_event_t * e){
+        extern void tuneAEC();
+        tuneAEC();
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Mic Mode
+    lv_obj_t * label_mic = lv_label_create(cont);
+    lv_label_set_text(label_mic, "Microphone Mode");
+    lv_obj_set_style_text_color(label_mic, lv_color_make(200, 200, 200), 0);
+    lv_obj_t * dd_mic = lv_dropdown_create(cont);
+    lv_dropdown_set_options(dd_mic, "Stereo (Beamforming)\nLeft Channel Only\nRight Channel Only");
+    lv_obj_set_width(dd_mic, 270);
+    lv_dropdown_set_selected(dd_mic, settings.micMode);
+    lv_obj_add_event_cb(dd_mic, [](lv_event_t * e){
+        settings.micMode = lv_dropdown_get_selected(lv_event_get_target(e));
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Silence Threshold
+    lv_obj_t * label_sil = lv_label_create(cont);
+    lv_label_set_text(label_sil, "Silence Threshold");
+    lv_obj_set_style_text_color(label_sil, lv_color_make(200, 200, 200), 0);
+    lv_obj_t * ta_sil = lv_textarea_create(cont);
+    lv_textarea_set_one_line(ta_sil, true);
+    lv_textarea_set_accepted_chars(ta_sil, "0123456789");
+    lv_textarea_set_text(ta_sil, String(settings.silenceThreshold).c_str());
+    lv_obj_set_width(ta_sil, 270);
+    lv_obj_add_event_cb(ta_sil, [](lv_event_t * e){
+        lv_event_code_t code = lv_event_get_code(e);
+        lv_obj_t * ta = lv_event_get_target(e);
+        lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
+        lv_obj_t * cont = lv_obj_get_parent(ta);
+
+        if (code == LV_EVENT_FOCUSED) {
+            lv_keyboard_set_textarea(kb, ta);
+            lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(kb);
+            lv_obj_set_height(cont, 90); // Shrink container to fit above keyboard
+            lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
+            lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+        } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+            lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_height(cont, 170); // Restore container size
+            lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
+            if (code == LV_EVENT_READY) lv_obj_clear_state(ta, LV_STATE_FOCUSED); // Drop focus on checkmark
+            settings.silenceThreshold = String(lv_textarea_get_text(ta)).toInt();
+        }
+    }, LV_EVENT_ALL, kb);
+
+    // AEC Cutoff
+    lv_obj_t * label_cut = lv_label_create(cont);
+    lv_label_set_text(label_cut, "AEC Cutoff");
+    lv_obj_set_style_text_color(label_cut, lv_color_make(200, 200, 200), 0);
+    lv_obj_t * ta_cut = lv_textarea_create(cont);
+    lv_textarea_set_one_line(ta_cut, true);
+    lv_textarea_set_accepted_chars(ta_cut, "0123456789");
+    lv_textarea_set_text(ta_cut, String(settings.aecCutoff).c_str());
+    lv_obj_set_width(ta_cut, 270);
+    lv_obj_add_event_cb(ta_cut, [](lv_event_t * e){
+        lv_event_code_t code = lv_event_get_code(e);
+        lv_obj_t * ta = lv_event_get_target(e);
+        lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
+        lv_obj_t * cont = lv_obj_get_parent(ta);
+
+        if (code == LV_EVENT_FOCUSED) {
+            lv_keyboard_set_textarea(kb, ta);
+            lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(kb);
+            lv_obj_set_height(cont, 90);
+            lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
+            lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+        } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+            lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_height(cont, 170);
+            lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
+            if (code == LV_EVENT_READY) lv_obj_clear_state(ta, LV_STATE_FOCUSED);
+            int val = String(lv_textarea_get_text(ta)).toInt();
+            settings.aecCutoff = val;
+            extern void setAecCutoff(int cutoff);
+            setAecCutoff(val);
+        }
+    }, LV_EVENT_ALL, kb);
+
+    // AEC Attenuation
+    lv_obj_t * label_att = lv_label_create(cont);
+    lv_label_set_text(label_att, "AEC Attenuation Divisor");
+    lv_obj_set_style_text_color(label_att, lv_color_make(200, 200, 200), 0);
+    lv_obj_t * dd_att = lv_dropdown_create(cont);
+    lv_dropdown_set_options(dd_att, "/1 (0%)\n/2 (50%)\n/4 (75%)\n/8 (87%)\n/16 (93%)\n/32 (96%)");
+    lv_obj_set_width(dd_att, 270);
+    int attIdx = 0;
+    if (settings.aecAttenuation >= 32) attIdx = 5;
+    else if (settings.aecAttenuation >= 16) attIdx = 4;
+    else if (settings.aecAttenuation >= 8) attIdx = 3;
+    else if (settings.aecAttenuation >= 4) attIdx = 2;
+    else if (settings.aecAttenuation >= 2) attIdx = 1;
+    lv_dropdown_set_selected(dd_att, attIdx);
+    lv_obj_add_event_cb(dd_att, [](lv_event_t * e){
+        int idx = lv_dropdown_get_selected(lv_event_get_target(e));
+        int val = 1 << idx;
+        settings.aecAttenuation = val;
+        extern void setAecAttenuation(int atten);
+        setAecAttenuation(val);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // AEC Delay
+    lv_obj_t * label_dly = lv_label_create(cont);
+    lv_label_set_text(label_dly, "AEC Delay (Samples)");
+    lv_obj_set_style_text_color(label_dly, lv_color_make(200, 200, 200), 0);
+    lv_obj_t * ta_dly = lv_textarea_create(cont);
+    lv_textarea_set_one_line(ta_dly, true);
+    lv_textarea_set_accepted_chars(ta_dly, "0123456789");
+    lv_textarea_set_text(ta_dly, String(settings.aecDelay).c_str());
+    lv_obj_set_width(ta_dly, 270);
+    lv_obj_add_event_cb(ta_dly, [](lv_event_t * e){
+        lv_event_code_t code = lv_event_get_code(e);
+        lv_obj_t * ta = lv_event_get_target(e);
+        lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
+        lv_obj_t * cont = lv_obj_get_parent(ta);
+
+        if (code == LV_EVENT_FOCUSED) {
+            lv_keyboard_set_textarea(kb, ta);
+            lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(kb);
+            lv_obj_set_height(cont, 90);
+            lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
+            lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+        } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+            lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_height(cont, 170);
+            lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
+            if (code == LV_EVENT_READY) lv_obj_clear_state(ta, LV_STATE_FOCUSED);
+            int val = String(lv_textarea_get_text(ta)).toInt();
+            settings.aecDelay = val;
+            extern void setAecDelay(int delay);
+            setAecDelay(val);
+        }
+    }, LV_EVENT_ALL, kb);
 }
 
 void DisplayManager::updateAudioVUMeter(int l, int r) {
@@ -1599,4 +1796,94 @@ void renderGuruMeditation() {
 
 void forceClockScreen() {
     showClockScreen();
+}
+
+static lv_obj_t * aec_progress_bar = nullptr;
+static lv_obj_t * aec_status_label = nullptr;
+
+void showAecTuningUI() {
+    if (g_clockTimer) {
+        lv_timer_del(g_clockTimer);
+        g_clockTimer = nullptr;
+    }
+    if (g_idleTimer) {
+        lv_timer_del(g_idleTimer);
+        g_idleTimer = nullptr;
+    }
+
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
+
+    lv_obj_t * title = lv_label_create(lv_scr_act());
+    lv_label_set_text(title, "Acoustic Echo Cancellation");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
+
+    aec_progress_bar = lv_bar_create(lv_scr_act());
+    lv_obj_set_size(aec_progress_bar, 260, 20);
+    lv_obj_align(aec_progress_bar, LV_ALIGN_CENTER, 0, -10);
+    lv_bar_set_range(aec_progress_bar, 0, 100);
+    lv_bar_set_value(aec_progress_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(aec_progress_bar, lv_color_make(120, 120, 120), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(aec_progress_bar, lv_palette_main(LV_PALETTE_BLUE), LV_PART_INDICATOR);
+
+    aec_status_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(aec_status_label, "Initializing test...");
+    lv_obj_set_style_text_align(aec_status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(aec_status_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(aec_status_label, lv_color_make(200, 200, 200), 0);
+    lv_obj_align(aec_status_label, LV_ALIGN_CENTER, 0, 40);
+
+    lv_timer_handler(); // Force the screen to draw instantly
+}
+
+void updateAecTuningUI(int percent, const char* msg) {
+    if (aec_progress_bar) lv_bar_set_value(aec_progress_bar, percent, LV_ANIM_ON); // Animate the fill
+    if (aec_status_label) {
+        lv_label_set_text(aec_status_label, msg);
+        lv_obj_align(aec_status_label, LV_ALIGN_CENTER, 0, 40); // Keep it perfectly centered
+    }
+    lv_timer_handler();
+}
+
+void showHelpScreen() {
+    g_isSubMenuActive = false;
+    if (g_clockTimer) {
+        lv_timer_del(g_clockTimer);
+        g_clockTimer = nullptr;
+    }
+    if (g_idleTimer) {
+        lv_timer_del(g_idleTimer);
+        g_idleTimer = nullptr;
+    }
+
+    // Use public method to reset private pointers (statusLabel)
+    if (static_dm) static_dm->showWiFiError("");
+    
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
+
+    lv_obj_t * title = lv_label_create(lv_scr_act());
+    lv_label_set_text(title, "Available Commands");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_make(0, 255, 255), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
+
+    lv_obj_t * list = lv_label_create(lv_scr_act());
+    lv_label_set_long_mode(list, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(list, 300);
+    lv_obj_set_style_text_color(list, lv_color_make(200, 200, 200), 0);
+    lv_obj_set_style_text_font(list, &lv_font_montserrat_14, 0);
+    lv_label_set_text(list,
+        "- Volume [0-10]: Adjust audio level\n"
+        "- Brightness [0-10]: Adjust screen backlight\n"
+        "- Clock Color: Set to Red, Green, or White\n"
+        "- Config Mode: Open Web UI\n"
+        "- Calibrate Touchscreen: Fix touch alignment\n"
+        "- Auto Tune: Calibrate Echo Cancellation\n"
+        "- System Reboot: Restart device");
+    lv_obj_align(list, LV_ALIGN_TOP_LEFT, 10, 45);
+
+    lv_timer_handler(); // Force the screen to draw instantly
 }

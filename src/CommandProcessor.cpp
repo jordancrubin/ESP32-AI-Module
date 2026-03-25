@@ -121,6 +121,11 @@ CommandResult CommandProcessor::processCommand(const String& text) {
         result.response = "We will be conducting an A E C test, ensure there is no noise in the room. We will play back the results both with and without A E C.";
         result.handled = true;
         result.runAecTest = true;
+    } else if (lowerText.indexOf("tune aec") != -1 || lowerText.indexOf("tune a e c") != -1 || 
+               lowerText.indexOf("auto tune") != -1 || lowerText.indexOf("auto-tune") != -1) {
+        result.response = "Starting automatic A E C calibration. Please remain completely silent for the next fifteen seconds.";
+        result.handled = true;
+        result.tuneAEC = true;
     } else if (lowerText.indexOf("system reboot") != -1 || lowerText.indexOf("reboot the system") != -1 || lowerText.indexOf("reboot system") != -1) {
         result.response = "Rebooting the system now.";
         result.handled = true;
@@ -144,6 +149,7 @@ CommandResult CommandProcessor::processCommand(const String& text) {
     } else if (lowerText.indexOf("what are your commands") != -1 || lowerText.indexOf("list your commands") != -1 || lowerText == "help" || lowerText == "help." || lowerText == "help!") {
         result.response = "Here are the local commands I understand. You can tell me to raise, lower, or set the volume or brightness to a number between zero and ten. You can ask me to change the clock color to red, green, or white. You can ask me to calibrate the touchscreen, or go into configuration mode. You can say, 'test A E C', to test the acoustic echo cancellation. You can also say, 'system reboot', to restart the device.";
         result.handled = true;
+        result.showHelp = true;
     }
 
     return result;

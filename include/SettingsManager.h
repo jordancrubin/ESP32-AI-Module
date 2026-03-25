@@ -47,6 +47,9 @@ public:
     bool enableWebSearch;
     bool enableMemory;
     bool enableInterrupt;
+    int aecDelay;
+    int aecAttenuation;
+    int aecCutoff;
     char knowledgeId[64];
 
 private:
