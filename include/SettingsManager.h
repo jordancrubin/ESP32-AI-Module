@@ -50,6 +50,7 @@ public:
     int aecDelay;
     int aecAttenuation;
     int aecCutoff;
+    int aecIgnore;
     char knowledgeId[64];
 
 private:

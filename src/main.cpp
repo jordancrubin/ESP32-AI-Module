@@ -70,8 +70,19 @@ extern void showHelpScreen();
 
 // Forward declarations
 void testAEC();
+void testHarmonic();
 void tuneAEC();
 void onSetupMode(bool enabled);
+void performFactoryReset();
+
+// Timer Variables
+extern uint32_t g_pendingTimerSeconds;
+extern bool g_cancelTimer;
+unsigned long timerStartTime = 0;
+uint32_t timerDurationMs = 0;
+bool timerActive = false;
+bool timerRinging = false;
+unsigned long lastRingTime = 0;
 
 // Chime Configuration
 const char* CHIME_FILENAME = "/chime.mp3";
@@ -168,7 +179,8 @@ void onVoiceChange(String voice) {
                     bool enterConfigMode = cmd.enterConfigMode;
                     bool tuneAEC_flag = cmd.tuneAEC;
                     bool showHelp = cmd.showHelp;
-                    if (showBSOD || showGuruMeditation || showHelp) triggeredEasterEgg = true;
+                    bool isTimerCmd = (g_pendingTimerSeconds > 0 || g_cancelTimer);
+                    if (showBSOD || showGuruMeditation || showHelp || isTimerCmd) triggeredEasterEgg = true;
 
                     String answer;
                     if (handledLocally) {
@@ -209,7 +221,7 @@ void onVoiceChange(String voice) {
                         while (speaker.isRunning()) {
                             if (settings.enableInterrupt) {
                                 bool triggered = speech.detectWakeWord(wakeThreshold);
-                                if (triggered && (millis() - playbackStart > 2000)) {
+                                if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
                                     if (settings.debugMode) Serial.println("Playback interrupted by user!");
                                     speaker.stop();
                                     speaker.playSpeechFromFile(CHIME_FILENAME);
@@ -270,6 +282,10 @@ void onVoiceChange(String voice) {
                         if (enterConfigMode) {
                             onSetupMode(true);
                             display.showWebConfig(WiFi.localIP().toString(), "aiesp.local");
+                            break;       // End the conversation loop
+                        }
+                        
+                        if (isTimerCmd) {
                             break;       // End the conversation loop
                         }
                     } else {
@@ -378,102 +394,185 @@ void handleWebRoot() {
         return;
     }
 
-    String html = "<html><head><title>AI ESP32 Config</title>";
+    String html;
+    html.reserve(8192);
+    html += "<!DOCTYPE html><html><head><title>ESP32 AI Assistant</title>";
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-    html += "<style>body{font-family:sans-serif;padding:20px;} input, select{width:100%;padding:10px;margin:5px 0;} .btn{background-color:#4CAF50;color:white;border:none;cursor:pointer;} .btn-blue{background-color:#008CBA;color:white;border:none;cursor:pointer;padding:10px;width:100%;margin:5px 0;}</style></head><body>";
-    html += "<h2>Configuration</h2>";
-    html += "<div style='background:#e9ecef; padding:10px; margin-bottom:15px; border-radius:5px;'><b>System Update:</b> Navigate to <a href='/update'>/update</a> to upload new Firmware or Filesystem images.</div>";
-    html += "<form action='/save' method='POST'>";
-    html += "API Key: <input type='text' name='apiKey' value='" + String(settings.apiKey) + "'><br>";
-    html += "API URL: <input type='text' name='apiUrl' value='" + String(settings.apiUrl) + "'><br>";
-    
-    html += "TTS Provider: <select name='ttsProvider'>";
-    html += "<option value='0'" + String(settings.ttsProvider == 0 ? " selected" : "") + ">OpenWebUI (Kokoro)</option>";
-    html += "<option value='1'" + String(settings.ttsProvider == 1 ? " selected" : "") + ">Direct</option>";
-    html += "</select><br>";
-    html += "Direct TTS URL: <input type='text' name='ttsUrl' value='" + String(settings.ttsUrl) + "' placeholder='e.g., http://host:port'><br>";
-    html += "<small>Used when TTS Provider is 'Direct'. Must be full base URL.</small><br><br>";
-    
-    html += "System Prompt:<br>";
-    html += "<textarea name='systemPrompt' rows='3' style='width:100%'>" + String(settings.systemPrompt) + "</textarea><br>";
+    html += "<style>";
+    html += "body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f0f2f5;color:#333;margin:0;padding:15px;}";
+    html += ".container{max-width:800px;margin:auto;background:#fff;padding:25px;border-radius:10px;box-shadow:0 4px 15px rgba(0,0,0,0.05);}";
+    html += "h2{color:#2c3e50;border-bottom:2px solid #008CBA;padding-bottom:10px;margin-top:0;}";
+    html += ".tabs{display:flex;border-bottom:2px solid #e0e0e0;margin-bottom:25px;flex-wrap:wrap;}";
+    html += ".tab{padding:12px 20px;cursor:pointer;background:#f8f9fa;margin-right:5px;border-radius:6px 6px 0 0;font-weight:600;color:#6c757d;border:1px solid transparent;border-bottom:none;transition:background 0.2s;}";
+    html += ".tab:hover{background:#e2e6ea;}";
+    html += ".tab.active{background:#fff;border-color:#e0e0e0;margin-bottom:-2px;color:#008CBA;border-bottom:2px solid #fff;}";
+    html += ".tab-content{display:none;animation:fade .4s;}";
+    html += ".tab-content.active{display:block;}";
+    html += "@keyframes fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}";
+    html += "input[type=text],input[type=number],select,textarea{width:100%;padding:10px;margin:8px 0 20px 0;border:1px solid #ced4da;border-radius:5px;box-sizing:border-box;font-family:inherit;}";
+    html += "input[type=range]{width:100%;margin:15px 0;}";
+    html += ".btn{background-color:#008CBA;color:white;border:none;cursor:pointer;padding:12px;border-radius:5px;font-size:16px;width:100%;margin-top:15px;font-weight:bold;transition:background 0.2s;box-shadow:0 2px 5px rgba(0,0,0,0.1);}";
+    html += ".btn:hover{background-color:#007bb5;}";
+    html += ".btn-red{background-color:#dc3545;} .btn-red:hover{background-color:#c82333;}";
+    html += ".btn-orange{background-color:#fd7e14;} .btn-orange:hover{background-color:#e86e04;}";
+    html += ".card{background:#f8f9fa;padding:20px;border-radius:8px;margin-bottom:20px;border:1px solid #e9ecef;}";
+    html += ".card h3{margin-top:0;color:#343a40;font-size:1.1em;border-bottom:1px solid #dee2e6;padding-bottom:8px;}";
+    html += "label{font-weight:600;color:#495057;display:block;}";
+    html += "small{color:#6c757d;display:block;margin-top:-16px;margin-bottom:15px;font-size:0.85em;line-height:1.4;}";
+    html += ".checkbox-group{display:flex;align-items:center;margin-bottom:15px;background:#fff;padding:10px;border-radius:5px;border:1px solid #ced4da;}";
+    html += ".checkbox-group input{width:auto;margin:0 15px 0 5px;transform:scale(1.3);cursor:pointer;}";
+    html += ".checkbox-group label{margin:0;cursor:pointer;flex-grow:1;}";
+    html += "ul.diag-list{list-style:none;padding:0;margin:0;}";
+    html += "ul.diag-list li{background:#fff;border:1px solid #dee2e6;margin-bottom:8px;padding:12px 15px;border-radius:5px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,0.02);}";
+    html += "ul.diag-list li span{font-weight:500;color:#495057;}";
+    html += "ul.diag-list li a{color:#008CBA;text-decoration:none;font-weight:600;padding:4px 8px;border-radius:4px;background:#e9ecef;transition:background 0.2s;}";
+    html += "ul.diag-list li a:hover{background:#dee2e6;}";
+    html += "</style>";
+    html += "<script>";
+    html += "function openTab(evt, tabName) {";
+    html += "  var i, x, tablinks;";
+    html += "  x = document.getElementsByClassName('tab-content');";
+    html += "  for (i = 0; i < x.length; i++) { x[i].classList.remove('active'); }";
+    html += "  tablinks = document.getElementsByClassName('tab');";
+    html += "  for (i = 0; i < x.length; i++) { tablinks[i].classList.remove('active'); }";
+    html += "  document.getElementById(tabName).classList.add('active');";
+    html += "  evt.currentTarget.classList.add('active');";
+    html += "  document.getElementById('saveBtnContainer').style.display = (tabName === 'Diagnostics') ? 'none' : 'block';";
+    html += "}";
+    html += "</script>";
+    html += "</head><body>";
+    html += "<div class='container'>";
+    html += "<h2>ESP32 AI Configuration</h2>";
 
-    html += "Timezone: <select name='timezone'>";
+    // Tabs
+    html += "<div class='tabs'>";
+    html += "<div class='tab active' onclick=\"openTab(event, 'General')\">General</div>";
+    html += "<div class='tab' onclick=\"openTab(event, 'Audio')\">Audio & AEC</div>";
+    html += "<div class='tab' onclick=\"openTab(event, 'System')\">System & Display</div>";
+    html += "<div class='tab' onclick=\"openTab(event, 'Diagnostics')\">Diagnostics & Tools</div>";
+    html += "</div>";
+
+    // Open Form
+    html += "<form action='/save' method='POST'>";
+
+    // TAB: General
+    html += "<div id='General' class='tab-content active'>";
+    html += "<div class='card'>";
+    html += "<label>API URL</label><input type='text' name='apiUrl' value='" + String(settings.apiUrl) + "'>";
+    html += "<label>API Key</label><input type='text' name='apiKey' value='" + String(settings.apiKey) + "'>";
+    html += "<label>TTS Provider</label><select name='ttsProvider'>";
+    html += "<option value='0'" + String(settings.ttsProvider == 0 ? " selected" : "") + ">OpenWebUI (Kokoro)</option>";
+    html += "<option value='1'" + String(settings.ttsProvider == 1 ? " selected" : "") + ">Direct</option></select>";
+    html += "<label>Direct TTS URL</label><input type='text' name='ttsUrl' value='" + String(settings.ttsUrl) + "' placeholder='e.g., http://host:port'>";
+    html += "<small>Used when TTS Provider is 'Direct'. Must be full base URL.</small>";
+    html += "<label>System Prompt</label><textarea name='systemPrompt' rows='4'>" + String(settings.systemPrompt) + "</textarea>";
+    html += "</div>";
+    
+    html += "<div class='card'><h3>AI Features</h3>";
+    html += "<div class='checkbox-group'><input type='checkbox' id='webSearch' name='webSearch' value='1'" + String(settings.enableWebSearch ? " checked" : "") + "><label for='webSearch'>Enable Web Search</label></div>";
+    html += "<div class='checkbox-group'><input type='checkbox' id='memory' name='memory' value='1'" + String(settings.enableMemory ? " checked" : "") + "><label for='memory'>Enable Conversation Memory</label></div>";
+    html += "<label>Knowledge ID (RAG)</label><input type='text' name='knowledgeId' value='" + String(settings.knowledgeId) + "' placeholder='e.g., collection_id'>";
+    html += "<small>OpenWebUI Collection/File ID to enable document context.</small>";
+    html += "</div>";
+    html += "</div>";
+
+    // TAB: Audio & AEC
+    html += "<div id='Audio' class='tab-content'>";
+    html += "<div class='card'><h3>Microphone & Detection</h3>";
+    html += "<label>Microphone Mode</label><select name='micMode'>";
+    String micModes[] = {"Stereo (Beamforming)", "Left Channel Only", "Right Channel Only"};
+    for (int i = 0; i < 3; i++) {
+        html += "<option value='" + String(i) + "'" + (settings.micMode == i ? " selected" : "") + ">" + micModes[i] + "</option>";
+    }
+    html += "</select>";
+    html += "<label>Wake Sensitivity (0.4 - 0.9)</label><input type='number' name='wakeThreshold' value='" + String(wakeThreshold) + "' step='0.05' min='0.4' max='0.9'>";
+    html += "<label>Silence Threshold (300 - 2000)</label><input type='number' name='silenceThreshold' value='" + String(settings.silenceThreshold) + "' step='50' min='300' max='2000'>";
+    html += "</div>";
+
+    html += "<div class='card'><h3>Acoustic Echo Cancellation (AEC)</h3>";
+    html += "<div class='checkbox-group'><input type='checkbox' id='interrupt' name='interrupt' value='1'" + String(settings.enableInterrupt ? " checked" : "") + "><label for='interrupt'>Enable Voice Barge-in (Interrupt AI)</label></div>";
+    html += "<small style='margin-top:-5px;'>Allows you to interrupt the AI by speaking over it.</small><br>";
+    html += "<label>AEC Target Delay (Samples)</label><input type='number' name='aecDelay' value='" + String(settings.aecDelay) + "' step='10' min='160' max='1600'>";
+    html += "<small>Echo alignment. Best tuned via /tune_aec command.</small>";
+    html += "<label>AEC Attenuation (Divisor)</label><input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='1' max='32'>";
+    html += "<small>Reduces mic sensitivity during AI playback (2 = 50%, 4 = 75%, 16 = 93%).</small>";
+    html += "<label>AEC Barge-in Cutoff</label><input type='number' name='aecCutoff' value='" + String(settings.aecCutoff) + "' min='0' max='32767'>";
+    html += "<small>Minimum volume required to interrupt the AI (Blocks residual echo).</small>";
+    html += "<label>AEC Interrupt Ignore (ms)</label><input type='number' name='aecIgnore' value='" + String(settings.aecIgnore) + "' min='0' max='10000' step='100'>";
+    html += "<small>Time to ignore voice interruptions when AI starts speaking (Adaptation window).</small>";
+    html += "</div>";
+    html += "</div>";
+
+    // TAB: System & Display
+    html += "<div id='System' class='tab-content'>";
+    html += "<div class='card'><h3>Display & Time</h3>";
+    html += "<label>Timezone</label><select name='timezone'>";
     String tzs[] = {"UTC0", "EST5EDT,M3.2.0,M11.1.0", "CST6CDT,M3.2.0,M11.1.0", "MST7MDT,M3.2.0,M11.1.0", "PST8PDT,M3.2.0,M11.1.0", "MST7", "GMT0BST,M3.5.0/1,M10.5.0", "CET-1CEST,M3.5.0,M10.5.0/3", "JST-9", "CST-8", "AEST-10AEDT,M10.1.0,M4.1.0/3"};
     String names[] = {"UTC", "US Eastern", "US Central", "US Mountain", "US Pacific", "US Arizona", "London", "Paris/Berlin", "Tokyo", "Shanghai", "Sydney"};
-    
     for (int i = 0; i < 11; i++) {
-        html += "<option value='" + tzs[i] + "'";
-        if (String(settings.timeZone) == tzs[i]) html += " selected";
-        html += ">" + names[i] + "</option>";
+        html += "<option value='" + tzs[i] + "'" + (String(settings.timeZone) == tzs[i] ? " selected" : "") + ">" + names[i] + "</option>";
     }
-    // Allow custom entry if not in list
     if (strlen(settings.timeZone) > 0 && html.indexOf("selected") == -1) {
          html += "<option value='" + String(settings.timeZone) + "' selected>Custom (" + String(settings.timeZone) + ")</option>";
     }
-    html += "</select><br>";
+    html += "</select>";
 
-    html += "Clock Color: <select name='clockColor'>";
+    html += "<label>Clock Color</label><select name='clockColor'>";
     String colors[] = {"red", "green", "white"};
     String colorNames[] = {"Red", "Green", "White"};
     for (int i = 0; i < 3; i++) {
-        html += "<option value='" + colors[i] + "'";
-        if (String(settings.clockColor) == colors[i]) html += " selected";
-        html += ">" + colorNames[i] + "</option>";
+        html += "<option value='" + colors[i] + "'" + (String(settings.clockColor) == colors[i] ? " selected" : "") + ">" + colorNames[i] + "</option>";
     }
-    html += "</select><br>";
+    html += "</select>";
 
-    html += "Wake Sensitivity (0.4-0.9): <input type='number' name='wakeThreshold' value='" + String(wakeThreshold) + "' step='0.05' min='0.4' max='0.9'><br>";
+    html += "<label>Screen Brightness (" + String(settings.brightness) + ")</label><input type='range' name='brightness' min='10' max='255' value='" + String(settings.brightness) + "' oninput='this.previousElementSibling.innerHTML=\"Screen Brightness (\" + this.value + \")\"'>";
+    html += "</div>";
 
-    html += "Silence Threshold (300-2000): <input type='number' name='silenceThreshold' value='" + String(settings.silenceThreshold) + "' step='50' min='300' max='2000'><br>";
+    html += "<div class='card'><h3>Weather (OpenWeatherMap)</h3>";
+    html += "<label>API Key</label><input type='text' name='owKey' value='" + String(settings.openWeatherKey) + "' placeholder='Leave empty to disable'>";
+    html += "<label>Location (City,CC)</label><input type='text' name='owLoc' value='" + String(settings.weatherLocation) + "'>";
+    html += "</div>";
 
-    html += "Screen Brightness: <input type='range' name='brightness' min='10' max='255' value='" + String(settings.brightness) + "' oninput='this.nextElementSibling.value = this.value'> <output>" + String(settings.brightness) + "</output><br>";
-    html += "<small>Adjusts display backlight (10-255)</small><br>";
+    html += "<div class='card'><h3>Advanced</h3>";
+    html += "<div class='checkbox-group'><input type='checkbox' id='debugMode' name='debugMode' value='1'" + String(settings.debugMode ? " checked" : "") + "><label for='debugMode'>Enable Debug Logging (Serial 115200)</label></div>";
+    html += "</div>";
+    html += "</div>";
 
-    html += "Microphone Mode: <select name='micMode'>";
-    String micModes[] = {"Stereo (Beamforming)", "Left Channel Only", "Right Channel Only"};
-    for (int i = 0; i < 3; i++) {
-        html += "<option value='" + String(i) + "'";
-        if (settings.micMode == i) html += " selected";
-        html += ">" + micModes[i] + "</option>";
-    }
-    html += "</select><br>";
-
-    html += "AEC Target Delay: <input type='number' name='aecDelay' value='" + String(settings.aecDelay) + "' step='10' min='160' max='1600'><br>";
-    html += "<small>Echo alignment in samples. You can Auto-Tune this via voice command.</small><br>";
-
-    html += "AEC Attenuation (Divisor): <input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='1' max='32'><br>";
-    html += "<small>Reduces mic sensitivity during AI playback (1 = 0%, 2 = 50%, 4 = 75%, 8 = 87%).</small><br>";
-
-    html += "AEC Barge-in Cutoff: <input type='number' name='aecCutoff' value='" + String(settings.aecCutoff) + "' min='0' max='32767'><br>";
-    html += "<small>Minimum raw volume required to interrupt the AI. 0 disables the volume gate.</small><br>";
-
-    html += "<h3>AI Features</h3>";
-    html += "Enable Web Search: <input type='checkbox' name='webSearch' value='1'" + String(settings.enableWebSearch ? " checked" : "") + "><br>";
-    html += "<small>Allows supported models to search the internet for real-time information.</small><br>";
-    html += "Enable Memory: <input type='checkbox' name='memory' value='1'" + String(settings.enableMemory ? " checked" : "") + "><br>";
-    html += "<small>Allows the AI to remember user details across sessions.</small><br>";
-    html += "Enable Voice Interrupt: <input type='checkbox' name='interrupt' value='1'" + String(settings.enableInterrupt ? " checked" : "") + "><br>";
-    html += "<small>Allows you to interrupt the AI by speaking over it.</small><br>";
-    html += "Knowledge ID: <input type='text' name='knowledgeId' value='" + String(settings.knowledgeId) + "' placeholder='e.g., collection_id or document_id'><br>";
-    html += "<small>OpenWebUI Collection/File ID to enable RAG/Knowledge features.</small><br>";
-
-    html += "<h3>Debug</h3>";
-    html += "Enable Debug Logging: <input type='checkbox' name='debugMode' value='1'" + String(settings.debugMode ? " checked" : "") + "><br>";
-    html += "<small>Serial Baud: 115200</small><br>";
-
-    html += "<h3>Weather (OpenWeatherMap)</h3>";
-    html += "API Key: <input type='text' name='owKey' value='" + String(settings.openWeatherKey) + "' placeholder='Leave empty to disable'><br>";
-    html += "Location (City,CC): <input type='text' name='owLoc' value='" + String(settings.weatherLocation) + "'><br>";
-
-    html += "<input type='submit' value='Save & Verify' class='btn'>";
+    html += "<div id='saveBtnContainer'><input type='submit' value='Save & Verify Configuration' class='btn'></div>";
     html += "</form>";
 
-    html += "<hr><h3>Edge Impulse</h3>";
-    html += "<p>Use this mode to collect raw microphone data via USB using the <b>edge-impulse-data-forwarder</b> CLI.</p>";
-    html += "<form action='/ei_mode' method='POST'>";
-    html += "<input type='submit' value='Reboot to Data Collection Mode' class='btn-blue' style='background-color:#ff9800;'>";
-    html += "</form>";
+    // TAB: Diagnostics & Tools (Outside form)
+    html += "<div id='Diagnostics' class='tab-content'>";
+    html += "<div class='card'><h3>Diagnostic Files</h3>";
+    html += "<ul class='diag-list'>";
+    
+    if (LittleFS.exists("/aec_with.wav")) html += "<li><span>Audio with AEC</span> <a href='/download?file=aec_with.wav'>Download</a></li>";
+    else html += "<li><span style='color:#999;'>Audio with AEC</span> <span style='color:#999;font-size:0.9em;'>Not found (Run /test_aec)</span></li>";
+    
+    if (LittleFS.exists("/aec_raw.wav")) html += "<li><span>Raw Mic Audio</span> <a href='/download?file=aec_raw.wav'>Download</a></li>";
+    else html += "<li><span style='color:#999;'>Raw Mic Audio</span> <span style='color:#999;font-size:0.9em;'>Not found (Run /test_aec)</span></li>";
 
+    if (LittleFS.exists("/mic_test.wav")) html += "<li><span>Mic Test Recording</span> <a href='/download?file=mic_test.wav'>Download</a></li>";
+    else html += "<li><span style='color:#999;'>Mic Test Recording</span> <span style='color:#999;font-size:0.9em;'>Not found (Run /test_mic)</span></li>";
+    
+    if (LittleFS.exists("/harmonic_test.wav")) html += "<li><span>Harmonic Test</span> <a href='/download?file=harmonic_test.wav'>Download</a></li>";
+    else html += "<li><span style='color:#999;'>Harmonic Test</span> <span style='color:#999;font-size:0.9em;'>Not found (Run /test_harmonic)</span></li>";
+    
+    if (LittleFS.exists("/aec_tune.log")) html += "<li><span>AEC Tuning Log</span> <div><a href='/tune_log'>Text</a> <a href='/tune_graph'>Graph</a> <a href='/download?file=aec_tune.log'>Download</a></div></li>";
+    else html += "<li><span style='color:#999;'>AEC Tuning Log & Graph</span> <span style='color:#999;font-size:0.9em;'>Not found (Run /tune_aec)</span></li>";
+    
+    html += "</ul>";
+    html += "<form action='/delete_wavs' method='POST' style='margin-top:15px;'><input type='submit' value='Delete All Diagnostic Files' class='btn btn-red'></form>";
+    html += "</div>";
+
+    html += "<div class='card'><h3>System Tools</h3>";
+    html += "<a href='/update' class='btn' style='display:block;text-align:center;text-decoration:none;box-sizing:border-box;'>OTA Firmware/Filesystem Update</a>";
+    html += "<form action='/ei_mode' method='POST' style='margin-top:15px;'><input type='submit' value='Reboot to Edge Impulse Data Collection' class='btn btn-orange'></form>";
+    html += "</div>";
+
+    html += "</div>";
+
+    html += "</div>";
     html += "</body></html>";
     server.send(200, "text/html", html);
 }
@@ -538,6 +637,13 @@ void handleWebSave() {
         if (val >= 0 && val <= 32767) {
             settings.aecCutoff = val;
             setAecCutoff(val);
+        }
+    }
+
+    if (server.hasArg("aecIgnore")) {
+        int val = server.arg("aecIgnore").toInt();
+        if (val >= 0 && val <= 10000) {
+            settings.aecIgnore = val;
         }
     }
 
@@ -693,7 +799,66 @@ void testAEC() {
             f.close();
             Serial.println("Saved /aec_with.wav");
         }
-        free(wavData1);
+
+        // --- Analysis of AEC adaptation time ---
+        if (wavSize1 > 44) {
+            int16_t* samples = (int16_t*)(wavData1 + 44);
+            int totalSamples = (wavSize1 - 44) / 2;
+            int sampleRate = 16000;
+            
+            const int CHUNK_SAMPLES = 1600; // 100ms chunks
+            const int QUIET_THRESHOLD = 300; // Average amplitude threshold for "quiet"
+            const int CONFIRM_CHUNKS = 5; // Need 5 consecutive quiet chunks (500ms)
+            
+            int quiet_chunk_counter = 0;
+            float quiet_time = -1.0f;
+
+            for (int i = 0; i < totalSamples; i += CHUNK_SAMPLES) {
+                long long chunk_sum = 0;
+                int samples_in_chunk = (i + CHUNK_SAMPLES > totalSamples) ? (totalSamples - i) : CHUNK_SAMPLES;
+                
+                if (samples_in_chunk == 0) break;
+
+                for (int j = 0; j < samples_in_chunk; j++) chunk_sum += abs(samples[i + j]);
+                long avg_amp = chunk_sum / samples_in_chunk;
+
+                if (avg_amp < QUIET_THRESHOLD) {
+                    if (quiet_chunk_counter == 0) quiet_time = (float)i / sampleRate;
+                    quiet_chunk_counter++;
+                } else {
+                    quiet_chunk_counter = 0;
+                    quiet_time = -1.0f;
+                }
+
+                if (quiet_chunk_counter >= CONFIRM_CHUNKS) break;
+            }
+            
+            if (quiet_time >= 0 && quiet_chunk_counter >= CONFIRM_CHUNKS) {
+                Serial.printf("\n*** AEC Analysis: Audio quieted down after %.2f seconds. ***\n", quiet_time);
+                settings.aecIgnore = (int)((quiet_time + 0.5f) * 1000.0f);
+                
+                // Calculate max residual amplitude after adaptation
+                int startSample = (int)(quiet_time * sampleRate);
+                long max_residual_amp = 0;
+                for (int i = startSample; i < totalSamples; i++) {
+                    long val = abs(samples[i]) / settings.aecAttenuation; // Apply attenuation to match detection logic
+                    if (val > max_residual_amp) max_residual_amp = val;
+                }
+                
+                int suggested_cutoff = max_residual_amp + 800; // +800 safety margin to thread the needle
+                if (suggested_cutoff < 1200) suggested_cutoff = 1200; // Minimum floor
+                
+                settings.aecCutoff = suggested_cutoff;
+                settings.save();
+                setAecCutoff(suggested_cutoff);
+                Serial.printf("*** AEC Ignore Window automatically updated to %d ms (includes 500ms safety buffer). ***\n", settings.aecIgnore);
+                Serial.printf("*** AEC Analysis: Max FILTERED amplitude (Attenuated Residual) is %ld. ***\n", max_residual_amp);
+                Serial.printf("*** AEC Cutoff automatically updated to %d (+ 800 margin). ***\n", settings.aecCutoff);
+            } else {
+                Serial.println("\n*** AEC Analysis: Could not determine a stable quiet point. ***\n");
+            }
+        }
+        free(wavData1); // Free after analysis
     } else {
         Serial.println("Recording 1 failed.");
     }
@@ -720,6 +885,27 @@ void testAEC() {
             f.close();
             Serial.println("Saved /aec_raw.wav");
         }
+        
+        // --- Analysis of Raw Audio ---
+        if (wavSize2 > 44) {
+            long max_raw_amp = 0;
+            int16_t* samples = (int16_t*)(wavData2 + 44);
+            int sampleCount = (wavSize2 - 44) / 2;
+            for(int i = 0; i < sampleCount; i++) {
+                long val = abs(samples[i]);
+                if (val > max_raw_amp) max_raw_amp = val;
+            }
+            Serial.printf("\n*** AEC Analysis: Max UNFILTERED amplitude is %ld. ***\n", max_raw_amp);
+            
+            if (max_raw_amp > 20000) {
+                Serial.println("\n!!! WARNING: Speaker is too loud! Microphone is likely clipping. !!!");
+                Serial.println("!!! AEC cannot mathematically cancel distorted audio. !!!");
+                Serial.println("!!! Automatically lowering device volume to a safe level (12/21)... !!!");
+                onVolumeChange(12); // Apply new volume and save to NVRAM
+                display.showMainUI(ttsVoice, settings.volume, voiceOptions); // Update the slider on the screen
+                Serial.println("!!! Please run /test_aec again at this new volume for optimal tuning. !!!\n");
+            }
+        }
         free(wavData2);
     } else {
         Serial.println("Recording 2 failed.");
@@ -739,25 +925,142 @@ void testAEC() {
     Serial.println("\nAEC Test Complete.");
 }
 
+void testHarmonic() {
+    Serial.println("\n--- Harmonic Test ---");
+    display.showStatus("Generating Sweep...");
+    lv_timer_handler();
+
+    const char* sweepFile = "/sweep.wav";
+    
+    // Generate the 40s sine sweep file
+    File f = LittleFS.open(sweepFile, "w");
+    if (f) {
+        uint32_t sampleRate = 16000;
+        uint32_t numSamples = 20 * sampleRate;
+        uint32_t dataSize = numSamples * 2;
+
+        // WAV Header
+        uint8_t header[44] = {
+            'R', 'I', 'F', 'F',
+            0, 0, 0, 0, // size to be filled
+            'W', 'A', 'V', 'E',
+            'f', 'm', 't', ' ',
+            16, 0, 0, 0, // fmt chunk size
+            1, 0, // format PCM
+            1, 0, // channels
+            (uint8_t)(sampleRate & 0xFF), (uint8_t)((sampleRate >> 8) & 0xFF), 0, 0,
+            (uint8_t)((sampleRate * 2) & 0xFF), (uint8_t)(((sampleRate * 2) >> 8) & 0xFF), 0, 0,
+            2, 0, // block align
+            16, 0, // bits per sample
+            'd', 'a', 't', 'a',
+            (uint8_t)(dataSize & 0xFF), (uint8_t)((dataSize >> 8) & 0xFF), (uint8_t)((dataSize >> 16) & 0xFF), (uint8_t)((dataSize >> 24) & 0xFF)
+        };
+        uint32_t overallSize = 36 + dataSize;
+        header[4] = overallSize & 0xFF; header[5] = (overallSize >> 8) & 0xFF;
+        header[6] = (overallSize >> 16) & 0xFF; header[7] = (overallSize >> 24) & 0xFF;
+        f.write(header, 44);
+
+        int16_t buffer[1000];
+        float phase = 0;
+        for (int s = 0; s < 2; s++) { // 2 phases of 10 seconds each (1 loop)
+            bool up = (s % 2 == 0);
+            float startF = up ? 20.0f : 15000.0f;
+            float endF = up ? 15000.0f : 20.0f;
+            for (int i = 0; i < 10 * sampleRate; i++) {
+                float t = (float)i / sampleRate;
+                float currentF = startF + (endF - startF) * (t / 10.0f);
+                phase += 2.0f * M_PI * currentF / sampleRate;
+                if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
+                buffer[i % 1000] = (int16_t)(sin(phase) * 8000.0f); // Reduced amplitude to 25% to lower the volume
+                if ((i + 1) % 1000 == 0) f.write((uint8_t*)buffer, 2000);
+            }
+        }
+        f.close();
+        Serial.println("Sweep generated.");
+    } else {
+        Serial.println("Failed to open /sweep.wav for writing.");
+        display.showStatus("FS Error");
+        return;
+    }
+
+    display.showStatus("Playing & Recording (20s)...");
+    lv_timer_handler();
+    Serial.println("Playing Sweep & Recording (20s)...");
+
+    setAecBypass(true); // Record raw mic input to avoid Speex modifying the high frequencies
+    speaker.playSpeechFromFile(sweepFile);
+    size_t wavSize = 0;
+    uint8_t* wavData = speech.record(20000, &wavSize, 0); // Hard lock for 20 seconds
+    speaker.stop();
+    setAecBypass(false);
+    
+    if (LittleFS.exists(sweepFile)) LittleFS.remove(sweepFile); // Erase the 1.2MB generator file to save space
+
+    if (wavData && wavSize > 0) {
+        display.showStatus("Saving...");
+        lv_timer_handler();
+        File out = LittleFS.open("/harmonic_test.wav", "w");
+        if (out) { out.write(wavData, wavSize); out.close(); Serial.println("Saved /harmonic_test.wav"); }
+        free(wavData);
+    } else { Serial.println("Recording failed."); }
+
+    display.showStatus("Test Complete\nCheck Downloads Page");
+    Serial.println("Harmonic test complete. Pull harmonic_test.wav from the web downloads page.");
+    delay(3000);
+    display.showMainUI(ttsVoice, settings.volume, voiceOptions);
+}
+
 void tuneAEC() {
+    bool prevDebug = settings.debugMode;
+    settings.debugMode = false; // Suppress verbose prints from other classes during tuning
+    
+    File logFile = LittleFS.open("/aec_tune.log", "w");
+    auto logPrintln = [&](const String& msg) {
+        if (logFile) { logFile.println(msg); logFile.flush(); }
+    };
+    auto logPrintf = [&](const char *format, ...) {
+        char loc_buf[256];
+        va_list arg;
+        va_start(arg, format);
+        vsnprintf(loc_buf, sizeof(loc_buf), format, arg);
+        va_end(arg);
+        if (logFile) { logFile.print(loc_buf); logFile.flush(); }
+    };
+
     Serial.println("\n--- Starting AEC Auto-Tuning ---");
+    Serial.println("Tuning in progress. Detailed output is being saved to /aec_tune.log...");
+    logPrintln("\n--- Starting AEC Auto-Tuning ---");
     showAecTuningUI(); // Load graphical UI
     
-    Serial.println("Downloading TTS for AEC Tuning...");
-    // Repetitive diagnostic phrase ensures active audio during the 2.5s cut-off window
-    String testPhrase = "Testing alignment. Testing alignment. Testing alignment. Testing alignment. Testing alignment.";
+    logPrintln("Downloading TTS for AEC Tuning...");
+    // Diagnostic phrase for AEC calibration
+    String testPhrase = "Testing AEC Please remain silent Pop Check One Two Three";
     const char* ttsFile = "/aec_tune.mp3";
     
-    if (!network.isConnected()) { Serial.println("WiFi not connected."); return; }
-    if (!llm.downloadTTS(testPhrase, network, ttsFile, ttsVoice)) { Serial.println("TTS Download failed."); return; }
     if (!network.isConnected()) { 
-        Serial.println("WiFi not connected."); 
-        display.showStatus("Tuning Failed\nNo WiFi");
+        logPrintln("WiFi not connected."); 
+        if (logFile) logFile.close(); 
+        settings.debugMode = prevDebug;
         return; 
     }
     if (!llm.downloadTTS(testPhrase, network, ttsFile, ttsVoice)) { 
-        Serial.println("TTS Download failed."); 
+        logPrintln("TTS Download failed."); 
+        if (logFile) logFile.close(); 
+        settings.debugMode = prevDebug;
+        return; 
+    }
+    if (!network.isConnected()) { 
+        logPrintln("WiFi not connected."); 
+        display.showStatus("Tuning Failed\nNo WiFi");
+        if (logFile) logFile.close();
+        settings.debugMode = prevDebug;
+        return; 
+    }
+    if (!llm.downloadTTS(testPhrase, network, ttsFile, ttsVoice)) { 
+        logPrintln("TTS Download failed."); 
         display.showStatus("Tuning Failed\nTTS Error");
+        if (logFile) logFile.close();
+        settings.debugMode = prevDebug;
         return; 
     }
 
@@ -767,9 +1070,9 @@ void tuneAEC() {
     int bestDelay = 640;
     long bestScore = 99999999; // Lower amplitude is better
 
-    Serial.println("Please remain completely silent for about a minute...");
+    logPrintln("Please remain completely silent for about a minute...");
     
-    int totalSteps = 9 * 3 + 5 + 1; // 7 coarse + 2 fine + 5 attenuation + 1 cutoff
+    int totalSteps = 9 * 3 + 1; // 7 coarse + 2 fine + 1 profiling pass
     int currentStep = 0;
 
     // Define the test sequence as a reusable lambda function
@@ -778,10 +1081,10 @@ void tuneAEC() {
         
         long totalScore = 0;
         int validRuns = 0;
-        Serial.printf("\nTesting Delay: %d samples (~%d ms)\n", d, d/16);
+        logPrintf("\nTesting Delay: %d samples (~%d ms)\n", d, d/16);
 
         for (int run = 0; run < 3; run++) {
-            Serial.printf("  Run %d/3... ", run + 1);
+            logPrintf("  Run %d/3... ", run + 1);
             
             int percent = (currentStep * 100) / totalSteps;
             String uiMsg = "Testing Delay: " + String(d/16) + "ms (" + String(run+1) + "/3)";
@@ -789,14 +1092,14 @@ void tuneAEC() {
             
             speaker.playSpeechFromFile(ttsFile);
             
-            // Discard first 1 second of audio to let the AEC filter adapt to the room
+            // Discard first 1.5 seconds of audio to let the AEC filter adapt to the room
             size_t discardSize = 0;
-            uint8_t* discardData = speech.record(1000, &discardSize, 0);
+            uint8_t* discardData = speech.record(1500, &discardSize, 0);
             if (discardData) free(discardData);
 
-            // Record 1.5 seconds for actual measurement
+            // Record 2.0 seconds for actual measurement
             size_t wavSize = 0;
-            uint8_t* wavData = speech.record(1500, &wavSize, 0);
+            uint8_t* wavData = speech.record(2000, &wavSize, 0);
             
             speaker.stop();
             
@@ -811,15 +1114,16 @@ void tuneAEC() {
                 
                 totalScore += score;
                 validRuns++;
-                Serial.printf("Score: %ld\n", score);
+                logPrintf("Score: %ld\n", score);
             } else {
-                Serial.println("Failed to record.");
+                logPrintln("Failed to record.");
             }
 
             currentStep++;
             
             percent = (currentStep * 100) / totalSteps;
-            uiMsg = "Testing Delay: " + String(d/16) + "ms (" + String(run+1) + "/3)\nWaiting for room echo to settle...";
+            String scoreStr = (score != 99999999) ? String(score) : "Failed";
+            uiMsg = "Testing Delay: " + String(d/16) + "ms (" + String(run+1) + "/3)\nScore: " + scoreStr + "\nWaiting to settle...";
             updateAecTuningUI(percent, uiMsg.c_str());
 
             delay(2000); // 2 second pause between tests to let room echo settle
@@ -837,9 +1141,9 @@ void tuneAEC() {
         avgScores[i] = runDelayTest(testDelays[i]);
     }
 
-    Serial.println("\n--- Coarse Tuning Results ---");
+    logPrintln("\n--- Coarse Tuning Results ---");
     for (int i = 0; i < 7; i++) {
-        Serial.printf("Delay %d samples (~%d ms) -> Average Score: %ld\n", testDelays[i], testDelays[i]/16, avgScores[i]);
+        logPrintf("Delay %d samples (~%d ms) -> Average Score: %ld\n", testDelays[i], testDelays[i]/16, avgScores[i]);
         if (avgScores[i] < bestScore) {
             bestScore = avgScores[i];
             bestDelay = testDelays[i];
@@ -851,106 +1155,97 @@ void tuneAEC() {
     if (fineDelays[0] < 0) fineDelays[0] = 0; // Prevent negative delays
     
     long fineScores[2] = {0};
-    Serial.printf("\nBest Coarse Delay: %d samples. Starting Fine-Tuning (+/- 80 samples)...\n", bestDelay);
+    logPrintf("\nBest Coarse Delay: %d samples. Starting Fine-Tuning (+/- 80 samples)...\n", bestDelay);
 
     for (int i = 0; i < 2; i++) {
         fineScores[i] = runDelayTest(fineDelays[i]);
     }
 
-    Serial.println("\n--- Fine Tuning Results ---");
+    logPrintln("\n--- Fine Tuning Results ---");
     for (int i = 0; i < 2; i++) {
-        Serial.printf("Delay %d samples (~%d ms) -> Average Score: %ld\n", fineDelays[i], fineDelays[i]/16, fineScores[i]);
+        logPrintf("Delay %d samples (~%d ms) -> Average Score: %ld\n", fineDelays[i], fineDelays[i]/16, fineScores[i]);
         if (fineScores[i] < bestScore) {
             bestScore = fineScores[i];
             bestDelay = fineDelays[i];
         }
     }
     
-    // 3. Attenuation Tuning Pass
-    Serial.println("\n--- Attenuation Tuning Pass (Target Max Amp < 150) ---");
-    int testAttenuations[] = {2, 4, 8, 16, 32}; // Removed 1 to guarantee baseline attenuation
-    int bestAtten = 16; // Default to safest high value
-    
-    for (int i = 0; i < 5; i++) {
-        int att = testAttenuations[i];
-        Serial.printf("Testing Attenuation: %d%%... ", 100 - (100 / att));
-        
-        int percent = (currentStep * 100) / totalSteps;
-        String uiMsg = "Testing Attenuation: " + String(100 - (100 / att)) + "%";
-        updateAecTuningUI(percent, uiMsg.c_str());
-        
-        speaker.playSpeechFromFile(ttsFile);
-        
-        size_t discardSize = 0;
-        uint8_t* discardData = speech.record(1000, &discardSize, 0);
-        if (discardData) free(discardData);
-
-        size_t wavSize = 0;
-        uint8_t* wavData = speech.record(1500, &wavSize, 0);
-        
-        speaker.stop();
-        
-        long max_amp = 0;
-        if (wavData && wavSize > 44) {
-            int16_t* samples = (int16_t*)(wavData + 44);
-            int sampleCount = (wavSize - 44) / 2;
-            for(int j=0; j<sampleCount; j++) {
-                long val = abs(samples[j]) / att; // Simulate the mathematical attenuation
-                if (val > max_amp) max_amp = val;
-            }
-            free(wavData);
-            Serial.printf("Max Amp: %ld\n", max_amp);
-        } else {
-            Serial.println("Failed to record.");
-        }
-
-        currentStep++;
-        delay(2000);
-        
-        if (max_amp > 0 && max_amp < 150) {
-            bestAtten = att;
-            Serial.printf("Found optimal attenuation: %d%%\n", 100 - (100 / bestAtten));
-            currentStep += (4 - i); // Fast-forward progress bar for skipped steps
-            break;
-        }
+    // Export results to JSON for the web graph
+    JsonDocument doc;
+    for(int i = 0; i < 7; i++) { 
+        doc["coarseDelays"].add(testDelays[i]); 
+        doc["coarseScores"].add(avgScores[i]); 
     }
-
-    // 4. Cutoff Tuning Pass
-    Serial.println("\n--- Cutoff Tuning Pass ---");
-    Serial.printf("Testing final max amplitude with Attenuation %d%%... ", 100 - (100 / bestAtten));
+    for(int i = 0; i < 2; i++) { 
+        doc["fineDelays"].add(fineDelays[i]); 
+        doc["fineScores"].add(fineScores[i]); 
+    }
+    File jsonFile = LittleFS.open("/aec_tune.json", "w");
+    if (jsonFile) { serializeJson(doc, jsonFile); jsonFile.close(); }
+    
+    // 3. Attenuation & Cutoff Profiling Pass
+    logPrintln("\n--- Final Acoustic Profiling ---");
     
     int percent = (currentStep * 100) / totalSteps;
-    updateAecTuningUI(percent, "Measuring Amplitude Cutoff...");
+    updateAecTuningUI(percent, "Profiling Room Acoustics...");
     
     speaker.playSpeechFromFile(ttsFile);
+    
     size_t discardSize = 0;
-    uint8_t* discardData = speech.record(1000, &discardSize, 0);
+    uint8_t* discardData = speech.record(1500, &discardSize, 0);
     if (discardData) free(discardData);
 
+    // Record for 4.0 seconds to capture the loud dynamic parts (Pop, Check, etc.)
     size_t wavSize = 0;
-    uint8_t* wavData = speech.record(1500, &wavSize, 0);
+    uint8_t* wavData = speech.record(4000, &wavSize, 0);
+    
     speaker.stop();
     
-    long final_max_amp = 0;
+    long max_raw_residual = 0;
     if (wavData && wavSize > 44) {
         int16_t* samples = (int16_t*)(wavData + 44);
         int sampleCount = (wavSize - 44) / 2;
         for(int j=0; j<sampleCount; j++) {
-            long val = abs(samples[j]) / bestAtten;
-            if (val > final_max_amp) final_max_amp = val;
+            long val = abs(samples[j]); // UNATTENUATED
+            if (val > max_raw_residual) max_raw_residual = val;
         }
         free(wavData);
-        Serial.printf("Final Max Amp: %ld\n", final_max_amp);
+        logPrintf("Max Unattenuated Residual: %ld\n", max_raw_residual);
+    } else {
+        logPrintln("Failed to record profiling pass.");
     }
     
     currentStep++;
-    int bestCutoff = final_max_amp + 500; // Add generous safety margin to prevent self-interruptions
-    if (bestCutoff < 1000) bestCutoff = 1000; // Hard minimum floor so AI never triggers itself
 
-    Serial.println("----------------------------------");
+    // Mathematically determine best attenuation to bring residual under 900
+    int testAttenuations[] = {2, 4, 8, 16, 32};
+    int bestAtten = 32; // Default to safest
+    for (int i = 0; i < 5; i++) {
+        if ((max_raw_residual / testAttenuations[i]) <= 900) {
+            bestAtten = testAttenuations[i];
+            break;
+        }
+    }
+    
+    logPrintf("Calculated Optimal Attenuation: %d%%\n", 100 - (100 / bestAtten));
+    
+    long final_max_amp = max_raw_residual / bestAtten;
+    logPrintf("Simulated Attenuated Max Amp: %ld\n", final_max_amp);
+    
+    int bestCutoff = final_max_amp + 800; // +800 safety margin
+    if (bestCutoff < 1200) bestCutoff = 1200; // Hard minimum floor so AI never triggers itself
+
+    Serial.println("\n----------------------------------");
     Serial.printf("Ultimate Best AEC Delay: %d samples\n", bestDelay);
     Serial.printf("Ultimate Best Attenuation: %d%%\n", 100 - (100 / bestAtten));
     Serial.printf("Ultimate Best Cutoff: %d\n", bestCutoff);
+    Serial.println("Saved to NVRAM and applied!");
+
+    logPrintln("----------------------------------");
+    logPrintf("Ultimate Best AEC Delay: %d samples\n", bestDelay);
+    logPrintf("Ultimate Best Attenuation: %d%%\n", 100 - (100 / bestAtten));
+    logPrintf("Ultimate Best Cutoff: %d\n", bestCutoff);
+    logPrintln("Saved to NVRAM and applied!");
     
     settings.aecDelay = bestDelay;
     settings.aecAttenuation = bestAtten;
@@ -960,19 +1255,33 @@ void tuneAEC() {
     setAecDelay(bestDelay); // Lock it in
     setAecAttenuation(bestAtten);
     setAecCutoff(bestCutoff);
-    Serial.println("Saved to NVRAM and applied!");
+    
+    if (logFile) logFile.close();
+    settings.debugMode = prevDebug; // Restore debug mode
     
     // Display Final Results
     String resultMsg = "Tuning Complete!\nBest Delay: " + String(bestDelay) + " samples\nAtten: " + String(100 - (100 / bestAtten)) + "% | Cutoff: " + String(bestCutoff);
     updateAecTuningUI(100, resultMsg.c_str());
     delay(5000);
-    delay(30000); // Wait 30 seconds so the user can read the results before it clears
+    delay(15000); // Wait 15 seconds so the user can read the results before it clears
     display.showMainUI(ttsVoice, settings.volume, voiceOptions); // Return to default UI
 }
 
 void handleSerialCommands() {
   while (Serial.available()) {
     char c = (char)Serial.read();
+    
+    // Handle backspace/delete
+    if (c == '\b' || c == 0x7F) {
+      if (inputBuffer.length() > 0) {
+        inputBuffer.remove(inputBuffer.length() - 1);
+        Serial.print("\b \b"); // Visually erase character from terminal
+      }
+      continue;
+    }
+    
+    Serial.print(c); // Local echo
+
     if (c == '\n' || c == '\r') {
       inputBuffer.trim();
       if (inputBuffer.length() > 0) {
@@ -985,12 +1294,15 @@ void handleSerialCommands() {
           Serial.println("/new            - Clear conversation history");
           Serial.println("/test_mic       - Record 5s clip to test mic (Debug only)");
           Serial.println("/test_aec       - Run AEC diagnostics (Debug only)");
+          Serial.println("/test_harmonic  - Run 20s sweep and record to check mic harmonics");
           Serial.println("/tune_aec       - Auto-tune AEC delay alignment");
           Serial.println("/debug_aec      - Toggle AEC debug stats");
           Serial.println("/aec_delay <n>  - Set AEC delay samples");
           Serial.println("/aec_gain <n>   - Set AEC gain multiplier");
           Serial.println("/aec_invert     - Toggle AEC phase inversion");
           Serial.println("<text>          - Send prompt to AI");
+          Serial.println("/factory_reset  - Erase all settings and reboot");
+          Serial.println("/reboot         - Restart the device");
           Serial.println("--------------------------\n");
         } else if (inputBuffer == "/settings") {
           Serial.println("\n--- Current Settings ---");
@@ -1060,9 +1372,20 @@ void handleSerialCommands() {
           Serial.println("Calibration reset. Restart the device to recalibrate.");
         } else if (inputBuffer == "/test_aec") {
           testAEC();
+        } else if (inputBuffer == "/test_harmonic") {
+          testHarmonic();
         } else if (inputBuffer == "/tune_aec") {
           tuneAEC();
+        } else if (inputBuffer == "/reboot") {
+          Serial.println("Rebooting now...");
+          delay(1000);
+          ESP.restart();
         } else if (inputBuffer.startsWith("/say ")) {
+        } else if (inputBuffer == "/factory_reset") {
+          performFactoryReset();
+          Serial.println("Rebooting now...");
+          delay(1000);
+          ESP.restart();
           String textToSay = inputBuffer.substring(5);
           textToSay.trim();
           if (textToSay.length() > 0) {
@@ -1082,12 +1405,12 @@ void handleSerialCommands() {
                 while(speaker.isRunning()) {
                     if (settings.enableInterrupt) {
                         bool triggered = speech.detectWakeWord(wakeThreshold);
-                        if (triggered && (millis() - playbackStart > 2000)) {
+                        if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
                             speaker.stop();
                             speaker.playSpeechFromFile(CHIME_FILENAME);
                             while(speaker.isRunning()) delay(30);
                             break;
-                        }
+                            }
                         delay(5);
                     } else {
                         delay(50);
@@ -1176,7 +1499,7 @@ void handleSerialCommands() {
               while(speaker.isRunning()) {
                   if (settings.enableInterrupt) {
                       bool triggered = speech.detectWakeWord(wakeThreshold);
-                      if (triggered && (millis() - playbackStart > 2000)) {
+                      if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
                           speaker.stop();
                           speaker.playSpeechFromFile(CHIME_FILENAME);
                           while(speaker.isRunning()) delay(30);
@@ -1201,6 +1524,45 @@ void handleSerialCommands() {
       inputBuffer += c;
     }
   }
+}
+
+void performFactoryReset() {
+    Serial.println("\n--- FACTORY RESET ---");
+    Serial.println("Resetting all settings to factory defaults...");
+    
+    // Reset SettingsManager fields to default by manually setting them
+    // This mirrors the defaults set in the SettingsManager constructor
+    strlcpy(settings.wifiSSID, "YOUR_WIFI_SSID", sizeof(settings.wifiSSID));
+    strlcpy(settings.wifiPass, "YOUR_WIFI_PASSWORD", sizeof(settings.wifiPass));
+    strlcpy(settings.apiUrl, "http://your-api-endpoint/api/chat/completions", sizeof(settings.apiUrl));
+    strlcpy(settings.apiKey, "your_api_key_here", sizeof(settings.apiKey));
+    strlcpy(settings.llmModel, "llama3.2:3b", sizeof(settings.llmModel));
+    settings.volume = 21;
+    settings.brightness = 255;
+    settings.calibration = {0, 0, 0, 0, false};
+    strlcpy(settings.timeZone, "UTC0", sizeof(settings.timeZone));
+    strlcpy(settings.clockColor, "red", sizeof(settings.clockColor));
+    settings.silenceThreshold = 800;
+    strlcpy(settings.openWeatherKey, "", sizeof(settings.openWeatherKey));
+    strlcpy(settings.weatherLocation, "New York,US", sizeof(settings.weatherLocation));
+    settings.micMode = 1;
+    settings.debugMode = false;
+    settings.inputBalance = 0;
+    strlcpy(settings.systemPrompt, "You are a helpful AI assistant running on an ESP32-S3.", sizeof(settings.systemPrompt));
+    settings.ttsProvider = 0;
+    strlcpy(settings.ttsUrl, "", sizeof(settings.ttsUrl));
+    settings.enableWebSearch = false;
+    settings.enableMemory = false;
+    settings.enableInterrupt = false;
+    settings.aecDelay = 640;
+    settings.aecAttenuation = 4;
+    settings.aecCutoff = 1000;
+    settings.aecIgnore = 3000;
+    strlcpy(settings.knowledgeId, "", sizeof(settings.knowledgeId));
+    settings.save();
+
+    // Reset admin preferences (password, voice, wake threshold)
+    adminPrefs.clear();
 }
 
 void setup() {
@@ -1245,13 +1607,8 @@ void setup() {
   // Check for Factory Reset
   if (factoryReset) {
       Serial.println("BOOT button held: Performing Factory Reset...");
-      settings.wifiSSID[0] = '\0';
-      settings.wifiPass[0] = '\0';
-      settings.apiKey[0] = '\0';
-      settings.calibration.isValid = false;
-      settings.save();
-      adminPrefs.clear();
-      Serial.println("WiFi, API Key, Calibration, and Admin Password cleared.");
+      performFactoryReset();
+      Serial.println("All settings have been reset to factory defaults.");
       // Wait for button release to avoid accidental double-triggering
       while(digitalRead(0) == LOW) delay(10);
   }
@@ -1511,6 +1868,94 @@ void setup() {
       }
   });
 
+  server.on("/downloads", HTTP_GET, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      // The downloads page is now fully integrated into the main page's "Diagnostics" tab.
+      // We leave this route active as a redirect to gracefully handle legacy links.
+      server.sendHeader("Location", "/");
+      server.send(303);
+  });
+
+  server.on("/delete_wavs", HTTP_POST, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      if (LittleFS.exists("/aec_with.wav")) LittleFS.remove("/aec_with.wav");
+      if (LittleFS.exists("/aec_raw.wav")) LittleFS.remove("/aec_raw.wav");
+      if (LittleFS.exists("/mic_test.wav")) LittleFS.remove("/mic_test.wav");
+      if (LittleFS.exists("/harmonic_test.wav")) LittleFS.remove("/harmonic_test.wav");
+      if (LittleFS.exists("/aec_tune.log")) LittleFS.remove("/aec_tune.log");
+      if (LittleFS.exists("/aec_tune.json")) LittleFS.remove("/aec_tune.json");
+      server.sendHeader("Location", "/");
+      server.send(303);
+  });
+
+  server.on("/download", HTTP_GET, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      if (server.hasArg("file")) {
+          String filename = server.arg("file");
+          if (!filename.startsWith("/")) filename = "/" + filename;
+          // Restrict downloads specifically to known safe files
+          if (filename == "/aec_with.wav" || filename == "/aec_raw.wav" || filename == "/mic_test.wav" || filename == "/harmonic_test.wav" || filename == "/aec_tune.log") {
+              if (LittleFS.exists(filename)) {
+                  File f = LittleFS.open(filename, "r");
+                  server.sendHeader("Content-Disposition", "attachment; filename=\"" + filename.substring(1) + "\"");
+                  server.streamFile(f, "audio/wav");
+                  f.close();
+                  return;
+              }
+          }
+      }
+      server.send(404, "text/plain", "File not found or access denied.");
+  });
+
+  server.on("/tune_log", HTTP_GET, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      if (LittleFS.exists("/aec_tune.log")) {
+          File f = LittleFS.open("/aec_tune.log", "r");
+          server.streamFile(f, "text/plain");
+          f.close();
+      } else {
+          server.send(404, "text/plain", "Tuning log not found. Please run the AEC Auto-Tune first.");
+      }
+  });
+
+  server.on("/tune_data", HTTP_GET, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      if (LittleFS.exists("/aec_tune.json")) {
+          File f = LittleFS.open("/aec_tune.json", "r");
+          server.streamFile(f, "application/json");
+          f.close();
+      } else {
+          server.send(404, "application/json", "{}");
+      }
+  });
+
+  server.on("/tune_graph", HTTP_GET, []() {
+      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+      html += "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>";
+      html += "<style>body{font-family:sans-serif;padding:20px;} canvas{max-width:100%;background:#f9f9f9;border-radius:8px;padding:10px;}</style></head><body>";
+      html += "<h2>AEC Delay Tuning Graph</h2>";
+      html += "<canvas id='myChart'></canvas>";
+      html += "<br><br><a href='/' style='color:#008CBA;text-decoration:none;'>&larr; Back to Configuration</a>";
+      html += "<script>";
+      html += "fetch('/tune_data').then(r=>r.json()).then(data=>{";
+      html += "  if(!data.coarseDelays) { alert('No tuning data found'); return; }";
+      html += "  let pts = [];";
+      html += "  for(let i=0; i<data.coarseDelays.length; i++) pts.push({x: data.coarseDelays[i], y: data.coarseScores[i]});";
+      html += "  for(let i=0; i<data.fineDelays.length; i++) pts.push({x: data.fineDelays[i], y: data.fineScores[i]});";
+      html += "  pts.sort((a,b) => a.x - b.x);";
+      html += "  let labels = pts.map(p => p.x + ' (' + (p.x/16) + 'ms)');";
+      html += "  let scores = pts.map(p => p.y);";
+      html += "  new Chart(document.getElementById('myChart'), {";
+      html += "    type: 'line',";
+      html += "    data: { labels: labels, datasets: [{ label: 'Amplitude Score (Lower is Better)', data: scores, borderColor: '#008CBA', backgroundColor: '#008CBA', tension: 0.3, fill: false, pointRadius: 5, pointHoverRadius: 8 }] },";
+      html += "    options: { responsive: true, scales: { y: { beginAtZero: true, title: { display: true, text: 'Average Amplitude Score' } }, x: { title: { display: true, text: 'AEC Target Delay (Samples)' } } } }";
+      html += "  });";
+      html += "}).catch(e=>alert('Error loading graph data'));";
+      html += "</script></body></html>";
+      server.send(200, "text/html", html);
+  });
+
   server.begin();
   isWebServerActive = true;
   if (settings.debugMode) {
@@ -1627,19 +2072,93 @@ void loop() {
       }
   }
   
+  // Timer State Machine
+  if (g_pendingTimerSeconds > 0) {
+      timerStartTime = millis();
+      timerDurationMs = g_pendingTimerSeconds * 1000;
+      timerActive = true;
+      timerRinging = false;
+      if (settings.debugMode) Serial.printf("Timer set for %u seconds\n", g_pendingTimerSeconds);
+      g_pendingTimerSeconds = 0;
+  }
+  
+  if (g_cancelTimer) {
+      timerActive = false;
+      timerRinging = false;
+      g_cancelTimer = false;
+      if (settings.debugMode) Serial.println("Timer cancelled");
+  }
+  
+  if (timerActive && (millis() - timerStartTime >= timerDurationMs)) {
+      timerActive = false;
+      timerRinging = true;
+      lastRingTime = 0; // Trigger immediately
+      if (settings.debugMode) Serial.println("Timer Expired!");
+  }
+  
+  if (timerRinging && !isSpeaking && !isProcessing && !isWebServerActive && !g_isSubMenuActive) {
+      if (millis() - lastRingTime > 5000) { // Repeat every 5 seconds
+          lastRingTime = millis();
+          
+          if (!LittleFS.exists("/timer.mp3")) {
+              // Suppress status updates so the clock screen is not interrupted
+              llm.downloadTTS("The timer has reached zero.", network, "/timer.mp3", ttsVoice);
+          }
+          
+          speaker.playSpeechFromFile("/timer.mp3");
+          isSpeaking = true;
+          
+          if (settings.enableInterrupt) setInterruptMode(true);
+          unsigned long playbackStart = millis();
+          bool interrupted = false;
+          
+          while(speaker.isRunning()) {
+              if (settings.enableInterrupt) {
+                  bool triggered = speech.detectWakeWord(wakeThreshold);
+                  if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                      speaker.stop();
+                      speaker.playSpeechFromFile(CHIME_FILENAME);
+                      while(speaker.isRunning()) delay(30);
+                      interrupted = true;
+                      timerRinging = false; // Cancel timer via interrupt
+                      break;
+                  }
+                  delay(5);
+              } else {
+                  delay(50);
+              }
+          }
+          
+          if (settings.enableInterrupt) setInterruptMode(false);
+          isSpeaking = false;
+      }
+  }
+
   // Check for Wake Word if not already speaking, in web config mode, or in a sub-menu
   if (!isSpeaking && !isWebServerActive && !g_isSubMenuActive) {
+      // Allow any loud word (barge-in) to cancel the timer during the silence between rings
+      bool tempInterrupt = false;
+      if (timerRinging && settings.enableInterrupt) {
+          setInterruptMode(true);
+          tempInterrupt = true;
+      }
+
       if (speech.detectWakeWord(wakeThreshold)) {
           if (settings.debugMode) Serial.println("Wake Word Detected!");
           speaker.playSpeechFromFile(CHIME_FILENAME);
           
-          // Wait for chime to finish playing before proceeding to record
-          // Wait for any remaining chime to finish playing before proceeding to record
-          while(speaker.isRunning()) {
-              delay(30);
-          }
+          while(speaker.isRunning()) delay(30);
           
-          onVoiceChange("TALK_ACTION");
+          if (timerRinging) {
+              timerRinging = false; // Cancel timer if they use the wake word during silence
+              display.showStatus("Ready"); // Just return to standby
+          } else {
+              onVoiceChange("TALK_ACTION");
+          }
+      }
+      
+      if (tempInterrupt) {
+          setInterruptMode(false);
       }
   }
 

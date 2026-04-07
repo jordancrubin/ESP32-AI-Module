@@ -12,6 +12,37 @@ extern String ttsVoice;
 extern String voiceOptions;
 extern void onVolumeChange(int value);
 
+uint32_t g_pendingTimerSeconds = 0;
+bool g_cancelTimer = false;
+
+static int wordToInt(String word) {
+    if (word == "one" || word == "a" || word == "an") return 1;
+    if (word == "two") return 2;
+    if (word == "three") return 3;
+    if (word == "four") return 4;
+    if (word == "five") return 5;
+    if (word == "six") return 6;
+    if (word == "seven") return 7;
+    if (word == "eight") return 8;
+    if (word == "nine") return 9;
+    if (word == "ten") return 10;
+    if (word == "eleven") return 11;
+    if (word == "twelve") return 12;
+    if (word == "thirteen") return 13;
+    if (word == "fourteen") return 14;
+    if (word == "fifteen") return 15;
+    if (word == "sixteen") return 16;
+    if (word == "seventeen") return 17;
+    if (word == "eighteen") return 18;
+    if (word == "nineteen") return 19;
+    if (word == "twenty") return 20;
+    if (word == "thirty") return 30;
+    if (word == "forty") return 40;
+    if (word == "fifty") return 50;
+    if (word == "sixty") return 60;
+    return word.toInt(); // fallback to numeric parsing
+}
+
 CommandResult CommandProcessor::processCommand(const String& text) {
     CommandResult result; // Values default safely to false/"" automatically
     String lowerText = text;
@@ -101,6 +132,69 @@ CommandResult CommandProcessor::processCommand(const String& text) {
         } else {
             result.response = "The brightness is out of range. It must be between zero and ten.";
         }
+        result.handled = true;
+    } else if (lowerText.indexOf("set timer for") != -1 || lowerText.indexOf("set a timer for") != -1 || lowerText.indexOf("set the timer for") != -1 || 
+               lowerText.indexOf("start timer for") != -1 || lowerText.indexOf("start a timer for") != -1 || lowerText.indexOf("start the timer for") != -1) {
+        String cleanText = lowerText;
+        cleanText.replace(".", " ");
+        cleanText.replace(",", " ");
+        cleanText.replace("!", " ");
+        cleanText.replace("?", " ");
+        
+        uint32_t totalSecs = 0;
+        int lastNum = 0;
+        
+        int start = 0;
+        int end = cleanText.indexOf(' ');
+        while (end != -1 || start < cleanText.length()) {
+            String word = (end == -1) ? cleanText.substring(start) : cleanText.substring(start, end);
+            word.trim();
+            if (word.length() > 0) {
+                if (word == "hour" || word == "hours") {
+                    totalSecs += lastNum * 3600;
+                    lastNum = 0;
+                } else if (word == "minute" || word == "minutes" || word == "min" || word == "mins") {
+                    totalSecs += lastNum * 60;
+                    lastNum = 0;
+                } else if (word == "second" || word == "seconds" || word == "sec" || word == "secs") {
+                    totalSecs += lastNum;
+                    lastNum = 0;
+                } else if (word == "and") {
+                    // Ignore filler word
+                } else {
+                    int val = wordToInt(word);
+                    if (val > 0 || word == "0") {
+                        if (lastNum >= 20 && val < 10) lastNum += val; // Handles "twenty five" -> 25
+                        else lastNum = val;
+                    }
+                }
+            }
+            if (end == -1) break;
+            start = end + 1;
+            end = cleanText.indexOf(' ', start);
+        }
+
+        if (totalSecs > 0) {
+            g_pendingTimerSeconds = totalSecs;
+            
+            String niceTime = "";
+            int h = totalSecs / 3600;
+            int m = (totalSecs % 3600) / 60;
+            int s = totalSecs % 60;
+            if (h > 0) niceTime += String(h) + (h > 1 ? " hours " : " hour ");
+            if (m > 0) niceTime += String(m) + (m > 1 ? " minutes " : " minute ");
+            if (s > 0) niceTime += String(s) + (s > 1 ? " seconds" : " second");
+            niceTime.trim();
+            
+            result.response = "Timer set for " + niceTime + ".";
+            result.handled = true;
+        } else {
+            result.response = "I couldn't understand the timer duration.";
+            result.handled = true;
+        }
+    } else if (lowerText.indexOf("cancel timer") != -1 || lowerText.indexOf("stop timer") != -1 || lowerText.indexOf("cancel the timer") != -1 || lowerText.indexOf("stop the timer") != -1) {
+        g_cancelTimer = true;
+        result.response = "The timer has been cancelled.";
         result.handled = true;
     } else if (lowerText.indexOf("clock color to") != -1 || lowerText.indexOf("clock colour to") != -1) {
         String newColor = "";

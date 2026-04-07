@@ -34,6 +34,7 @@ SettingsManager::SettingsManager() {
     aecDelay = 640; // Default ~40ms
     aecAttenuation = 4; // Default /4 (75% attenuation)
     aecCutoff = 1000; // Default 1000 raw amplitude
+    aecIgnore = 3000; // Default 3000ms ignore window
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
 }
 
@@ -68,6 +69,7 @@ void SettingsManager::load() {
     aecDelay = prefs.getInt("aec_dly", aecDelay);
     aecAttenuation = prefs.getInt("aec_att", aecAttenuation);
     aecCutoff = prefs.getInt("aec_cut", aecCutoff);
+    aecIgnore = prefs.getInt("aec_ign", aecIgnore);
     if (prefs.isKey("know_id")) prefs.getString("know_id", knowledgeId, sizeof(knowledgeId));
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
@@ -101,5 +103,6 @@ void SettingsManager::save() {
     prefs.putInt("aec_dly", aecDelay);
     prefs.putInt("aec_att", aecAttenuation);
     prefs.putInt("aec_cut", aecCutoff);
+    prefs.putInt("aec_ign", aecIgnore);
     prefs.putString("know_id", knowledgeId);
 }

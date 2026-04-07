@@ -28,6 +28,10 @@ bool g_isSubMenuActive = false;
 
 extern bool isProcessing;
 extern bool isSpeaking;
+extern bool timerActive;
+extern bool timerRinging;
+extern unsigned long timerStartTime;
+extern uint32_t timerDurationMs;
 
 // Global state for Clock/Idle handling
 static String g_lastVoice = "alloy";
@@ -45,6 +49,16 @@ static VoiceCallback g_voiceCb = nullptr;
 static uint16_t * s_boot_buffer = nullptr;
 static uint16_t s_boot_w = 0;
 static uint16_t s_boot_h = 0;
+
+// LVGL Async Wrappers for safe screen transitions
+static void async_show_main_ui(void * p) {
+    if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+}
+static void async_show_voice_model_config(void *p) { showVoiceModelConfig(); }
+static void async_show_audio_config(void *p) { if(static_dm) static_dm->showAudioConfig(); }
+static void async_show_mic_aec_config(void *p) { showMicAecConfig(); }
+static void async_show_web_config(void *p) { if(static_dm) static_dm->showWebConfig(WiFi.localIP().toString(), "aiesp.local"); }
+static void async_show_wifi_config(void *p) { if(static_dm) static_dm->showWiFiConfig(); }
 
 static void localVoiceEventHandler(lv_event_t * e) {
     if (g_voiceCb) {
@@ -171,6 +185,10 @@ struct ClockWidgets {
     lv_obj_t* wifiBars[4];
     lv_obj_t* dayLabels[7];
     lv_obj_t* weatherLabel;
+    
+    lv_obj_t* timerCont;
+    SevenSegmentDigit tm1, tm2, ts1, ts2;
+    lv_obj_t* timerColon[2];
 };
 
 static ClockWidgets g_clockWidgets;
@@ -351,7 +369,7 @@ static void clock_update_cb(lv_timer_t * t) {
     }
 
     // Update Day of Week
-    int currentDay = timeinfo.tm_wday; // 0=Sun, 1=Mon...
+    int currentDay = 6; // 6=Sat (Temporarily forced) // timeinfo.tm_wday;
     int labelIdx = (currentDay + 6) % 7; // Convert to 0=Mon, 6=Sun
     for(int i=0; i<7; i++) {
         if(g_clockWidgets.dayLabels[i]) {
@@ -360,6 +378,57 @@ static void clock_update_cb(lv_timer_t * t) {
              } else {
                  lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], lv_color_make(40, 40, 40), 0);
              }
+        }
+    }
+
+    // Update Timer if active
+    if (g_clockWidgets.timerCont) {
+        if (timerActive || timerRinging) {
+            lv_obj_clear_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_HIDDEN);
+            uint32_t rem = 0;
+            
+            static int last_clock_sec = -1;
+            static uint32_t display_rem = 0;
+            static unsigned long last_start_time = 0;
+
+            if (timerActive) {
+                unsigned long elapsed = millis() - timerStartTime;
+                uint32_t actual_rem = (elapsed < timerDurationMs) ? (timerDurationMs - elapsed) / 1000 : 0;
+                
+                // If a new timer just started, force an immediate visual update
+                if (timerStartTime != last_start_time) {
+                    display_rem = actual_rem;
+                    last_start_time = timerStartTime;
+                    last_clock_sec = timeinfo.tm_sec;
+                }
+                // Otherwise, only decrement the timer exactly when the clock ticks
+                else if (timeinfo.tm_sec != last_clock_sec) {
+                    display_rem = actual_rem;
+                    last_clock_sec = timeinfo.tm_sec;
+                }
+                rem = display_rem;
+            } else {
+                display_rem = 0;
+                last_start_time = 0;
+            }
+            
+            int m = rem / 60;
+            int s = rem % 60;
+            if (m > 99) m = 99; // Cap at 99 mins
+            
+            g_clockWidgets.tm1.setNumber(m / 10);
+            g_clockWidgets.tm2.setNumber(m % 10);
+            g_clockWidgets.ts1.setNumber(s / 10);
+            g_clockWidgets.ts2.setNumber(s % 10);
+            
+            lv_color_t timerCol = blink ? getClockColor() : lv_color_make(40, 40, 40);
+            if (g_clockWidgets.timerColon[0]) lv_obj_set_style_bg_color(g_clockWidgets.timerColon[0], timerCol, 0);
+            if (g_clockWidgets.timerColon[1]) lv_obj_set_style_bg_color(g_clockWidgets.timerColon[1], timerCol, 0);
+            
+            // Blink entire timer when ringing
+            if (timerRinging && !blink) lv_obj_add_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
@@ -377,10 +446,8 @@ static void clock_click_cb(lv_event_t * e) {
         lv_timer_del(g_clockTimer);
         g_clockTimer = nullptr;
     }
-    // Restore Main UI
-    if (static_dm) {
-        static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
-    }
+    // Restore Main UI asynchronously to prevent use-after-free
+    lv_async_call(async_show_main_ui, NULL);
 }
 
 // Callback to check for inactivity
@@ -403,8 +470,9 @@ static void idle_timer_cb(lv_timer_t * t) {
 
 static void showClockScreen() {
     g_isSubMenuActive = false;
-    // Use public method to reset private pointers (statusLabel)
-    if (static_dm) static_dm->showWiFiError("");
+    if (static_dm) {
+        static_dm->resetUIPointers(); // Safely reset private pointers via public method
+    }
     lv_obj_clean(lv_scr_act());
     boot_cont = nullptr;
 
@@ -466,6 +534,34 @@ static void showClockScreen() {
         lv_obj_set_style_text_font(g_clockWidgets.dayLabels[i], &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], lv_color_make(40, 40, 40), 0);
     }
+
+    // Timer Container (Top Mid)
+    g_clockWidgets.timerCont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(g_clockWidgets.timerCont, 100, 36);
+    lv_obj_align(g_clockWidgets.timerCont, LV_ALIGN_TOP_MID, 0, 5);
+    lv_obj_set_style_bg_opa(g_clockWidgets.timerCont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g_clockWidgets.timerCont, 0, 0);
+    lv_obj_set_style_pad_all(g_clockWidgets.timerCont, 0, 0);
+    lv_obj_clear_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_EVENT_BUBBLE); // Pass clicks
+    lv_obj_add_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_HIDDEN); // Hidden by default
+
+    int t_dW = 14, t_dH = 26, t_gap = 4, t_startX = 12, t_y = 5;
+    g_clockWidgets.tm1.create(g_clockWidgets.timerCont, t_startX, t_y, t_dW, t_dH);
+    g_clockWidgets.tm2.create(g_clockWidgets.timerCont, t_startX + t_dW + t_gap, t_y, t_dW, t_dH);
+
+    int t_colonX = t_startX + 2 * t_dW + t_gap + 4;
+    for(int i=0; i<2; i++) {
+        g_clockWidgets.timerColon[i] = lv_obj_create(g_clockWidgets.timerCont);
+        lv_obj_set_size(g_clockWidgets.timerColon[i], 4, 4);
+        lv_obj_set_style_radius(g_clockWidgets.timerColon[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(g_clockWidgets.timerColon[i], 0, 0);
+        lv_obj_set_pos(g_clockWidgets.timerColon[i], t_colonX, t_y + (i+1)*t_dH/3);
+    }
+
+    int t_tsX = t_colonX + 4 + 4;
+    g_clockWidgets.ts1.create(g_clockWidgets.timerCont, t_tsX, t_y, t_dW, t_dH);
+    g_clockWidgets.ts2.create(g_clockWidgets.timerCont, t_tsX + t_dW + t_gap, t_y, t_dW, t_dH);
 
     // WiFi Signal Meter (Top Right)
     lv_obj_t * wifiCont = lv_obj_create(lv_scr_act());
@@ -536,7 +632,7 @@ static void showVoiceModelConfig() {
     lv_label_set_text(lblBack, LV_SYMBOL_LEFT);
     lv_obj_center(lblBack);
     lv_obj_add_event_cb(btnBack, [](lv_event_t * e){
-        if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+        lv_async_call(async_show_main_ui, NULL);
     }, LV_EVENT_CLICKED, NULL);
 
     // Container for controls
@@ -648,13 +744,13 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_set_style_pad_right(dd_menu, 0, 0); // Remove arrow padding to perfectly center the icon
     lv_obj_add_event_cb(dd_menu, [](lv_event_t * e){
         uint16_t idx = lv_dropdown_get_selected(lv_event_get_target(e));
-        if (idx == 0) showVoiceModelConfig();
-        else if (idx == 1 && static_dm) static_dm->showAudioConfig();
-        else if (idx == 2) showMicAecConfig();
+        if (idx == 0) lv_async_call(async_show_voice_model_config, NULL);
+        else if (idx == 1) lv_async_call(async_show_audio_config, NULL);
+        else if (idx == 2) lv_async_call(async_show_mic_aec_config, NULL);
         else if (idx == 3 && static_dm) {
             if (settings.debugMode) Serial.println("Setup menu pressed. Web Server active.");
             if (DisplayManager::setupModeCb) DisplayManager::setupModeCb(true);
-            static_dm->showWebConfig(WiFi.localIP().toString(), "aiesp.local");
+            lv_async_call(async_show_web_config, NULL);
         }
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
@@ -733,6 +829,12 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     if (!g_idleTimer) {
         g_idleTimer = lv_timer_create(idle_timer_cb, 1000, NULL);
     }
+}
+
+void DisplayManager::resetUIPointers() {
+    statusLabel = nullptr;
+    audio_vu_l = nullptr;
+    audio_vu_r = nullptr;
 }
 
 void DisplayManager::clear() {
@@ -1274,7 +1376,7 @@ void DisplayManager::setupEventHandler(lv_event_t * e) {
     if (dm) {
         if (settings.debugMode) Serial.println("Setup button pressed. Web Server is active.");
         if (setupModeCb) setupModeCb(true);
-        dm->showWebConfig(WiFi.localIP().toString(), "aiesp.local");
+        lv_async_call(async_show_web_config, NULL);
     }
 }
 
@@ -1282,7 +1384,7 @@ void DisplayManager::closeSetupEventHandler(lv_event_t * e) {
     DisplayManager* dm = (DisplayManager*)lv_event_get_user_data(e);
     if (dm) {
         if (setupModeCb) setupModeCb(false);
-        dm->showMainUI(dm->_lastVoice, dm->_lastVolume);
+        lv_async_call(async_show_main_ui, NULL);
     }
 }
 
@@ -1305,7 +1407,7 @@ void DisplayManager::voiceEventHandler(lv_event_t * e) {
 }
 
 void DisplayManager::wifiRetryHandler(lv_event_t * e) {
-    static_dm->showWiFiConfig();
+    lv_async_call(async_show_wifi_config, NULL);
 }
 
 void DisplayManager::setVolumeCallback(VolumeCallback cb) {
@@ -1523,7 +1625,7 @@ void DisplayManager::showAudioConfig() {
     lv_obj_center(lblClose);
     lv_obj_add_event_cb(btnClose, [](lv_event_t * e){
         settings.save(); // Save to NVRAM when menu is closed
-        if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+        lv_async_call(async_show_main_ui, NULL);
     }, LV_EVENT_CLICKED, NULL);
 }
 
@@ -1550,7 +1652,7 @@ static void showMicAecConfig() {
     lv_obj_center(lblBack);
     lv_obj_add_event_cb(btnBack, [](lv_event_t * e){
         settings.save();
-        if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
+        lv_async_call(async_show_main_ui, NULL);
     }, LV_EVENT_CLICKED, NULL);
 
     // Scrollable container for the settings

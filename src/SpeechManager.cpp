@@ -181,10 +181,12 @@ void feed_Task(void *arg) {
                     
                     static int debug_skip = 0;
                     if (++debug_skip >= 10) { // Print every ~200ms
-                        debug_skip = 0;
-                        Serial.printf("AEC: RefBuf=%5d | MicL=%5d MicR=%5d | RefPk=%5d | OutPk=%5d\n", 
-                            (int)((s_ref_write_index >= s_ref_read_index) ? (s_ref_write_index - s_ref_read_index) : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index))), 
-                            max_l, max_r, max_ref, max_out);
+                        debug_skip = 0; // Always reset to prevent integer overflow
+                        if (Serial && Serial.availableForWrite() > 64) {
+                            Serial.printf("AEC: RefBuf=%5d | MicL=%5d MicR=%5d | RefPk=%5d | OutPk=%5d\n", 
+                                (int)((s_ref_write_index >= s_ref_read_index) ? (s_ref_write_index - s_ref_read_index) : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index))), 
+                                max_l, max_r, max_ref, max_out);
+                        }
                     }
                 }
 
@@ -386,13 +388,19 @@ bool SpeechManager::detectWakeWord(float threshold) {
             return false;
         }
 
-        // Print Debug Info
-        if (settings.debugMode) {
-            Serial.printf("Raw: %d | L: %d R: %d | Time: %dms | ", max_audio_level, max_l_level, max_r_level, result.timing.dsp + result.timing.classification);
+        // This is the most performance-critical debug output. To prevent audio artifacts,
+        // only print if the Serial monitor is connected and has enough buffer space.
+        if (settings.debugMode && Serial && Serial.availableForWrite() > 64) {
+            char buf[256];
+            int len = snprintf(buf, sizeof(buf), "Raw: %d | L: %d R: %d | Time: %dms | ", max_audio_level, max_l_level, max_r_level, result.timing.dsp + result.timing.classification);
             for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-                Serial.printf("%s: %.2f ", result.classification[ix].label, result.classification[ix].value);
+                // Safely append to the buffer, ensuring we never write out of bounds
+                if (len >= 0 && len < sizeof(buf)) {
+                    int written = snprintf(buf + len, sizeof(buf) - len, "%s: %.2f ", result.classification[ix].label, result.classification[ix].value);
+                    if (written > 0) len += written;
+                }
             }
-            Serial.println();
+            Serial.println(buf);
         }
         
         int32_t current_max_level = max_audio_level; // Capture before reset
@@ -405,16 +413,14 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
         bool wake_word_detected = false;
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-            // During active playback (interrupt mode), make the threshold slightly stricter (+0.10) 
-            // to prevent the AI's own voice from causing false positives through the AEC.
-            float active_threshold = s_interrupt_mode ? (threshold + 0.10f) : threshold;
-            if (active_threshold > 0.95f) active_threshold = 0.95f;
-            
-            if (result.classification[ix].value > active_threshold) {
-                const char* label = result.classification[ix].label;
-                if (strcmp(label, "noise") != 0 && strcmp(label, "unknown") != 0) {
-                    if (settings.debugMode) Serial.printf(">>> WAKE WORD DETECTED: %s (%.2f) <<<\n", label, result.classification[ix].value);
-                    wake_word_detected = true;
+            // Standard Wake Word Detection (Only when NOT in interrupt mode)
+            if (!s_interrupt_mode) {
+                if (result.classification[ix].value > threshold) {
+                    const char* label = result.classification[ix].label;
+                    if (strcmp(label, "noise") != 0 && strcmp(label, "unknown") != 0) {
+                        if (settings.debugMode) Serial.printf(">>> WAKE WORD DETECTED: %s (%.2f) <<<\n", label, result.classification[ix].value);
+                        wake_word_detected = true;
+                    }
                 }
             }
             
