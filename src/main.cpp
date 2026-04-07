@@ -442,7 +442,7 @@ void handleWebRoot() {
     html += "</script>";
     html += "</head><body>";
     html += "<div class='container'>";
-    html += "<h2>ESP32 AI Configuration</h2>";
+    html += "<h2><img src='/logo.png' style='height:40px; vertical-align:middle; margin-right:15px;' onerror='this.style.display=\"none\"'>ESP32 AI Configuration</h2>";
 
     // Tabs
     html += "<div class='tabs'>";
@@ -1811,6 +1811,9 @@ void setup() {
   server.onNotFound([]() {
       server.send(404, "text/plain", "Not Found");
   });
+
+  // Serve the static logo image directly from LittleFS
+  server.serveStatic("/logo.png", LittleFS, "/logo.png");
 
   server.on("/ei_mode", HTTP_POST, []() {
       if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
