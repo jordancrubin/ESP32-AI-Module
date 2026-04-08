@@ -55,6 +55,17 @@ static RingbufHandle_t s_processed_ringbuf = NULL; // Buffer for clean audio
 static i2s_chan_handle_t s_rx_handle = NULL;
 static volatile bool s_is_recording = false; // Flag to pause AEC task
 
+void flushAecBuffer() {
+    if (s_processed_ringbuf) {
+        size_t bytesFetched;
+        void* data;
+        // Rapidly drain the ringbuffer of any residual audio
+        while ((data = xRingbufferReceive(s_processed_ringbuf, &bytesFetched, 0)) != NULL) {
+            vRingbufferReturnItem(s_processed_ringbuf, data);
+        }
+    }
+}
+
 // Buffer Health Stats
 static volatile uint32_t s_aec_overflows = 0;
 static volatile uint32_t s_aec_underflows = 0;

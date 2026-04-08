@@ -9,8 +9,15 @@
 #include <FS.h>
 #include <LittleFS.h>
 #include "SettingsManager.h"
+#include "DisplayManager.h"
+#include <lvgl.h>
 
 extern SettingsManager settings;
+extern DisplayManager display;
+
+extern bool enableTTSChunking;
+extern bool playChunkedTTS(String text);
+extern float ttsSpeed;
 
 String LLMClient::getTtsBaseUrl() {
     if (settings.ttsProvider == 1 && strlen(settings.ttsUrl) > 0) {
@@ -147,7 +154,7 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
 
     JsonDocument doc;
     doc["model"] = _model;
-    doc["stream"] = false;
+    doc["stream"] = true;
     doc["messages"] = _history;
     
     if (settings.enableWebSearch) {
@@ -189,33 +196,81 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
         http.addHeader("Authorization", "Bearer " + _apiKey);
 
         httpResponseCode = http.POST((uint8_t*)requestBuffer, requestSize);
-        if (httpResponseCode > 0) {
+        if (httpResponseCode == 200) {
             if (settings.debugMode) {
                 Serial.print("HTTP Response code: ");
                 Serial.println(httpResponseCode);
+                Serial.print("Streaming response: ");
             }
 
-            JsonDocument filter;
-            filter["choices"][0]["message"]["content"] = true;
-
-            JsonDocument responseDoc;
-            DeserializationError error = deserializeJson(responseDoc, http.getStream(), DeserializationOption::Filter(filter));
-
-            if (!error) {
-                const char* content = responseDoc["choices"][0]["message"]["content"];
-                if (content) {
-                    result = String(content);
-                    JsonObject assistantMsg = _history.add<JsonObject>();
-                    assistantMsg["role"] = "assistant";
-                    assistantMsg["content"] = result;
+            WiFiClient* stream = http.getStreamPtr();
+            String full_response = "";
+            String sentence_buffer = "";
+            full_response.reserve(2048); // Pre-allocate to prevent heap fragmentation
+            sentence_buffer.reserve(512);
+            
+            while (http.connected()) {
+                if (stream->available()) {
+                    String line = stream->readStringUntil('\n');
+                    line.trim();
+                    
+                    // Parse Server-Sent Events (SSE)
+                    if (line.startsWith("data: ")) {
+                        String jsonStr = line.substring(6);
+                        if (jsonStr == "[DONE]") break; // Stream finished
+                        
+                        JsonDocument chunkDoc;
+                        DeserializationError err = deserializeJson(chunkDoc, jsonStr);
+                        if (!err) {
+                            const char* content = chunkDoc["choices"][0]["delta"]["content"];
+                            if (content) {
+                                full_response += content;
+                                // Removed Serial.print(content) to prevent audio distortion during streaming
+                                
+                                if (enableTTSChunking) {
+                                    sentence_buffer += content;
+                                    if (strchr(content, '.') || strchr(content, '!') || strchr(content, '?') || strchr(content, '\n')) {
+                                        sentence_buffer.trim();
+                                        if (sentence_buffer.length() > 5) {
+                                            if (!playChunkedTTS(sentence_buffer)) {
+                                                http.end(); // Abort stream if user interrupted
+                                                return "Interrupted by user";
+                                            }
+                                            sentence_buffer = "";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    result = "Error: No content in response";
+                    delay(2); // Yield to watchdogs while waiting for next network packet
                 }
+            }
+            
+            if (settings.debugMode) Serial.println(); // Newline after stream
+            
+            // Final UI update to show the complete response now that audio processing has finished
+            display.showResponse(full_response);
+            lv_timer_handler();
+            
+            // Play any remaining text that didn't end in punctuation
+            if (enableTTSChunking && sentence_buffer.length() > 0) {
+                sentence_buffer.trim();
+                if (sentence_buffer.length() > 0) playChunkedTTS(sentence_buffer);
+            }
+            
+            if (full_response.length() > 0) {
+                result = full_response;
+                JsonObject assistantMsg = _history.add<JsonObject>();
+                assistantMsg["role"] = "assistant";
+                assistantMsg["content"] = result;
             } else {
-                result = "Error: JSON Parsing failed";
+                result = "Error: Empty stream response";
             }
         } else {
             result = "Error: HTTP " + String(httpResponseCode);
+            if (httpResponseCode > 0) result += " " + http.getString();
             if (_history.size() > 0) _history.remove(_history.size() - 1);
         }
         http.end();
@@ -271,6 +326,7 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
         doc["input"] = text;
         doc["voice"] = voice; // Options: alloy, echo, fable, onyx, nova, shimmer
         doc["response_format"] = "mp3"; // Options: mp3, opus, aac, flac, wav, pcm
+        doc["speed"] = ttsSpeed;
 
         String requestBody;
         serializeJson(doc, requestBody);

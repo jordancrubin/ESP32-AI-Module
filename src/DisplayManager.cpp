@@ -473,6 +473,17 @@ static void showClockScreen() {
     if (static_dm) {
         static_dm->resetUIPointers(); // Safely reset private pointers via public method
     }
+    
+    // Prevent background timer leaks!
+    if (g_clockTimer) {
+        lv_timer_del(g_clockTimer);
+        g_clockTimer = nullptr;
+    }
+    if (g_idleTimer) {
+        lv_timer_del(g_idleTimer);
+        g_idleTimer = nullptr;
+    }
+
     lv_obj_clean(lv_scr_act());
     boot_cont = nullptr;
 

@@ -13,6 +13,9 @@
 #include <Update.h>
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME680.h>
 #include <math.h>
 #include "Config.h"
 #include "DisplayManager.h"
@@ -36,6 +39,12 @@ String ttsVoice = "alloy";
 String voiceOptions = "alloy";
 String modelOptions = "";
 float wakeThreshold = 0.8;
+float ttsSpeed = 1.0;
+
+bool enableBME680 = false;
+bool enableTTSChunking = false;
+bool bmeReady = false;
+Adafruit_BME680 bme;
 
 String inputBuffer = "";
 bool isSpeaking = false;
@@ -67,6 +76,7 @@ extern void forceClockScreen();
 extern void showAecTuningUI();
 extern void updateAecTuningUI(int percent, const char* msg);
 extern void showHelpScreen();
+extern void flushAecBuffer();
 
 // Forward declarations
 void testAEC();
@@ -82,6 +92,7 @@ unsigned long timerStartTime = 0;
 uint32_t timerDurationMs = 0;
 bool timerActive = false;
 bool timerRinging = false;
+unsigned long lastInterruptTime = 0;
 unsigned long lastRingTime = 0;
 
 // Chime Configuration
@@ -106,6 +117,47 @@ void onBalanceChange(int value) {
     settings.inputBalance = value;
     setInputBalance(value);
     settings.save();
+}
+
+// Plays a chunk of TTS immediately and alternates files to avoid stuttering
+bool playChunkedTTS(String text) {
+    static int fileToggle = 0;
+    
+    // 1. Wait for previous chunk to finish playing, handle interrupts
+    bool interrupted = false;
+    if (settings.enableInterrupt) setInterruptMode(true);
+    unsigned long playbackStart = millis();
+    
+    while (speaker.isRunning()) {
+        if (settings.enableInterrupt) {
+            bool triggered = speech.detectWakeWord(wakeThreshold);
+            if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                if (settings.debugMode) Serial.println("Playback interrupted by user!");
+                speaker.stop();
+                speaker.playSpeechFromFile(CHIME_FILENAME);
+                while(speaker.isRunning()) delay(30);
+                interrupted = true;
+                flushAecBuffer();
+                break;
+            }
+            delay(5);
+        } else {
+            delay(50);
+        }
+    }
+    if (settings.enableInterrupt) setInterruptMode(false);
+    if (interrupted) return false;
+
+    // 2. Download the next chunk
+    String filename = "/speech" + String(fileToggle) + ".mp3";
+    if (LittleFS.exists(filename)) LittleFS.remove(filename);
+    
+    if (llm.downloadTTS(text, network, filename.c_str(), ttsVoice)) {
+        speaker.playSpeechFromFile(filename.c_str());
+        isSpeaking = true;
+        fileToggle = 1 - fileToggle; // alternate between 0 and 1
+    }
+    return true;
 }
 
 void onAdminConfig(String pass) {
@@ -205,42 +257,72 @@ void onVoiceChange(String voice) {
                     } else {
                         display.showStatus("Speaking...");
                     }
-                    // Ensure any previous TTS file is removed to free space before downloading
-                    if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
-                    
-                    if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
-                        speaker.playSpeechFromFile("/speech.mp3");
-                        isSpeaking = true;
-                        lv_timer_handler(); // Update UI once to show "Speaking"
+
+                    if (!enableTTSChunking && answer != "Interrupted by user") {
+                        // Ensure any previous TTS file is removed to free space before downloading
+                        if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
                         
+                        if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
+                            speaker.playSpeechFromFile("/speech.mp3");
+                            isSpeaking = true;
+                            lv_timer_handler(); // Update UI once to show "Speaking"
+                            
+                            bool interrupted = false;
+                            if (settings.enableInterrupt) setInterruptMode(true);
+                            unsigned long playbackStart = millis();
+
+                            // Wait for playback to finish, or poll for interruptions
+                            while (speaker.isRunning()) {
+                                if (settings.enableInterrupt) {
+                                    bool triggered = speech.detectWakeWord(wakeThreshold);
+                                    if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                                        if (settings.debugMode) Serial.println("Playback interrupted by user!");
+                                        speaker.stop();
+                                        speaker.playSpeechFromFile(CHIME_FILENAME);
+                                        while(speaker.isRunning()) delay(30);
+                                        interrupted = true;
+                                        flushAecBuffer();
+                                        break;
+                                    }
+                                    delay(5); // Fast loop to drain AEC buffer safely
+                                } else {
+                                    delay(50);
+                                }
+                            }
+                            
+                            if (settings.enableInterrupt) setInterruptMode(false);
+                            isSpeaking = false;
+                            
+                            if (interrupted) continue; // Skip the rest, loop back to "Listening..."
+                        } else {
+                            display.showStatus("TTS Failed");
+                            break;
+                        }
+                    } else {
+                        // Chunking mode (Wait for last chunk to finish gracefully)
                         bool interrupted = false;
                         if (settings.enableInterrupt) setInterruptMode(true);
                         unsigned long playbackStart = millis();
-
-                        // Wait for playback to finish, or poll for interruptions
                         while (speaker.isRunning()) {
                             if (settings.enableInterrupt) {
                                 bool triggered = speech.detectWakeWord(wakeThreshold);
                                 if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
-                                    if (settings.debugMode) Serial.println("Playback interrupted by user!");
                                     speaker.stop();
                                     speaker.playSpeechFromFile(CHIME_FILENAME);
                                     while(speaker.isRunning()) delay(30);
                                     interrupted = true;
+                                    flushAecBuffer();
                                     break;
                                 }
-                                delay(5); // Fast loop to drain AEC buffer safely
+                                delay(5);
                             } else {
                                 delay(50);
                             }
                         }
-                        
                         if (settings.enableInterrupt) setInterruptMode(false);
                         isSpeaking = false;
-                        
-                        if (interrupted) {
-                            continue; // Skip the rest, loop back to "Listening..."
-                        }
+                        if (interrupted || answer == "Interrupted by user") continue;
+                    }
 
                         if (runAecTest) {
                             display.showStatus("Running AEC Test...");
@@ -288,10 +370,6 @@ void onVoiceChange(String voice) {
                         if (isTimerCmd) {
                             break;       // End the conversation loop
                         }
-                    } else {
-                        display.showStatus("TTS Failed");
-                        break;
-                    }
                 }
             } else {
                 display.showStatus("No Speech");
@@ -465,6 +543,7 @@ void handleWebRoot() {
     html += "<option value='1'" + String(settings.ttsProvider == 1 ? " selected" : "") + ">Direct</option></select>";
     html += "<label>Direct TTS URL</label><input type='text' name='ttsUrl' value='" + String(settings.ttsUrl) + "' placeholder='e.g., http://host:port'>";
     html += "<small>Used when TTS Provider is 'Direct'. Must be full base URL.</small>";
+    html += "<label>TTS Speed (0.5 - 2.0)</label><input type='number' name='ttsSpeed' value='" + String(ttsSpeed) + "' step='0.05' min='0.5' max='2.0'>";
     html += "<label>System Prompt</label><textarea name='systemPrompt' rows='4'>" + String(settings.systemPrompt) + "</textarea>";
     html += "</div>";
     
@@ -535,6 +614,8 @@ void handleWebRoot() {
 
     html += "<div class='card'><h3>Advanced</h3>";
     html += "<div class='checkbox-group'><input type='checkbox' id='debugMode' name='debugMode' value='1'" + String(settings.debugMode ? " checked" : "") + "><label for='debugMode'>Enable Debug Logging (Serial 115200)</label></div>";
+    html += "<div class='checkbox-group'><input type='checkbox' id='enableBME680' name='enableBME680' value='1'" + String(enableBME680 ? " checked" : "") + "><label for='enableBME680'>Enable BME680 Sensor (I2C)</label></div>";
+    html += "<div class='checkbox-group'><input type='checkbox' id='ttsChunking' name='ttsChunking' value='1'" + String(enableTTSChunking ? " checked" : "") + "><label for='ttsChunking'>Enable TTS Sentence Chunking (Fast Audio Response)</label></div>";
     html += "</div>";
     html += "</div>";
 
@@ -608,6 +689,14 @@ void handleWebSave() {
             adminPrefs.putFloat("wake_thresh", wakeThreshold);
         }
     }
+    
+    if (server.hasArg("ttsSpeed")) {
+        float val = server.arg("ttsSpeed").toFloat();
+        if (val >= 0.5 && val <= 2.0) {
+            ttsSpeed = val;
+            adminPrefs.putFloat("tts_speed", ttsSpeed);
+        }
+    }
 
     if (server.hasArg("silenceThreshold")) {
         int val = server.arg("silenceThreshold").toInt();
@@ -663,6 +752,32 @@ void handleWebSave() {
     settings.enableWebSearch = server.hasArg("webSearch");
     settings.enableMemory = server.hasArg("memory");
     settings.enableInterrupt = server.hasArg("interrupt");
+
+    bool newEnableBME = server.hasArg("enableBME680");
+    if (newEnableBME != enableBME680) {
+        enableBME680 = newEnableBME;
+        adminPrefs.putBool("en_bme", enableBME680);
+        if (enableBME680) {
+            if (bme.begin(0x77) || bme.begin(0x76)) {
+                bme.setTemperatureOversampling(BME680_OS_8X);
+                bme.setHumidityOversampling(BME680_OS_2X);
+                bme.setPressureOversampling(BME680_OS_4X);
+                bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
+                bme.setGasHeater(320, 150);
+                bmeReady = true;
+            } else {
+                bmeReady = false;
+            }
+        } else {
+            bmeReady = false;
+        }
+    }
+
+    bool newTTSChunking = server.hasArg("ttsChunking");
+    if (newTTSChunking != enableTTSChunking) {
+        enableTTSChunking = newTTSChunking;
+        adminPrefs.putBool("tts_chunk", enableTTSChunking);
+    }
 
     // Save to NVRAM immediately
     strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
@@ -1381,11 +1496,6 @@ void handleSerialCommands() {
           delay(1000);
           ESP.restart();
         } else if (inputBuffer.startsWith("/say ")) {
-        } else if (inputBuffer == "/factory_reset") {
-          performFactoryReset();
-          Serial.println("Rebooting now...");
-          delay(1000);
-          ESP.restart();
           String textToSay = inputBuffer.substring(5);
           textToSay.trim();
           if (textToSay.length() > 0) {
@@ -1395,34 +1505,43 @@ void handleSerialCommands() {
             display.showMainUI(ttsVoice, settings.volume, voiceOptions);
             display.showStatus("Direct TTS...");
             
-            // Download TTS to file, then play
-            if (llm.downloadTTS(textToSay, network, "/speech.mp3", ttsVoice)) {
-                speaker.playSpeechFromFile("/speech.mp3");
-                isSpeaking = true;
-                lv_timer_handler();
-                if (settings.enableInterrupt) setInterruptMode(true);
-                unsigned long playbackStart = millis();
-                while(speaker.isRunning()) {
-                    if (settings.enableInterrupt) {
-                        bool triggered = speech.detectWakeWord(wakeThreshold);
-                        if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
-                            speaker.stop();
-                            speaker.playSpeechFromFile(CHIME_FILENAME);
-                            while(speaker.isRunning()) delay(30);
-                            break;
+            if (!enableTTSChunking) {
+                if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
+                if (llm.downloadTTS(textToSay, network, "/speech.mp3", ttsVoice)) {
+                    speaker.playSpeechFromFile("/speech.mp3");
+                    isSpeaking = true;
+                    lv_timer_handler();
+                    if (settings.enableInterrupt) setInterruptMode(true);
+                    unsigned long playbackStart = millis();
+                    while(speaker.isRunning()) {
+                        if (settings.enableInterrupt) {
+                            bool triggered = speech.detectWakeWord(wakeThreshold);
+                            if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                                speaker.stop();
+                                speaker.playSpeechFromFile(CHIME_FILENAME);
+                                while(speaker.isRunning()) delay(30);
+                                break;
                             }
-                        delay(5);
-                    } else {
-                        delay(50);
+                            delay(5);
+                        } else {
+                            delay(50);
+                        }
                     }
+                    if (settings.enableInterrupt) setInterruptMode(false);
+                    isSpeaking = false;
+                } else {
+                    display.showResponse("TTS Failed");
                 }
-                if (settings.enableInterrupt) setInterruptMode(false);
-                isSpeaking = false;
             } else {
-                display.showResponse("TTS Failed");
+                playChunkedTTS(textToSay);
             }
             display.showStatus("Ready");
           }
+        } else if (inputBuffer == "/factory_reset") {
+          performFactoryReset();
+          Serial.println("Rebooting now...");
+          delay(1000);
+          ESP.restart();
         } else if (inputBuffer == "/test_mic" && settings.debugMode) {
           Serial.println("Testing Microphone (5s recording)...");
           display.showMainUI(ttsVoice, settings.volume, voiceOptions);
@@ -1489,11 +1608,37 @@ void handleSerialCommands() {
 
           display.showResponse("Speaking...");
           
-          // Download TTS to file, then play
-          if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
-              speaker.playSpeechFromFile("/speech.mp3");
-              isSpeaking = true;
-              lv_timer_handler();
+          if (!enableTTSChunking && answer != "Interrupted by user") {
+              if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
+              // Download TTS to file, then play
+              if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
+                  speaker.playSpeechFromFile("/speech.mp3");
+                  isSpeaking = true;
+                  lv_timer_handler();
+                  if (settings.enableInterrupt) setInterruptMode(true);
+                  unsigned long playbackStart = millis();
+                  while(speaker.isRunning()) {
+                      if (settings.enableInterrupt) {
+                          bool triggered = speech.detectWakeWord(wakeThreshold);
+                          if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                              speaker.stop();
+                              speaker.playSpeechFromFile(CHIME_FILENAME);
+                              while(speaker.isRunning()) delay(30);
+                              flushAecBuffer();
+                              break;
+                          }
+                          delay(5);
+                      } else {
+                          delay(50);
+                      }
+                  }
+                  if (settings.enableInterrupt) setInterruptMode(false);
+                  isSpeaking = false;
+              } else {
+                  display.showResponse("TTS Failed");
+              }
+          } else {
+              // Wait for chunked TTS to finish playing
               if (settings.enableInterrupt) setInterruptMode(true);
               unsigned long playbackStart = millis();
               while(speaker.isRunning()) {
@@ -1503,6 +1648,7 @@ void handleSerialCommands() {
                           speaker.stop();
                           speaker.playSpeechFromFile(CHIME_FILENAME);
                           while(speaker.isRunning()) delay(30);
+                          flushAecBuffer();
                           break;
                       }
                       delay(5);
@@ -1512,8 +1658,6 @@ void handleSerialCommands() {
               }
               if (settings.enableInterrupt) setInterruptMode(false);
               isSpeaking = false;
-          } else {
-              display.showResponse("TTS Failed");
           }
           isProcessing = false;
           display.showStatus("Ready");
@@ -1687,7 +1831,22 @@ void setup() {
   adminPassword = adminPrefs.getString("pass", "");
   ttsVoice = adminPrefs.getString("voice", "alloy");
   wakeThreshold = adminPrefs.getFloat("wake_thresh", 0.8);
+  ttsSpeed = adminPrefs.getFloat("tts_speed", 1.0);
   setInputBalance(settings.inputBalance);
+  
+  enableTTSChunking = adminPrefs.getBool("tts_chunk", false);
+  enableBME680 = adminPrefs.getBool("en_bme", false);
+  if (enableBME680) {
+      if (bme.begin(0x77) || bme.begin(0x76)) {
+          bme.setTemperatureOversampling(BME680_OS_8X);
+          bme.setHumidityOversampling(BME680_OS_2X);
+          bme.setPressureOversampling(BME680_OS_4X);
+          bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
+          bme.setGasHeater(320, 150);
+          bmeReady = true;
+      }
+  }
+  
   if (adminPassword == "") {
       display.showAdminConfig();
       while (adminPassword == "") {
@@ -2074,6 +2233,15 @@ void loop() {
           lastWeatherUpdate = millis();
       }
   }
+
+  static unsigned long lastBmeRead = 0;
+  if (bmeReady && (millis() - lastBmeRead > 10000)) {
+      lastBmeRead = millis();
+      if (bme.performReading() && settings.debugMode) {
+          Serial.printf("BME680 -> Temp: %.1fC | Hum: %.1f%% | Pres: %.1fhPa | Gas: %.1fKOhms\n", 
+                        bme.temperature, bme.humidity, bme.pressure / 100.0, bme.gas_resistance / 1000.0);
+      }
+  }
   
   // Timer State Machine
   if (g_pendingTimerSeconds > 0) {
@@ -2124,6 +2292,8 @@ void loop() {
                       while(speaker.isRunning()) delay(30);
                       interrupted = true;
                       timerRinging = false; // Cancel timer via interrupt
+                            lastInterruptTime = millis();
+                            flushAecBuffer();
                       break;
                   }
                   delay(5);
@@ -2155,6 +2325,7 @@ void loop() {
           if (timerRinging) {
               timerRinging = false; // Cancel timer if they use the wake word during silence
               display.showStatus("Ready"); // Just return to standby
+                    flushAecBuffer();
           } else {
               onVoiceChange("TALK_ACTION");
           }
