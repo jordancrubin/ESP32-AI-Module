@@ -157,7 +157,17 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     doc["stream"] = true;
     doc["messages"] = _history;
     
-    if (settings.enableWebSearch) {
+    // Check for web search trigger phrases in the prompt
+    String lowerPrompt = prompt;
+    lowerPrompt.toLowerCase();
+    bool useWebSearch = (lowerPrompt.indexOf("search the web") != -1) ||
+                        (lowerPrompt.indexOf("do a search") != -1) ||
+                        (lowerPrompt.indexOf("check online") != -1) ||
+                        (lowerPrompt.indexOf("search online") != -1) ||
+                        (lowerPrompt.indexOf("look up online") != -1) ||
+                        (lowerPrompt.indexOf("search the internet") != -1);
+
+    if (useWebSearch) {
         doc["features"]["web_search"] = true;
         
         // Dynamically append web search rules to the system prompt for this request

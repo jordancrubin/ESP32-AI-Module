@@ -28,11 +28,10 @@ SettingsManager::SettingsManager() {
     strlcpy(systemPrompt, "You are a helpful AI assistant running on an ESP32-S3.", sizeof(systemPrompt));
     ttsProvider = 0; // Default to OpenWebUI
     ttsUrl[0] = '\0';
-    enableWebSearch = false; // Default to false
     enableMemory = false;
     enableInterrupt = false;
     aecDelay = 640; // Default ~40ms
-    aecAttenuation = 4; // Default /4 (75% attenuation)
+    aecAttenuation = 75; // Default 75% attenuation
     aecCutoff = 1000; // Default 1000 raw amplitude
     aecIgnore = 3000; // Default 3000ms ignore window
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
@@ -63,7 +62,6 @@ void SettingsManager::load() {
     if (prefs.isKey("sys_prompt")) prefs.getString("sys_prompt", systemPrompt, sizeof(systemPrompt));
     ttsProvider = prefs.getInt("tts_prov", ttsProvider);
     if (prefs.isKey("tts_url")) prefs.getString("tts_url", ttsUrl, sizeof(ttsUrl));
-    enableWebSearch = prefs.getBool("web_srch", enableWebSearch);
     enableMemory = prefs.getBool("mem_en", enableMemory);
     enableInterrupt = prefs.getBool("int_en", enableInterrupt);
     aecDelay = prefs.getInt("aec_dly", aecDelay);
@@ -97,7 +95,6 @@ void SettingsManager::save() {
     prefs.putString("sys_prompt", systemPrompt);
     prefs.putInt("tts_prov", ttsProvider);
     prefs.putString("tts_url", ttsUrl);
-    prefs.putBool("web_srch", enableWebSearch);
     prefs.putBool("mem_en", enableMemory);
     prefs.putBool("int_en", enableInterrupt);
     prefs.putInt("aec_dly", aecDelay);

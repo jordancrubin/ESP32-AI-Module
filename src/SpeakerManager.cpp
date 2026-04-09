@@ -18,7 +18,7 @@ extern SpeechManager speech;
 using namespace libhelix;
 
 static File audioFile;
-static float s_volume = 1.0f;
+static int32_t s_volume_int = 256;
 static i2s_chan_handle_t s_tx_handle = NULL;
 static i2s_std_config_t s_i2s_std_cfg; // Store the I2S standard config
 static bool isWav = false;
@@ -37,19 +37,21 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
         for (size_t i = 0; i < len / 2; i++) {
             int32_t l = pcm_buffer[i * 2];
             int32_t r = pcm_buffer[i * 2 + 1];
-            pcm_buffer[i] = (int16_t)((l + r) / 2);
+            pcm_buffer[i] = (int16_t)((l + r) >> 1);
         }
         len /= 2; // Update length to reflect mono samples
     }
 
     // 1. Apply Volume & Fade-in
     for (size_t i = 0; i < len; i++) {
-        float fade = 1.0f;
+        int32_t fade = 256;
         if (s_fade_samples < FADE_LEN) {
-            fade = (float)s_fade_samples / FADE_LEN;
+            fade = (s_fade_samples * 256) / FADE_LEN;
             s_fade_samples++;
         }
-        pcm_buffer[i] = (int16_t)(pcm_buffer[i] * s_volume * fade);
+        int32_t sample = pcm_buffer[i];
+        sample = (sample * s_volume_int * fade) >> 16;
+        pcm_buffer[i] = (int16_t)sample;
     }
 
     // 4. Feed AEC Reference (BEFORE I2S Write to prevent starvation)
@@ -71,7 +73,7 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
             // Sample 2: Interpolate (1.5 -> 1)
             // We take average of index 1 and 2
             if (i + 2 < len) {
-                int32_t val = ((int32_t)pcm_buffer[i+1] + (int32_t)pcm_buffer[i+2]) / 2;
+                int32_t val = ((int32_t)pcm_buffer[i+1] + (int32_t)pcm_buffer[i+2]) >> 1;
                 resample_buff[new_len++] = (int16_t)val;
             }
         }
@@ -145,8 +147,8 @@ void SpeakerManager::begin() {
 }
 
 void SpeakerManager::setVolume(int volume) {
-    // Map 0-21 (old range) to 0.0 - 1.0
-    s_volume = (float)volume / 21.0f;
+    // Map 0-21 (old range) to 0-256 (fixed point integer math)
+    s_volume_int = (volume * 256) / 21;
 }
 
 void SpeakerManager::playSpeechFromFile(const char* filename) {
@@ -214,13 +216,8 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
         s_mp3_started = true;
     }
     
-    // Reset stream
-    if (audioFile) audioFile.close();
-    audioFile = LittleFS.open(filename, "r");
-    
-    if (isWav && audioFile) {
-        // Skip WAV header (44 bytes)
-        audioFile.seek(44);
+    if (audioFile && !isWav) {
+        audioFile.seek(0); // Reset to beginning for MP3s (WAV is already at byte 44)
     }
     
     _isPlaying = true;
@@ -258,12 +255,14 @@ void SpeakerManager::loop() {
                         
                         // Apply Volume & Fade-in
                         for (size_t i = 0; i < samples; i++) {
-                            float fade = 1.0f;
+                            int32_t fade = 256;
                             if (s_fade_samples < FADE_LEN) {
-                                fade = (float)s_fade_samples / FADE_LEN;
+                                fade = (s_fade_samples * 256) / FADE_LEN;
                                 s_fade_samples++;
                             }
-                            pcm[i] = (int16_t)(pcm[i] * s_volume * fade);
+                            int32_t sample = pcm[i];
+                            sample = (sample * s_volume_int * fade) >> 16;
+                            pcm[i] = (int16_t)sample;
                         }
                         
                         // Feed AEC (BEFORE I2S Write)
@@ -282,7 +281,7 @@ void SpeakerManager::loop() {
                                 
                                 // Sample 2: Interpolate
                                 if (i + 2 < samples) {
-                                    int32_t val = ((int32_t)pcm[i+1] + (int32_t)pcm[i+2]) / 2;
+                                    int32_t val = ((int32_t)pcm[i+1] + (int32_t)pcm[i+2]) >> 1;
                                     resample_buff[new_len++] = (int16_t)val;
                                 }
                             }

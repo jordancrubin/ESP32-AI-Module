@@ -32,6 +32,12 @@ extern bool timerActive;
 extern bool timerRinging;
 extern unsigned long timerStartTime;
 extern uint32_t timerDurationMs;
+extern void getAudioLevels(int* l, int* r);
+
+// BME680 Globals
+extern bool enableBME680;
+extern float g_currentVocKOhms;
+extern int vocAlarmThreshold;
 
 // Global state for Clock/Idle handling
 static String g_lastVoice = "alloy";
@@ -189,6 +195,10 @@ struct ClockWidgets {
     lv_obj_t* timerCont;
     SevenSegmentDigit tm1, tm2, ts1, ts2;
     lv_obj_t* timerColon[2];
+    
+    lv_obj_t* vocCont;
+    lv_obj_t* vocBar;
+    lv_obj_t* vocLabel;
 };
 
 static ClockWidgets g_clockWidgets;
@@ -438,6 +448,18 @@ static void clock_update_cb(lv_timer_t * t) {
             lv_label_set_text_fmt(g_clockWidgets.weatherLabel, "%s %s", static_dm->_weatherTemp, static_dm->_weatherDesc);
         }
     }
+
+    // Update VOC Bar if it exists
+    if (enableBME680 && g_clockWidgets.vocBar) {
+        lv_bar_set_value(g_clockWidgets.vocBar, (int)g_currentVocKOhms, LV_ANIM_ON);
+        if (g_currentVocKOhms < vocAlarmThreshold) {
+            lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_RED), LV_PART_INDICATOR);
+        } else if (g_currentVocKOhms < (vocAlarmThreshold * 2)) {
+            lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_ORANGE), LV_PART_INDICATOR);
+        } else {
+            lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_GREEN), LV_PART_INDICATOR);
+        }
+    }
 }
 
 // Callback when Clock screen is touched
@@ -602,6 +624,34 @@ static void showClockScreen() {
         lv_obj_align(g_clockWidgets.weatherLabel, LV_ALIGN_BOTTOM_LEFT, 10, -10);
     } else {
         g_clockWidgets.weatherLabel = nullptr;
+    }
+
+    // VOC / Air Quality Indicator (Bottom Center)
+    if (enableBME680) {
+        g_clockWidgets.vocCont = lv_obj_create(lv_scr_act());
+        lv_obj_set_size(g_clockWidgets.vocCont, 100, 30);
+        lv_obj_align(g_clockWidgets.vocCont, LV_ALIGN_BOTTOM_MID, 0, -10);
+        lv_obj_set_style_bg_opa(g_clockWidgets.vocCont, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(g_clockWidgets.vocCont, 0, 0);
+        lv_obj_set_style_pad_all(g_clockWidgets.vocCont, 0, 0);
+        lv_obj_clear_flag(g_clockWidgets.vocCont, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(g_clockWidgets.vocCont, LV_OBJ_FLAG_EVENT_BUBBLE);
+        
+        g_clockWidgets.vocLabel = lv_label_create(g_clockWidgets.vocCont);
+        lv_label_set_text(g_clockWidgets.vocLabel, "AIR");
+        lv_obj_set_style_text_color(g_clockWidgets.vocLabel, lv_color_make(150, 150, 150), 0);
+        lv_obj_set_style_text_font(g_clockWidgets.vocLabel, &lv_font_montserrat_14, 0);
+        lv_obj_align(g_clockWidgets.vocLabel, LV_ALIGN_LEFT_MID, 0, 0);
+        
+        g_clockWidgets.vocBar = lv_bar_create(g_clockWidgets.vocCont);
+        lv_obj_set_size(g_clockWidgets.vocBar, 60, 10);
+        lv_obj_align(g_clockWidgets.vocBar, LV_ALIGN_RIGHT_MID, 0, 0);
+        lv_bar_set_range(g_clockWidgets.vocBar, 0, 300); // Typical 0-300 kOhm
+        lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_color_make(40, 40, 40), LV_PART_MAIN);
+    } else {
+        g_clockWidgets.vocCont = nullptr;
+        g_clockWidgets.vocBar = nullptr;
+        g_clockWidgets.vocLabel = nullptr;
     }
 
     // RUBINTECH Logo (Bottom Right)
@@ -1769,27 +1819,42 @@ static void showMicAecConfig() {
         }
     }, LV_EVENT_ALL, kb);
 
-    // AEC Attenuation
+    // AEC Attenuation (%)
     lv_obj_t * label_att = lv_label_create(cont);
-    lv_label_set_text(label_att, "AEC Attenuation Divisor");
+    lv_label_set_text(label_att, "AEC Attenuation (%)");
     lv_obj_set_style_text_color(label_att, lv_color_make(200, 200, 200), 0);
-    lv_obj_t * dd_att = lv_dropdown_create(cont);
-    lv_dropdown_set_options(dd_att, "/1 (0%)\n/2 (50%)\n/4 (75%)\n/8 (87%)\n/16 (93%)\n/32 (96%)");
-    lv_obj_set_width(dd_att, 270);
-    int attIdx = 0;
-    if (settings.aecAttenuation >= 32) attIdx = 5;
-    else if (settings.aecAttenuation >= 16) attIdx = 4;
-    else if (settings.aecAttenuation >= 8) attIdx = 3;
-    else if (settings.aecAttenuation >= 4) attIdx = 2;
-    else if (settings.aecAttenuation >= 2) attIdx = 1;
-    lv_dropdown_set_selected(dd_att, attIdx);
-    lv_obj_add_event_cb(dd_att, [](lv_event_t * e){
-        int idx = lv_dropdown_get_selected(lv_event_get_target(e));
-        int val = 1 << idx;
-        settings.aecAttenuation = val;
-        extern void setAecAttenuation(int atten);
-        setAecAttenuation(val);
-    }, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_t * ta_att = lv_textarea_create(cont);
+    lv_textarea_set_one_line(ta_att, true);
+    lv_textarea_set_accepted_chars(ta_att, "0123456789");
+    lv_textarea_set_text(ta_att, String(settings.aecAttenuation).c_str());
+    lv_obj_set_width(ta_att, 270);
+    lv_obj_add_event_cb(ta_att, [](lv_event_t * e){
+        lv_event_code_t code = lv_event_get_code(e);
+        lv_obj_t * ta = lv_event_get_target(e);
+        lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
+        lv_obj_t * cont = lv_obj_get_parent(ta);
+
+        if (code == LV_EVENT_FOCUSED) {
+            lv_keyboard_set_textarea(kb, ta);
+            lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(kb);
+            lv_obj_set_height(cont, 90);
+            lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
+            lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+        } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+            lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_height(cont, 170);
+            lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
+            if (code == LV_EVENT_READY) lv_obj_clear_state(ta, LV_STATE_FOCUSED);
+            int val = String(lv_textarea_get_text(ta)).toInt();
+            if (val > 100) val = 100;
+            if (val < 0) val = 0;
+            settings.aecAttenuation = val;
+            extern void setAecAttenuation(int atten);
+            setAecAttenuation(val);
+            lv_textarea_set_text(ta, String(val).c_str()); // Correct it in UI if out of bounds
+        }
+    }, LV_EVENT_ALL, kb);
 
     // AEC Delay
     lv_obj_t * label_dly = lv_label_create(cont);
@@ -1827,8 +1892,16 @@ static void showMicAecConfig() {
 }
 
 void DisplayManager::updateAudioVUMeter(int l, int r) {
-    if (audio_vu_l) lv_bar_set_value(audio_vu_l, l, LV_ANIM_OFF);
-    if (audio_vu_r) lv_bar_set_value(audio_vu_r, r, LV_ANIM_OFF);
+    if (!audio_vu_l && !audio_vu_r) return; // Completely skip if menu is not in focus
+    
+    static unsigned long lastVuUpdate = 0;
+    if (millis() - lastVuUpdate > 40) { // Throttle to ~25 FPS when active
+        lastVuUpdate = millis();
+        int actual_l, actual_r;
+        getAudioLevels(&actual_l, &actual_r); // Only fetch audio data if we are going to draw it!
+        if (audio_vu_l) lv_bar_set_value(audio_vu_l, actual_l, LV_ANIM_OFF);
+        if (audio_vu_r) lv_bar_set_value(audio_vu_r, actual_r, LV_ANIM_OFF);
+    }
 }
 
 void DisplayManager::setBalanceCallback(BalanceCallback cb) {

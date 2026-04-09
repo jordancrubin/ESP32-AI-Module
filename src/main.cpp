@@ -39,7 +39,11 @@ String ttsVoice = "alloy";
 String voiceOptions = "alloy";
 String modelOptions = "";
 float wakeThreshold = 0.8;
-float ttsSpeed = 1.0;
+float ttsSpeed = 0.8;
+
+float g_currentVocKOhms = 0.0;
+int vocAlarmThreshold = 50;
+unsigned long lastVocAlarmTime = 0;
 
 bool enableBME680 = false;
 bool enableTTSChunking = false;
@@ -58,6 +62,7 @@ String pendingPass = "";
 bool isProcessing = false;
 static bool stopRequested = false;
 extern bool g_isSubMenuActive;
+unsigned long g_audioPlaybackStart = 0;
 
 // External functions from SpeechManager.cpp
 extern void setAecDebug(bool enable);
@@ -126,12 +131,11 @@ bool playChunkedTTS(String text) {
     // 1. Wait for previous chunk to finish playing, handle interrupts
     bool interrupted = false;
     if (settings.enableInterrupt) setInterruptMode(true);
-    unsigned long playbackStart = millis();
     
     while (speaker.isRunning()) {
         if (settings.enableInterrupt) {
             bool triggered = speech.detectWakeWord(wakeThreshold);
-            if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+            if (triggered && (millis() - g_audioPlaybackStart > settings.aecIgnore)) {
                 if (settings.debugMode) Serial.println("Playback interrupted by user!");
                 speaker.stop();
                 speaker.playSpeechFromFile(CHIME_FILENAME);
@@ -142,6 +146,7 @@ bool playChunkedTTS(String text) {
             }
             delay(5);
         } else {
+            flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
             delay(50);
         }
     }
@@ -150,10 +155,10 @@ bool playChunkedTTS(String text) {
 
     // 2. Download the next chunk
     String filename = "/speech" + String(fileToggle) + ".mp3";
-    if (LittleFS.exists(filename)) LittleFS.remove(filename);
     
     if (llm.downloadTTS(text, network, filename.c_str(), ttsVoice)) {
         speaker.playSpeechFromFile(filename.c_str());
+        if (!isSpeaking) g_audioPlaybackStart = millis(); // Only reset ignore window on first chunk
         isSpeaking = true;
         fileToggle = 1 - fileToggle; // alternate between 0 and 1
     }
@@ -259,23 +264,20 @@ void onVoiceChange(String voice) {
                     }
 
                     if (!enableTTSChunking && answer != "Interrupted by user") {
-                        // Ensure any previous TTS file is removed to free space before downloading
-                        if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
-                        
                         if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
                             speaker.playSpeechFromFile("/speech.mp3");
+                            if (!isSpeaking) g_audioPlaybackStart = millis();
                             isSpeaking = true;
                             lv_timer_handler(); // Update UI once to show "Speaking"
                             
                             bool interrupted = false;
                             if (settings.enableInterrupt) setInterruptMode(true);
-                            unsigned long playbackStart = millis();
 
                             // Wait for playback to finish, or poll for interruptions
                             while (speaker.isRunning()) {
                                 if (settings.enableInterrupt) {
                                     bool triggered = speech.detectWakeWord(wakeThreshold);
-                                    if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                                    if (triggered && (millis() - g_audioPlaybackStart > settings.aecIgnore)) {
                                         if (settings.debugMode) Serial.println("Playback interrupted by user!");
                                         speaker.stop();
                                         speaker.playSpeechFromFile(CHIME_FILENAME);
@@ -286,6 +288,7 @@ void onVoiceChange(String voice) {
                                     }
                                     delay(5); // Fast loop to drain AEC buffer safely
                                 } else {
+                                    flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
                                     delay(50);
                                 }
                             }
@@ -302,11 +305,11 @@ void onVoiceChange(String voice) {
                         // Chunking mode (Wait for last chunk to finish gracefully)
                         bool interrupted = false;
                         if (settings.enableInterrupt) setInterruptMode(true);
-                        unsigned long playbackStart = millis();
                         while (speaker.isRunning()) {
                             if (settings.enableInterrupt) {
                                 bool triggered = speech.detectWakeWord(wakeThreshold);
-                                if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                            if (triggered && (millis() - g_audioPlaybackStart > settings.aecIgnore)) {
+                                if (settings.debugMode) Serial.println("Playback interrupted by user!");
                                     speaker.stop();
                                     speaker.playSpeechFromFile(CHIME_FILENAME);
                                     while(speaker.isRunning()) delay(30);
@@ -316,6 +319,7 @@ void onVoiceChange(String voice) {
                                 }
                                 delay(5);
                             } else {
+                                flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
                                 delay(50);
                             }
                         }
@@ -505,6 +509,10 @@ void handleWebRoot() {
     html += "ul.diag-list li span{font-weight:500;color:#495057;}";
     html += "ul.diag-list li a{color:#008CBA;text-decoration:none;font-weight:600;padding:4px 8px;border-radius:4px;background:#e9ecef;transition:background 0.2s;}";
     html += "ul.diag-list li a:hover{background:#dee2e6;}";
+    html += ".modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);}";
+    html += ".modal-content{background-color:#fff;margin:15% auto;padding:25px;border-radius:8px;width:80%;max-width:400px;text-align:center;box-shadow:0 4px 15px rgba(0,0,0,0.2);}";
+    html += ".modal-content h3{margin-top:0;}";
+    html += ".close-btn{background-color:#008CBA;color:white;border:none;padding:10px 20px;border-radius:5px;cursor:pointer;margin-top:15px;font-size:16px;}";
     html += "</style>";
     html += "<script>";
     html += "function openTab(evt, tabName) {";
@@ -517,8 +525,39 @@ void handleWebRoot() {
     html += "  evt.currentTarget.classList.add('active');";
     html += "  document.getElementById('saveBtnContainer').style.display = (tabName === 'Diagnostics') ? 'none' : 'block';";
     html += "}";
+    html += "document.addEventListener('DOMContentLoaded', function() {";
+    html += "  document.getElementById('configForm').addEventListener('submit', function(e) {";
+    html += "    e.preventDefault();";
+    html += "    document.getElementById('saveModal').style.display='block';";
+    html += "    document.getElementById('modalTitle').innerText='Saving...';";
+    html += "    document.getElementById('modalTitle').style.color='#333';";
+    html += "    document.getElementById('modalText').innerText='Please wait while settings are verified. This may take a few seconds.';";
+    html += "    document.getElementById('modalClose').style.display='none';";
+    html += "    var formData = new URLSearchParams(new FormData(this));";
+    html += "    fetch('/save', { method: 'POST', body: formData })";
+    html += "    .then(response => response.text())";
+    html += "    .then(data => {";
+    html += "      document.getElementById('modalClose').style.display='inline-block';";
+    html += "      if (data === 'SUCCESS') {";
+    html += "        document.getElementById('modalTitle').innerText='Saved & Verified!';";
+    html += "        document.getElementById('modalTitle').style.color='#28a745';";
+    html += "        document.getElementById('modalText').innerText='Connection successful and settings saved.';";
+    html += "      } else {";
+    html += "        document.getElementById('modalTitle').innerText='Saved (Verification Failed)';";
+    html += "        document.getElementById('modalTitle').style.color='#dc3545';";
+    html += "        document.getElementById('modalText').innerText='Settings saved, but API check failed: ' + data;";
+    html += "      }";
+    html += "    }).catch(err => {";
+    html += "      document.getElementById('modalClose').style.display='inline-block';";
+    html += "      document.getElementById('modalTitle').innerText='Error';";
+    html += "      document.getElementById('modalTitle').style.color='#dc3545';";
+    html += "      document.getElementById('modalText').innerText='Failed to communicate with device.';";
+    html += "    });";
+    html += "  });";
+    html += "});";
     html += "</script>";
     html += "</head><body>";
+    html += "<div id='saveModal' class='modal'><div class='modal-content'><h3 id='modalTitle'></h3><p id='modalText'></p><button class='close-btn' id='modalClose' onclick='document.getElementById(\"saveModal\").style.display=\"none\"'>OK</button></div></div>";
     html += "<div class='container'>";
     html += "<h2><img src='/logo.png' style='height:40px; vertical-align:middle; margin-right:15px;' onerror='this.style.display=\"none\"'>ESP32 AI Configuration</h2>";
 
@@ -531,7 +570,7 @@ void handleWebRoot() {
     html += "</div>";
 
     // Open Form
-    html += "<form action='/save' method='POST'>";
+    html += "<form id='configForm'>";
 
     // TAB: General
     html += "<div id='General' class='tab-content active'>";
@@ -548,7 +587,6 @@ void handleWebRoot() {
     html += "</div>";
     
     html += "<div class='card'><h3>AI Features</h3>";
-    html += "<div class='checkbox-group'><input type='checkbox' id='webSearch' name='webSearch' value='1'" + String(settings.enableWebSearch ? " checked" : "") + "><label for='webSearch'>Enable Web Search</label></div>";
     html += "<div class='checkbox-group'><input type='checkbox' id='memory' name='memory' value='1'" + String(settings.enableMemory ? " checked" : "") + "><label for='memory'>Enable Conversation Memory</label></div>";
     html += "<label>Knowledge ID (RAG)</label><input type='text' name='knowledgeId' value='" + String(settings.knowledgeId) + "' placeholder='e.g., collection_id'>";
     html += "<small>OpenWebUI Collection/File ID to enable document context.</small>";
@@ -573,8 +611,8 @@ void handleWebRoot() {
     html += "<small style='margin-top:-5px;'>Allows you to interrupt the AI by speaking over it.</small><br>";
     html += "<label>AEC Target Delay (Samples)</label><input type='number' name='aecDelay' value='" + String(settings.aecDelay) + "' step='10' min='160' max='1600'>";
     html += "<small>Echo alignment. Best tuned via /tune_aec command.</small>";
-    html += "<label>AEC Attenuation (Divisor)</label><input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='1' max='32'>";
-    html += "<small>Reduces mic sensitivity during AI playback (2 = 50%, 4 = 75%, 16 = 93%).</small>";
+    html += "<label>AEC Attenuation (%)</label><input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='0' max='100'>";
+    html += "<small>Reduces mic sensitivity during AI playback (e.g., 75%).</small>";
     html += "<label>AEC Barge-in Cutoff</label><input type='number' name='aecCutoff' value='" + String(settings.aecCutoff) + "' min='0' max='32767'>";
     html += "<small>Minimum volume required to interrupt the AI (Blocks residual echo).</small>";
     html += "<label>AEC Interrupt Ignore (ms)</label><input type='number' name='aecIgnore' value='" + String(settings.aecIgnore) + "' min='0' max='10000' step='100'>";
@@ -616,6 +654,8 @@ void handleWebRoot() {
     html += "<div class='checkbox-group'><input type='checkbox' id='debugMode' name='debugMode' value='1'" + String(settings.debugMode ? " checked" : "") + "><label for='debugMode'>Enable Debug Logging (Serial 115200)</label></div>";
     html += "<div class='checkbox-group'><input type='checkbox' id='enableBME680' name='enableBME680' value='1'" + String(enableBME680 ? " checked" : "") + "><label for='enableBME680'>Enable BME680 Sensor (I2C)</label></div>";
     html += "<div class='checkbox-group'><input type='checkbox' id='ttsChunking' name='ttsChunking' value='1'" + String(enableTTSChunking ? " checked" : "") + "><label for='ttsChunking'>Enable TTS Sentence Chunking (Fast Audio Response)</label></div>";
+    html += "<label>VOC Alarm Threshold (kOhms)</label><input type='number' name='vocAlarmThreshold' value='" + String(vocAlarmThreshold) + "' min='0' max='500'>";
+    html += "<small>Triggers voice alarm if BME680 gas resistance drops below this value. Lower = worse air quality.</small>";
     html += "</div>";
     html += "</div>";
 
@@ -715,7 +755,7 @@ void handleWebSave() {
 
     if (server.hasArg("aecAttenuation")) {
         int val = server.arg("aecAttenuation").toInt();
-        if (val >= 1 && val <= 32) {
+        if (val >= 0 && val <= 100) {
             settings.aecAttenuation = val;
             setAecAttenuation(val);
         }
@@ -749,7 +789,6 @@ void handleWebSave() {
     }
 
     settings.debugMode = server.hasArg("debugMode");
-    settings.enableWebSearch = server.hasArg("webSearch");
     settings.enableMemory = server.hasArg("memory");
     settings.enableInterrupt = server.hasArg("interrupt");
 
@@ -779,6 +818,12 @@ void handleWebSave() {
         adminPrefs.putBool("tts_chunk", enableTTSChunking);
     }
 
+    if (server.hasArg("vocAlarmThreshold")) {
+        int val = server.arg("vocAlarmThreshold").toInt();
+        vocAlarmThreshold = val;
+        adminPrefs.putInt("voc_thresh", vocAlarmThreshold);
+    }
+
     // Save to NVRAM immediately
     strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
     strlcpy(settings.apiUrl, newApiUrl.c_str(), sizeof(settings.apiUrl));
@@ -805,10 +850,9 @@ void handleWebSave() {
     String models = llm.getModels(network);
 
     if (models.startsWith("Error")) {
-        String html = "<html><body><h1>Saved (Verification Failed)</h1><p>Settings saved, but API check failed: " + models + "</p><a href='/'>Go Back</a></body></html>";
-        server.send(200, "text/html", html);
+        server.send(200, "text/plain", models);
     } else {
-        server.send(200, "text/html", "<html><body><h1>Saved & Verified!</h1><p>Connection successful.</p><a href='/'>Back</a></body></html>");
+        server.send(200, "text/plain", "SUCCESS");
         if (settings.debugMode) Serial.println("Settings updated and verified via Web Interface");
     }
 }
@@ -956,7 +1000,7 @@ void testAEC() {
                 int startSample = (int)(quiet_time * sampleRate);
                 long max_residual_amp = 0;
                 for (int i = startSample; i < totalSamples; i++) {
-                    long val = abs(samples[i]) / settings.aecAttenuation; // Apply attenuation to match detection logic
+                    long val = (abs(samples[i]) * (100 - settings.aecAttenuation)) / 100; // Apply attenuation to match detection logic
                     if (val > max_residual_amp) max_residual_amp = val;
                 }
                 
@@ -1332,19 +1376,17 @@ void tuneAEC() {
     
     currentStep++;
 
-    // Mathematically determine best attenuation to bring residual under 900
-    int testAttenuations[] = {2, 4, 8, 16, 32};
-    int bestAtten = 32; // Default to safest
-    for (int i = 0; i < 5; i++) {
-        if ((max_raw_residual / testAttenuations[i]) <= 900) {
-            bestAtten = testAttenuations[i];
-            break;
-        }
+    // Mathematically determine best attenuation percentage to bring residual under 900
+    int bestAtten = 0;
+    if (max_raw_residual > 900) {
+        bestAtten = 100 - (90000 / max_raw_residual);
+        if (bestAtten < 0) bestAtten = 0;
+        if (bestAtten > 100) bestAtten = 100;
     }
     
-    logPrintf("Calculated Optimal Attenuation: %d%%\n", 100 - (100 / bestAtten));
+    logPrintf("Calculated Optimal Attenuation: %d%%\n", bestAtten);
     
-    long final_max_amp = max_raw_residual / bestAtten;
+    long final_max_amp = (max_raw_residual * (100 - bestAtten)) / 100;
     logPrintf("Simulated Attenuated Max Amp: %ld\n", final_max_amp);
     
     int bestCutoff = final_max_amp + 800; // +800 safety margin
@@ -1352,13 +1394,13 @@ void tuneAEC() {
 
     Serial.println("\n----------------------------------");
     Serial.printf("Ultimate Best AEC Delay: %d samples\n", bestDelay);
-    Serial.printf("Ultimate Best Attenuation: %d%%\n", 100 - (100 / bestAtten));
+    Serial.printf("Ultimate Best Attenuation: %d%%\n", bestAtten);
     Serial.printf("Ultimate Best Cutoff: %d\n", bestCutoff);
     Serial.println("Saved to NVRAM and applied!");
 
     logPrintln("----------------------------------");
     logPrintf("Ultimate Best AEC Delay: %d samples\n", bestDelay);
-    logPrintf("Ultimate Best Attenuation: %d%%\n", 100 - (100 / bestAtten));
+    logPrintf("Ultimate Best Attenuation: %d%%\n", bestAtten);
     logPrintf("Ultimate Best Cutoff: %d\n", bestCutoff);
     logPrintln("Saved to NVRAM and applied!");
     
@@ -1375,7 +1417,7 @@ void tuneAEC() {
     settings.debugMode = prevDebug; // Restore debug mode
     
     // Display Final Results
-    String resultMsg = "Tuning Complete!\nBest Delay: " + String(bestDelay) + " samples\nAtten: " + String(100 - (100 / bestAtten)) + "% | Cutoff: " + String(bestCutoff);
+    String resultMsg = "Tuning Complete!\nBest Delay: " + String(bestDelay) + " samples\nAtten: " + String(bestAtten) + "% | Cutoff: " + String(bestCutoff);
     updateAecTuningUI(100, resultMsg.c_str());
     delay(5000);
     delay(15000); // Wait 15 seconds so the user can read the results before it clears
@@ -1442,10 +1484,9 @@ void handleSerialCommands() {
           Serial.printf("Mic Mode:   %d\n", settings.micMode);
           Serial.printf("Input Bal:  %d\n", settings.inputBalance);
           Serial.printf("AEC Delay:  %d samples\n", settings.aecDelay);
-          Serial.printf("AEC Atten:  %d%%\n", 100 - (100 / settings.aecAttenuation));
+          Serial.printf("AEC Atten:  %d%%\n", settings.aecAttenuation);
           Serial.printf("AEC Cutoff: %d\n", settings.aecCutoff);
           Serial.printf("Debug Mode: %s\n", settings.debugMode ? "ON" : "OFF");
-          Serial.printf("Web Search: %s\n", settings.enableWebSearch ? "ON" : "OFF");
           Serial.printf("Memory:     %s\n", settings.enableMemory ? "ON" : "OFF");
           Serial.printf("Interrupt:  %s\n", settings.enableInterrupt ? "ON" : "OFF");
           Serial.printf("Knowledge:  %s\n", settings.knowledgeId);
@@ -1506,17 +1547,17 @@ void handleSerialCommands() {
             display.showStatus("Direct TTS...");
             
             if (!enableTTSChunking) {
-                if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
                 if (llm.downloadTTS(textToSay, network, "/speech.mp3", ttsVoice)) {
                     speaker.playSpeechFromFile("/speech.mp3");
+                    if (!isSpeaking) g_audioPlaybackStart = millis();
                     isSpeaking = true;
                     lv_timer_handler();
                     if (settings.enableInterrupt) setInterruptMode(true);
-                    unsigned long playbackStart = millis();
                     while(speaker.isRunning()) {
                         if (settings.enableInterrupt) {
                             bool triggered = speech.detectWakeWord(wakeThreshold);
-                            if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                            if (triggered && (millis() - g_audioPlaybackStart > settings.aecIgnore)) {
+                                if (settings.debugMode) Serial.println("Playback interrupted by user!");
                                 speaker.stop();
                                 speaker.playSpeechFromFile(CHIME_FILENAME);
                                 while(speaker.isRunning()) delay(30);
@@ -1524,6 +1565,7 @@ void handleSerialCommands() {
                             }
                             delay(5);
                         } else {
+                            flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
                             delay(50);
                         }
                     }
@@ -1609,18 +1651,18 @@ void handleSerialCommands() {
           display.showResponse("Speaking...");
           
           if (!enableTTSChunking && answer != "Interrupted by user") {
-              if (LittleFS.exists("/speech.mp3")) LittleFS.remove("/speech.mp3");
               // Download TTS to file, then play
               if (llm.downloadTTS(answer, network, "/speech.mp3", ttsVoice)) {
                   speaker.playSpeechFromFile("/speech.mp3");
+                  if (!isSpeaking) g_audioPlaybackStart = millis();
                   isSpeaking = true;
                   lv_timer_handler();
                   if (settings.enableInterrupt) setInterruptMode(true);
-                  unsigned long playbackStart = millis();
                   while(speaker.isRunning()) {
                       if (settings.enableInterrupt) {
                           bool triggered = speech.detectWakeWord(wakeThreshold);
-                          if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                          if (triggered && (millis() - g_audioPlaybackStart > settings.aecIgnore)) {
+                              if (settings.debugMode) Serial.println("Playback interrupted by user!");
                               speaker.stop();
                               speaker.playSpeechFromFile(CHIME_FILENAME);
                               while(speaker.isRunning()) delay(30);
@@ -1629,6 +1671,7 @@ void handleSerialCommands() {
                           }
                           delay(5);
                       } else {
+                          flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
                           delay(50);
                       }
                   }
@@ -1640,11 +1683,11 @@ void handleSerialCommands() {
           } else {
               // Wait for chunked TTS to finish playing
               if (settings.enableInterrupt) setInterruptMode(true);
-              unsigned long playbackStart = millis();
               while(speaker.isRunning()) {
                   if (settings.enableInterrupt) {
                       bool triggered = speech.detectWakeWord(wakeThreshold);
-                      if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                  if (triggered && (millis() - g_audioPlaybackStart > settings.aecIgnore)) {
+                      if (settings.debugMode) Serial.println("Playback interrupted by user!");
                           speaker.stop();
                           speaker.playSpeechFromFile(CHIME_FILENAME);
                           while(speaker.isRunning()) delay(30);
@@ -1653,6 +1696,7 @@ void handleSerialCommands() {
                       }
                       delay(5);
                   } else {
+                      flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
                       delay(50);
                   }
               }
@@ -1699,7 +1743,7 @@ void performFactoryReset() {
     settings.enableMemory = false;
     settings.enableInterrupt = false;
     settings.aecDelay = 640;
-    settings.aecAttenuation = 4;
+    settings.aecAttenuation = 75;
     settings.aecCutoff = 1000;
     settings.aecIgnore = 3000;
     strlcpy(settings.knowledgeId, "", sizeof(settings.knowledgeId));
@@ -1831,11 +1875,16 @@ void setup() {
   adminPassword = adminPrefs.getString("pass", "");
   ttsVoice = adminPrefs.getString("voice", "alloy");
   wakeThreshold = adminPrefs.getFloat("wake_thresh", 0.8);
-  ttsSpeed = adminPrefs.getFloat("tts_speed", 1.0);
+  ttsSpeed = adminPrefs.getFloat("tts_speed", 0.8);
   setInputBalance(settings.inputBalance);
+  vocAlarmThreshold = adminPrefs.getInt("voc_thresh", 50);
   
   enableTTSChunking = adminPrefs.getBool("tts_chunk", false);
   enableBME680 = adminPrefs.getBool("en_bme", false);
+  
+  // Initialize I2C on pins 8 (SDA) and 3 (SCL)
+  Wire.begin(8, 3);
+
   if (enableBME680) {
       if (bme.begin(0x77) || bme.begin(0x76)) {
           bme.setTemperatureOversampling(BME680_OS_8X);
@@ -2220,10 +2269,8 @@ void loop() {
   if (!isSpeaking) {
     lv_timer_handler();
     
-    // Update VU Meter if active
-    int l, r;
-    getAudioLevels(&l, &r);
-    display.updateAudioVUMeter(l, r);
+    // Update VU Meter (Logic and throttling safely handled inside DisplayManager)
+    display.updateAudioVUMeter(0, 0);
   }
 
   // Hourly Weather Update
@@ -2235,11 +2282,43 @@ void loop() {
   }
 
   static unsigned long lastBmeRead = 0;
-  if (bmeReady && (millis() - lastBmeRead > 10000)) {
+  if (bmeReady && (millis() - lastBmeRead > 60000)) {
       lastBmeRead = millis();
-      if (bme.performReading() && settings.debugMode) {
-          Serial.printf("BME680 -> Temp: %.1fC | Hum: %.1f%% | Pres: %.1fhPa | Gas: %.1fKOhms\n", 
-                        bme.temperature, bme.humidity, bme.pressure / 100.0, bme.gas_resistance / 1000.0);
+      if (bme.performReading()) {
+          g_currentVocKOhms = bme.gas_resistance / 1000.0;
+          if (settings.debugMode) {
+              Serial.printf("BME680 -> Temp: %.1fC | Hum: %.1f%% | Pres: %.1fhPa | Gas: %.1fKOhms\n", 
+                            bme.temperature, bme.humidity, bme.pressure / 100.0, g_currentVocKOhms);
+          }
+          
+          // Voice Alarm Logic
+          if (g_currentVocKOhms > 0 && g_currentVocKOhms < vocAlarmThreshold) {
+              if (millis() - lastVocAlarmTime > 900000 || lastVocAlarmTime == 0) { // 15 minute cooldown between alarms
+                  if (!isSpeaking && !isProcessing && !isWebServerActive && !g_isSubMenuActive) {
+                      lastVocAlarmTime = millis(); // Only trigger cooldown if alarm actually plays!
+                      if (settings.debugMode) Serial.println("VOC Alarm Triggered!");
+                      String alarmText = "Warning. Indoor air quality has dropped below the configured threshold.";
+                      if (!LittleFS.exists("/voc_alarm.mp3")) {
+                          llm.downloadTTS(alarmText, network, "/voc_alarm.mp3", ttsVoice);
+                      }
+                      speaker.playSpeechFromFile("/voc_alarm.mp3");
+                      if (!isSpeaking) g_audioPlaybackStart = millis();
+                      isSpeaking = true;
+                      if (settings.enableInterrupt) setInterruptMode(true);
+                      while(speaker.isRunning()) {
+                          if (settings.enableInterrupt && speech.detectWakeWord(wakeThreshold) && (millis() - g_audioPlaybackStart > 800)) { 
+                              if (settings.debugMode) Serial.println("VOC Alarm interrupted!");
+                              speaker.stop(); speaker.playSpeechFromFile(CHIME_FILENAME); while(speaker.isRunning()) delay(30); flushAecBuffer(); break; }
+                          if (!settings.enableInterrupt) {
+                              flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
+                          }
+                          delay(5);
+                      }
+                      if (settings.enableInterrupt) setInterruptMode(false);
+                      isSpeaking = false;
+                  }
+              }
+          }
       }
   }
   
@@ -2277,16 +2356,17 @@ void loop() {
           }
           
           speaker.playSpeechFromFile("/timer.mp3");
+          if (!isSpeaking) g_audioPlaybackStart = millis();
           isSpeaking = true;
           
           if (settings.enableInterrupt) setInterruptMode(true);
-          unsigned long playbackStart = millis();
           bool interrupted = false;
           
           while(speaker.isRunning()) {
               if (settings.enableInterrupt) {
                   bool triggered = speech.detectWakeWord(wakeThreshold);
-                  if (triggered && (millis() - playbackStart > settings.aecIgnore)) {
+                  if (triggered && (millis() - g_audioPlaybackStart > 800)) {
+                      if (settings.debugMode) Serial.println("Timer playback interrupted!");
                       speaker.stop();
                       speaker.playSpeechFromFile(CHIME_FILENAME);
                       while(speaker.isRunning()) delay(30);
@@ -2298,6 +2378,7 @@ void loop() {
                   }
                   delay(5);
               } else {
+                      flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
                   delay(50);
               }
           }
@@ -2334,6 +2415,10 @@ void loop() {
       if (tempInterrupt) {
           setInterruptMode(false);
       }
+  } else if (!isSpeaking) {
+      // If we are in a sub-menu or web config, we don't want to run the neural network,
+      // but we MUST drain the AEC ringbuffer so it doesn't max out, overflow, and waste cycles!
+      flushAecBuffer();
   }
 
   // Keep loop responsive
