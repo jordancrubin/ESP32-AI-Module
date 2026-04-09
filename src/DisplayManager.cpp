@@ -360,8 +360,13 @@ static void clock_update_cb(lv_timer_t * t) {
     if(g_clockWidgets.colon[0]) lv_obj_set_style_bg_color(g_clockWidgets.colon[0], col, 0);
     if(g_clockWidgets.colon[1]) lv_obj_set_style_bg_color(g_clockWidgets.colon[1], col, 0);
 
-    // Update WiFi Signal
-    int rssi = WiFi.RSSI();
+    // Update WiFi Signal (Throttled to every 5 seconds to prevent radio locking)
+    static int rssi = -100;
+    static unsigned long last_rssi_check = 0;
+    if (millis() - last_rssi_check > 5000 || last_rssi_check == 0) {
+        rssi = WiFi.RSSI();
+        last_rssi_check = millis();
+    }
     int level = 0;
     if (WiFi.status() == WL_CONNECTED) {
         if (rssi > -55) level = 4;
@@ -379,7 +384,7 @@ static void clock_update_cb(lv_timer_t * t) {
     }
 
     // Update Day of Week
-    int currentDay = 6; // 6=Sat (Temporarily forced) // timeinfo.tm_wday;
+    int currentDay = timeinfo.tm_wday;
     int labelIdx = (currentDay + 6) % 7; // Convert to 0=Mon, 6=Sun
     for(int i=0; i<7; i++) {
         if(g_clockWidgets.dayLabels[i]) {

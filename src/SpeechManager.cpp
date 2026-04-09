@@ -30,6 +30,8 @@ static volatile int s_aec_target_delay = 640; // Default ~40ms (Aligned with use
 static volatile int s_aec_gain = 2; // Default Gain 2x to match Mic levels
 static volatile bool s_aec_invert = false; // Phase inversion flag
 static volatile int s_input_balance = 0; // -100 to 100
+static volatile int32_t s_gain_l = 256;
+static volatile int32_t s_gain_r = 256;
 static volatile int32_t s_peak_l = 0;
 static volatile int32_t s_peak_r = 0;
 static volatile int s_aec_attenuation = 75;
@@ -42,7 +44,19 @@ void setAecAttenuation(int atten) { s_aec_attenuation = (atten >= 0 && atten <= 
 void setAecCutoff(int cutoff) { s_aec_cutoff = cutoff >= 0 ? cutoff : 0; }
 void setAecGain(int gain) { s_aec_gain = gain; Serial.printf("AEC Ref Gain: %d\n", gain); }
 void setAecPhase(bool invert) { s_aec_invert = invert; Serial.printf("AEC Phase Invert: %s\n", invert ? "ON" : "OFF"); }
-void setInputBalance(int balance) { s_input_balance = balance; }
+void setInputBalance(int balance) { 
+    s_input_balance = balance; 
+    if (balance < 0) {
+        s_gain_l = 256;
+        s_gain_r = (256 * (100 - abs(balance))) / 100;
+    } else if (balance > 0) {
+        s_gain_l = (256 * (100 - balance)) / 100;
+        s_gain_r = 256;
+    } else {
+        s_gain_l = 256;
+        s_gain_r = 256;
+    }
+}
 void getAudioLevels(int* l, int* r) { *l = s_peak_l; *r = s_peak_r; }
 
 static volatile bool s_interrupt_mode = false;
@@ -71,6 +85,8 @@ static volatile uint32_t s_aec_overflows = 0;
 static volatile uint32_t s_aec_underflows = 0;
 static volatile size_t s_aec_max_usage = 0;
 static volatile size_t s_aec_bytes_written = 0;
+
+extern bool g_isSubMenuActive; // To track if the VU meter is actually visible
 
 // Pointer to the buffer for the static callback
 static float *s_inference_buffer = nullptr;
@@ -105,29 +121,26 @@ void feed_Task(void *arg) {
             if (i2s_channel_read(s_rx_handle, i2s_raw_buff, sizeof(i2s_raw_buff), &bytes_read, portMAX_DELAY) == ESP_OK) {
                 
                 // Apply Input Balance
-                if (s_input_balance != 0) {
-                    int32_t gainL = 100;
-                    int32_t gainR = 100;
-                    if (s_input_balance < 0) gainR = 100 - abs(s_input_balance);
-                    else if (s_input_balance > 0) gainL = 100 - s_input_balance;
-
+                if (s_gain_l != 256 || s_gain_r != 256) {
                     for (int i = 0; i < FRAME_SIZE; i++) {
-                        i2s_raw_buff[i*2] = (i2s_raw_buff[i*2] * gainL) / 100;
-                        i2s_raw_buff[i*2+1] = (i2s_raw_buff[i*2+1] * gainR) / 100;
+                        i2s_raw_buff[i*2] = (i2s_raw_buff[i*2] * s_gain_l) >> 8;
+                        i2s_raw_buff[i*2+1] = (i2s_raw_buff[i*2+1] * s_gain_r) >> 8;
                     }
                 }
                 
-                // Debug: Analyze Stereo Input Levels
-                int32_t max_l = 0;
-                int32_t max_r = 0;
-                for (int i = 0; i < FRAME_SIZE; i++) {
-                    int32_t l = abs(i2s_raw_buff[i*2] >> 14);
-                    int32_t r = abs(i2s_raw_buff[i*2+1] >> 14);
-                    if (l > max_l) max_l = l;
-                    if (r > max_r) max_r = r;
+                // Debug: Analyze Stereo Input Levels (Only calculate if VU Meter is visible or AEC debug is on!)
+                if (g_isSubMenuActive || s_debug_aec) {
+                    int32_t max_l = 0;
+                    int32_t max_r = 0;
+                    for (int i = 0; i < FRAME_SIZE; i++) {
+                        int32_t l = abs(i2s_raw_buff[i*2] >> 14);
+                        int32_t r = abs(i2s_raw_buff[i*2+1] >> 14);
+                        if (l > max_l) max_l = l;
+                        if (r > max_r) max_r = r;
+                    }
+                    s_peak_l = max_l;
+                    s_peak_r = max_r;
                 }
-                s_peak_l = max_l;
-                s_peak_r = max_r;
 
                 // 2. Read Reference from Circular Buffer
                 bool has_ref = false;
@@ -141,14 +154,15 @@ void feed_Task(void *arg) {
                     // Latency ~100ms. Delay Ref by ~1600 samples
                     // const size_t TARGET_DELAY = 1600; 
                     if (available >= (FRAME_SIZE + s_aec_target_delay)) {
+                        int local_gain = s_aec_gain; // Cache volatile
                         for (int i = 0; i < FRAME_SIZE; i++) {
                             // Apply Gain to Reference
-                            int32_t ref_val = s_ref_buffer[s_ref_read_index] * s_aec_gain;
+                            int32_t ref_val = s_ref_buffer[s_ref_read_index] * local_gain;
                             if (ref_val > 32767) ref_val = 32767;
                             else if (ref_val < -32768) ref_val = -32768;
                             ref_frame[i] = (int16_t)ref_val;
                             
-                            s_ref_read_index = (s_ref_read_index + 1) % REF_BUFFER_SIZE;
+                            s_ref_read_index = (s_ref_read_index + 1) & (REF_BUFFER_SIZE - 1); // Fast Modulo
                         }
                         has_ref = true;
                     }
@@ -159,6 +173,8 @@ void feed_Task(void *arg) {
                     memset(ref_frame, 0, sizeof(ref_frame)); // Silence
                 }
 
+                int local_mic_mode = settings.micMode; // Cache external
+                bool local_invert = s_aec_invert;      // Cache volatile
                 // 3. Prepare Mic Frame (Convert 32-bit Stereo to 16-bit Mono)
                 for (int i = 0; i < FRAME_SIZE; i++) {
                     // Prepare Mono Frame for AEC based on Mic Mode
@@ -166,12 +182,12 @@ void feed_Task(void *arg) {
                     int32_t r = i2s_raw_buff[i*2+1] >> 14;
                     int32_t val = 0;
 
-                    if (settings.micMode == 2) val = r;      // Right
-                    else if (settings.micMode == 1) val = l; // Left
+                    if (local_mic_mode == 2) val = r;      // Right
+                    else if (local_mic_mode == 1) val = l; // Left
                     else val = (l + r) >> 1;                 // Stereo Mix (Bitshift for speed)
 
                     if (val > 32767) val = 32767; else if (val < -32768) val = -32768;
-                    if (s_aec_invert) val = -val;
+                    if (local_invert) val = -val;
                     mic_frame[i] = (int16_t)val;
                 }
 
@@ -196,7 +212,7 @@ void feed_Task(void *arg) {
                         if (Serial && Serial.availableForWrite() > 64) {
                             Serial.printf("AEC: RefBuf=%5d | MicL=%5d MicR=%5d | RefPk=%5d | OutPk=%5d\n", 
                                 (int)((s_ref_write_index >= s_ref_read_index) ? (s_ref_write_index - s_ref_read_index) : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index))), 
-                                max_l, max_r, max_ref, max_out);
+                                s_peak_l, s_peak_r, max_ref, max_out);
                         }
                     }
                 }
@@ -344,15 +360,16 @@ bool SpeechManager::detectWakeWord(float threshold) {
         if (s_peak_r > max_r_level) max_r_level = s_peak_r;
     }
 
+    int local_mic_mode = settings.micMode;
+    bool local_interrupt = s_interrupt_mode;
+    int local_attenuation_mult = 100 - s_aec_attenuation; // Compute once outside the loop
+
     for (int i = 0; i < samplesRead; i++) { 
         int32_t raw;
         
         if (processed_buff) {
             // Speex returns 16-bit clean audio
             raw = processed_buff[i];
-            // Capture AEC peaks if available (snapshot from feed_Task)
-            if (s_peak_l > max_l_level) max_l_level = s_peak_l;
-            if (s_peak_r > max_r_level) max_r_level = s_peak_r;
         } else {
             // Fallback processing: Convert 32-bit Stereo to 16-bit Mono
             int32_t l = raw_i2s_buffer[i*2] >> 14;
@@ -362,8 +379,8 @@ bool SpeechManager::detectWakeWord(float threshold) {
             if (abs(r) > max_r_level) max_r_level = abs(r);
             
             // Respect Microphone Mode setting
-            if (settings.micMode == 2) raw = r;      // Right
-            else if (settings.micMode == 1) raw = l; // Left
+            if (local_mic_mode == 2) raw = r;      // Right
+            else if (local_mic_mode == 1) raw = l; // Left
             else raw = (l + r) >> 1;                 // Stereo Mix (Bitshift for speed)
 
             // DC Offset removal (High-pass filter) using fast fixed-point math
@@ -376,8 +393,8 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
         // Lower microphone sensitivity specifically during Voice Interrupt (Barge-in)
         // to help prevent the AI's own early echo from triggering the wake word
-        if (s_interrupt_mode) {
-            raw = (raw * (100 - s_aec_attenuation)) / 100; 
+        if (local_interrupt) {
+            raw = (raw * local_attenuation_mult) / 100; 
         }
 
         if (abs(raw) > max_audio_level) max_audio_level = abs(raw);
@@ -479,10 +496,10 @@ void SpeechManager::feedReference(const int16_t *data, size_t samples) {
         xSemaphoreTake(s_ref_mutex, portMAX_DELAY);
         for (size_t i = 0; i < samples; i++) {
             s_ref_buffer[s_ref_write_index] = data[i];
-            s_ref_write_index = (s_ref_write_index + 1) % REF_BUFFER_SIZE;
+            s_ref_write_index = (s_ref_write_index + 1) & (REF_BUFFER_SIZE - 1); // Fast Modulo
             // If write catches read, bump read (overwrite oldest)
             if (s_ref_write_index == s_ref_read_index) {
-                s_ref_read_index = (s_ref_read_index + 1) % REF_BUFFER_SIZE;
+                s_ref_read_index = (s_ref_read_index + 1) & (REF_BUFFER_SIZE - 1);
             }
         }
         xSemaphoreGive(s_ref_mutex);
@@ -556,6 +573,7 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
     const unsigned long SILENCE_DURATION = 2000; // Stop after 2 seconds of silence
     const unsigned long MAX_INITIAL_SILENCE = 5000; // Stop after 5 seconds if no speech detected
     bool voiceDetectedTotal = false;
+    int local_mic_mode = settings.micMode; // Cache external variable
 
     while (samplesRead < numSamples) {
         bool voiceDetectedInBatch = false;
@@ -570,7 +588,7 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
                 int samplesInBatch = bytesFetched / sizeof(int16_t);
                 for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i++) {
                     int16_t raw = processed_data[i];
-                    if (abs(raw) > silenceThreshold) {
+                    if (!voiceDetectedInBatch && abs(raw) > silenceThreshold) {
                         voiceDetectedInBatch = true;
                         voiceDetectedTotal = true;
                     }
@@ -589,13 +607,13 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
                     int32_t r = sampleBuffer[i*2+1] >> 14;
                     int32_t val = 0;
                     
-                    if (settings.micMode == 2) val = r;
-                    else if (settings.micMode == 1) val = l;
+                    if (local_mic_mode == 2) val = r;
+                    else if (local_mic_mode == 1) val = l;
                     else val = (l + r) >> 1;
 
                     if (val > 32767) val = 32767; else if (val < -32768) val = -32768;
                     
-                    if (abs(val) > silenceThreshold) {
+                    if (!voiceDetectedInBatch && abs(val) > silenceThreshold) {
                         voiceDetectedInBatch = true;
                         voiceDetectedTotal = true;
                     }
@@ -655,6 +673,7 @@ void runEdgeImpulseForwarder() {
     
     int32_t sampleBuffer[128 * 2]; // 128 stereo frames
     size_t bytesRead;
+    int local_mic_mode = settings.micMode;
     
     // Flush any initial stale data from hardware buffers
     while (i2s_channel_read(s_rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, 0) == ESP_OK && bytesRead > 0);
@@ -665,7 +684,7 @@ void runEdgeImpulseForwarder() {
             for (int i = 0; i < samples; i++) {
                 int32_t l = sampleBuffer[i*2] >> 14;
                 int32_t r = sampleBuffer[i*2+1] >> 14;
-                int32_t val = (settings.micMode == 2) ? r : (settings.micMode == 1) ? l : ((l + r) >> 1);
+                int32_t val = (local_mic_mode == 2) ? r : (local_mic_mode == 1) ? l : ((l + r) >> 1);
                 Serial.println(val); // Data Forwarder requires one sample per line
             }
         }

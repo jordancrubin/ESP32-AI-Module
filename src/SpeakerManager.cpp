@@ -28,6 +28,8 @@ const int FADE_LEN = 2000; // ~80ms fade-in at 24kHz (Faster attack for chimes)
 static volatile bool s_is_interrupted = false;
 static bool s_mp3_started = false;
 
+static int16_t s_resample_buff[4096]; // Shared buffer to save 8KB of RAM
+
 // Helix Decoder Callback
 void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
     if (s_is_interrupted) return; // Drop audio instantly to bypass I2S blocking during interrupt
@@ -43,15 +45,22 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
     }
 
     // 1. Apply Volume & Fade-in
-    for (size_t i = 0; i < len; i++) {
-        int32_t fade = 256;
-        if (s_fade_samples < FADE_LEN) {
-            fade = (s_fade_samples * 256) / FADE_LEN;
-            s_fade_samples++;
+    if (s_fade_samples < FADE_LEN) {
+        for (size_t i = 0; i < len; i++) {
+            if (s_fade_samples < FADE_LEN) {
+                int32_t fade = (s_fade_samples * 256) / FADE_LEN;
+                s_fade_samples++;
+                int32_t sample = pcm_buffer[i];
+                pcm_buffer[i] = (int16_t)((sample * s_volume_int * fade) >> 16);
+            } else {
+                pcm_buffer[i] = (int16_t)((pcm_buffer[i] * s_volume_int) >> 8);
+            }
         }
-        int32_t sample = pcm_buffer[i];
-        sample = (sample * s_volume_int * fade) >> 16;
-        pcm_buffer[i] = (int16_t)sample;
+    } else {
+        // Fast path for 99% of playback (no fade branching)
+        for (size_t i = 0; i < len; i++) {
+            pcm_buffer[i] = (int16_t)((pcm_buffer[i] * s_volume_int) >> 8);
+        }
     }
 
     // 4. Feed AEC Reference (BEFORE I2S Write to prevent starvation)
@@ -60,24 +69,22 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
         speech.feedReference(pcm_buffer, len);
     } else if (info.samprate == 24000) {
         // Simple 24kHz -> 16kHz downsampling (3 input -> 2 output)
-        // We use a static buffer to avoid stack allocation issues
-        static int16_t resample_buff[4096]; 
         size_t new_len = 0;
         
         for (size_t i = 0; i < len; i += 3) {
             if (new_len >= 4096 - 2) break;
             
             // Sample 1: Copy directly (0 -> 0)
-            resample_buff[new_len++] = pcm_buffer[i];
+            s_resample_buff[new_len++] = pcm_buffer[i];
             
             // Sample 2: Interpolate (1.5 -> 1)
             // We take average of index 1 and 2
             if (i + 2 < len) {
                 int32_t val = ((int32_t)pcm_buffer[i+1] + (int32_t)pcm_buffer[i+2]) >> 1;
-                resample_buff[new_len++] = (int16_t)val;
+                s_resample_buff[new_len++] = (int16_t)val;
             }
         }
-        speech.feedReference(resample_buff, new_len);
+        speech.feedReference(s_resample_buff, new_len);
     }
 
     // 2. Write to I2S (Blocking if buffer full)
@@ -182,28 +189,28 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
     }
 
     if (tx_handle) {
-        if (s_i2s_enabled) {
-            i2s_channel_disable(tx_handle); // Always disable before re-enabling
-            s_i2s_enabled = false;
-        }
-        
-        // Update clock if needed (for WAV, or reset for MP3)
         if (s_i2s_std_cfg.clk_cfg.sample_rate_hz != sampleRate) {
-             s_i2s_std_cfg.clk_cfg.sample_rate_hz = sampleRate;
-             i2s_channel_reconfig_std_clock(tx_handle, &s_i2s_std_cfg.clk_cfg);
+            if (s_i2s_enabled) {
+                i2s_channel_disable(tx_handle);
+                s_i2s_enabled = false;
+            }
+            s_i2s_std_cfg.clk_cfg.sample_rate_hz = sampleRate;
+            i2s_channel_reconfig_std_clock(tx_handle, &s_i2s_std_cfg.clk_cfg);
         }
 
-        i2s_channel_enable(tx_handle);
-        s_i2s_enabled = true;
-        
-        // Prime with a tiny burst of silence (50ms) to wake up amp and clear artifacts
-        size_t bytes_written;
-        const uint8_t silence_chunk[1024] = {0};
-        int silence_chunks = (sampleRate * 2 * 0.05) / sizeof(silence_chunk); // 50ms
-        if (silence_chunks < 1) silence_chunks = 1;
-        
-        for (int i = 0; i < silence_chunks; i++) {
-            i2s_channel_write(tx_handle, silence_chunk, sizeof(silence_chunk), &bytes_written, 10);
+        if (!s_i2s_enabled) {
+            i2s_channel_enable(tx_handle);
+            s_i2s_enabled = true;
+            
+            // Prime with a tiny burst of silence (50ms) to wake up amp and clear artifacts
+            size_t bytes_written;
+            const uint8_t silence_chunk[1024] = {0};
+            int silence_chunks = (sampleRate * 2 * 0.05) / sizeof(silence_chunk); // 50ms
+            if (silence_chunks < 1) silence_chunks = 1;
+            
+            for (int i = 0; i < silence_chunks; i++) {
+                i2s_channel_write(tx_handle, silence_chunk, sizeof(silence_chunk), &bytes_written, 10);
+            }
         }
     }
     
@@ -242,7 +249,7 @@ void SpeakerManager::stop() {
 }
 
 void SpeakerManager::loop() {
-    if (xSemaphoreTakeRecursive(_mutex, 0) == pdTRUE) {
+    if (xSemaphoreTakeRecursive(_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (_isPlaying && !s_is_interrupted) {
             if (audioFile && audioFile.available()) {
                 static uint8_t buff[4096]; // 4096 is required for fast LittleFS reads and Helix decoding
@@ -254,15 +261,22 @@ void SpeakerManager::loop() {
                         size_t samples = bytesRead / 2;
                         
                         // Apply Volume & Fade-in
-                        for (size_t i = 0; i < samples; i++) {
-                            int32_t fade = 256;
-                            if (s_fade_samples < FADE_LEN) {
-                                fade = (s_fade_samples * 256) / FADE_LEN;
-                                s_fade_samples++;
+                        if (s_fade_samples < FADE_LEN) {
+                            for (size_t i = 0; i < samples; i++) {
+                                if (s_fade_samples < FADE_LEN) {
+                                    int32_t fade = (s_fade_samples * 256) / FADE_LEN;
+                                    s_fade_samples++;
+                                    int32_t sample = pcm[i];
+                                    pcm[i] = (int16_t)((sample * s_volume_int * fade) >> 16);
+                                } else {
+                                    pcm[i] = (int16_t)((pcm[i] * s_volume_int) >> 8);
+                                }
                             }
-                            int32_t sample = pcm[i];
-                            sample = (sample * s_volume_int * fade) >> 16;
-                            pcm[i] = (int16_t)sample;
+                        } else {
+                            // Fast path for 99% of playback (no fade branching)
+                            for (size_t i = 0; i < samples; i++) {
+                                pcm[i] = (int16_t)((pcm[i] * s_volume_int) >> 8);
+                            }
                         }
                         
                         // Feed AEC (BEFORE I2S Write)
@@ -270,22 +284,21 @@ void SpeakerManager::loop() {
                         if (s_i2s_std_cfg.clk_cfg.sample_rate_hz == 16000) {
                             speech.feedReference(pcm, samples);
                         } else if (s_i2s_std_cfg.clk_cfg.sample_rate_hz == 24000) {
-                            static int16_t resample_buff[4096]; 
                             size_t new_len = 0;
                             
                             for (size_t i = 0; i < samples; i += 3) {
                                 if (new_len >= 4096 - 2) break;
                                 
                                 // Sample 1: Copy directly
-                                resample_buff[new_len++] = pcm[i];
+                                s_resample_buff[new_len++] = pcm[i];
                                 
                                 // Sample 2: Interpolate
                                 if (i + 2 < samples) {
                                     int32_t val = ((int32_t)pcm[i+1] + (int32_t)pcm[i+2]) >> 1;
-                                    resample_buff[new_len++] = (int16_t)val;
+                                    s_resample_buff[new_len++] = (int16_t)val;
                                 }
                             }
-                            speech.feedReference(resample_buff, new_len);
+                            speech.feedReference(s_resample_buff, new_len);
                         }
 
                         // Write to I2S
@@ -313,10 +326,6 @@ void SpeakerManager::loop() {
                     i2s_channel_write(tx_handle, tail_silence, sizeof(tail_silence), &bytes_written, 100);
                 }
 
-                if (tx_handle && s_i2s_enabled) {
-                    i2s_channel_disable(tx_handle); // Disable I2S output
-                    s_i2s_enabled = false;
-                }
                 if (audioFile) audioFile.close();
             }
         }
