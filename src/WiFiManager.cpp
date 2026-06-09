@@ -57,7 +57,8 @@ void WiFiManager::connect() {
 
     if (!MDNS.begin("aiesp")) {
         if (settings.debugMode) Serial.println("Error setting up MDNS responder!");
-    } else {
+    }
+    else {
         MDNS.addService("http", "tcp", 80);
         if (settings.debugMode) Serial.println("mDNS responder started: http://aiesp.local");
     }
@@ -99,7 +100,8 @@ String WiFiManager::resolveHost(String url) {
             _cachedIP = ip;
             url.replace(hostname, ip.toString());
             if (settings.debugMode) Serial.println("Resolved " + hostname + " to " + ip.toString());
-        } else {
+        }
+        else {
             if (settings.debugMode) Serial.println("Error: Could not resolve mDNS hostname: " + hostname);
             return "";
         }

@@ -49,6 +49,7 @@ bool enableBME680 = false;
 bool enableTTSChunking = false;
 bool bmeReady = false;
 Adafruit_BME680 bme;
+bool clockFormat12h = false;
 
 String inputBuffer = "";
 bool isSpeaking = false;
@@ -63,6 +64,9 @@ bool isProcessing = false;
 static bool stopRequested = false;
 extern bool g_isSubMenuActive;
 unsigned long g_audioPlaybackStart = 0;
+bool g_runAecTuneUI = false;
+bool g_runAecTestUI = false;
+bool g_runHarmonicTestUI = false;
 
 // External functions from SpeechManager.cpp
 extern void setAecDebug(bool enable);
@@ -128,8 +132,14 @@ void onBalanceChange(int value) {
 bool playChunkedTTS(String text) {
     static int fileToggle = 0;
     
-    // 1. Wait for previous chunk to finish playing, handle interrupts
+    String filename = "/speech" + String(fileToggle) + ".mp3";
+    
+    // 1. Download the next chunk in the background while previous plays
+    bool downloadSuccess = llm.downloadTTS(text, network, filename.c_str(), ttsVoice);
+    
+    // 2. Wait for previous chunk to finish playing, handle interrupts
     bool interrupted = false;
+
     if (settings.enableInterrupt) setInterruptMode(true);
     
     while (speaker.isRunning()) {
@@ -153,10 +163,8 @@ bool playChunkedTTS(String text) {
     if (settings.enableInterrupt) setInterruptMode(false);
     if (interrupted) return false;
 
-    // 2. Download the next chunk
-    String filename = "/speech" + String(fileToggle) + ".mp3";
-    
-    if (llm.downloadTTS(text, network, filename.c_str(), ttsVoice)) {
+    // 3. Play the newly downloaded chunk
+    if (downloadSuccess) {
         speaker.playSpeechFromFile(filename.c_str());
         if (!isSpeaking) g_audioPlaybackStart = millis(); // Only reset ignore window on first chunk
         isSpeaking = true;
@@ -297,13 +305,51 @@ void onVoiceChange(String voice) {
                             isSpeaking = false;
                             
                             if (interrupted) continue; // Skip the rest, loop back to "Listening..."
-                        } else {
+                        }
+                        else {
                             display.showStatus("TTS Failed");
                             break;
                         }
-                    } else {
-                        // Chunking mode (Wait for last chunk to finish gracefully)
+                    }
+                    else {
+                        // Chunking mode
                         bool interrupted = false;
+                        
+                        if (answer != "Interrupted by user" && answer.length() > 0) {
+                            String sentence = "";
+                            for (size_t i = 0; i < answer.length(); i++) {
+                                char c = answer[i];
+                                sentence += c;
+                                bool isPunctuation = (c == '.' || c == '?' || c == '!' || c == '\n');
+                                bool isPause = (c == ',' || c == ';' || c == ':');
+                                if (isPunctuation || (isPause && sentence.length() > 60)) {
+                                    sentence.trim();
+                                    bool hasWords = false;
+                                    for (size_t j = 0; j < sentence.length(); j++) {
+                                        if (isalnum(sentence[j])) { hasWords = true; break; }
+                                    }
+                                    if (hasWords) {
+                                        if (!playChunkedTTS(sentence)) {
+                                            interrupted = true;
+                                            break;
+                                        }
+                                    }
+                                    sentence = "";
+                                }
+                            }
+                            if (!interrupted) {
+                                sentence.trim();
+                                bool hasWords = false;
+                                for (size_t j = 0; j < sentence.length(); j++) {
+                                    if (isalnum(sentence[j])) { hasWords = true; break; }
+                                }
+                                if (hasWords) {
+                                    playChunkedTTS(sentence);
+                                }
+                            }
+                        }
+                        
+                        // Wait for last chunk to finish gracefully
                         if (settings.enableInterrupt) setInterruptMode(true);
                         while (speaker.isRunning()) {
                             if (settings.enableInterrupt) {
@@ -375,7 +421,8 @@ void onVoiceChange(String voice) {
                             break;       // End the conversation loop
                         }
                 }
-            } else {
+            }
+            else {
                 display.showStatus("No Speech");
                 delay(1500);
                 
@@ -389,7 +436,8 @@ void onVoiceChange(String voice) {
         isProcessing = false;
         if (triggeredEasterEgg) {
             forceClockScreen(); // Jump straight to the clock
-        } else if (!isWebServerActive) {
+        }
+        else if (!isWebServerActive) {
             display.showStatus("Ready"); // Normal recovery
         }
         setLedColor(0, 0, 0); // LED Off
@@ -397,6 +445,49 @@ void onVoiceChange(String voice) {
         ttsVoice = voice;
         adminPrefs.putString("voice", ttsVoice);
         if (settings.debugMode) Serial.println("Voice changed to: " + ttsVoice);
+        
+        // Force a UI update so the dropdown menu closes cleanly before blocking
+        lv_timer_handler(); 
+        
+        // Strip everything before and including the underscore for the spoken announcement
+        String spokenVoice = ttsVoice;
+        int underscorePos = spokenVoice.lastIndexOf('_');
+        if (underscorePos != -1) {
+            spokenVoice = spokenVoice.substring(underscorePos + 1);
+        }
+        
+        // Speak the confirmation using the newly selected voice
+        String textToSay = "Changing to " + spokenVoice;
+        if (!enableTTSChunking) {
+            if (llm.downloadTTS(textToSay, network, "/speech.mp3", ttsVoice)) {
+                speaker.playSpeechFromFile("/speech.mp3");
+                if (!isSpeaking) g_audioPlaybackStart = millis();
+                isSpeaking = true;
+                lv_timer_handler();
+                
+                if (settings.enableInterrupt) setInterruptMode(true);
+                while(speaker.isRunning()) {
+                    if (settings.enableInterrupt) {
+                        bool triggered = speech.detectWakeWord(wakeThreshold);
+                        if (triggered && (millis() - g_audioPlaybackStart > settings.aecIgnore)) {
+                            speaker.stop();
+                            speaker.playSpeechFromFile(CHIME_FILENAME);
+                            while(speaker.isRunning()) delay(30);
+                            flushAecBuffer();
+                            break;
+                        }
+                        delay(5);
+                    } else {
+                        flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
+                        delay(50);
+                    }
+                }
+                if (settings.enableInterrupt) setInterruptMode(false);
+                isSpeaking = false;
+            }
+        } else {
+            playChunkedTTS(textToSay);
+        }
     }
 }
 
@@ -415,6 +506,7 @@ void onSetupMode(bool enabled) {
 // Helper to URL encode the input string
 String urlEncode(String str) {
     String encodedString = "";
+    encodedString.reserve(str.length() * 3); // Pre-allocate to prevent heap fragmentation
     char c;
     char code0;
     char code1;
@@ -643,6 +735,7 @@ void handleWebRoot() {
     html += "</select>";
 
     html += "<label>Screen Brightness (" + String(settings.brightness) + ")</label><input type='range' name='brightness' min='10' max='255' value='" + String(settings.brightness) + "' oninput='this.previousElementSibling.innerHTML=\"Screen Brightness (\" + this.value + \")\"'>";
+    html += "<div class='checkbox-group' style='margin-top:15px;'><input type='checkbox' id='clockFormat12h' name='clockFormat12h' value='1'" + String(clockFormat12h ? " checked" : "") + "><label for='clockFormat12h'>Use 12-Hour Time Format</label></div>";
     html += "</div>";
 
     html += "<div class='card'><h3>Weather (OpenWeatherMap)</h3>";
@@ -824,6 +917,12 @@ void handleWebSave() {
         adminPrefs.putInt("voc_thresh", vocAlarmThreshold);
     }
 
+    bool newClockFormat12h = server.hasArg("clockFormat12h");
+    if (newClockFormat12h != clockFormat12h) {
+        clockFormat12h = newClockFormat12h;
+        adminPrefs.putBool("clk_12h", clockFormat12h);
+    }
+
     // Save to NVRAM immediately
     strlcpy(settings.apiKey, newApiKey.c_str(), sizeof(settings.apiKey));
     strlcpy(settings.apiUrl, newApiUrl.c_str(), sizeof(settings.apiUrl));
@@ -864,50 +963,13 @@ void onWiFiConfig(String ssid, String pass) {
 }
 
 void updateVoiceList() {
-    String jsonResponse = llm.getVoices(network);
-    if (jsonResponse.startsWith("Error")) {
-        if (settings.debugMode) Serial.println("Failed to fetch voices: " + jsonResponse);
+    String newOptions = llm.getVoices(network);
+    if (newOptions.startsWith("Error")) {
+        if (settings.debugMode) Serial.println("Failed to fetch voices: " + newOptions);
         return;
     }
 
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, jsonResponse);
-
-    if (error) {
-        if (settings.debugMode) Serial.print(F("deserializeJson() failed: "));
-        if (settings.debugMode) Serial.println(error.f_str());
-        return;
-    }
-
-    if (!doc["voices"].is<JsonArray>()) {
-        if (settings.debugMode) Serial.println(F("JSON response missing 'voices' key"));
-        return;
-    }
-
-    JsonArray voices = doc["voices"];
-    String newOptions = "";
-    newOptions.reserve(1024);
-
-    for (JsonVariant v : voices) {
-        const char* voiceName = nullptr;
-        if (v.is<JsonObject>()) {
-            voiceName = v["id"];
-        } else {
-            voiceName = v.as<const char*>();
-        }
-
-        if (voiceName && strlen(voiceName) > 0) {
-            char firstChar = voiceName[0];
-            if (firstChar == 'a' || firstChar == 'b' || firstChar == 'd') {
-                if (newOptions.length() > 0) {
-                    newOptions += '\n';
-                }
-                newOptions += voiceName;
-            }
-        }
-    }
-
-    if (newOptions.length() > 0) {
+    if (newOptions.length() > 0 && newOptions != "No matching voices found") {
         voiceOptions = newOptions;
         // Combine with modelOptions if available
         if (modelOptions.length() > 0) {
@@ -922,25 +984,39 @@ void updateVoiceList() {
 }
 
 void testAEC() {
-    if (!settings.debugMode) return;
+
+    // Free up space before downloading TTS and recording new WAVs
+    if (LittleFS.exists("/aec_with.wav")) LittleFS.remove("/aec_with.wav");
+    if (LittleFS.exists("/aec_raw.wav")) LittleFS.remove("/aec_raw.wav");
+    if (LittleFS.exists("/aec_test_source.mp3")) LittleFS.remove("/aec_test_source.mp3");
 
     Serial.println("Downloading TTS for AEC Test...");
+    display.showStatus("Downloading TTS...");
+    lv_timer_handler();
     String testPhrase = "this is a test from the ai esp32 to see how speaker cancellation is functioning. Like and Subscribe to retro tech and electronics as well as classic wrench today. Beep Beep!";
     const char* ttsFile = "/aec_test_source.mp3";
     
     if (!network.isConnected()) {
         Serial.println("WiFi not connected. Cannot download TTS.");
+        display.showStatus("Test Failed\nNo WiFi");
+        delay(2000);
+        display.showMainUI(ttsVoice, settings.volume, voiceOptions);
         return;
     }
 
     if (!llm.downloadTTS(testPhrase, network, ttsFile, ttsVoice)) {
         Serial.println("TTS Download failed. Aborting test.");
+        display.showStatus("Test Failed\nTTS Error");
+        delay(2000);
+        display.showMainUI(ttsVoice, settings.volume, voiceOptions);
         return;
     }
     
     // --- Test 1: With AEC ---
     Serial.println("\n--- Test 1: With AEC (Cancellation Enabled) ---");
     Serial.println("Playing TTS & Recording (10s)...");
+    display.showStatus("Test 1: AEC ON\nPlaying & Recording...");
+    lv_timer_handler();
     setAecDebug(true); // Enable debug stats
     speaker.playSpeechFromFile(ttsFile);
     
@@ -1026,6 +1102,8 @@ void testAEC() {
 
     // --- Test 2: Without AEC (Raw) ---
     Serial.println("\n--- Test 2: Without AEC (Raw Input) ---");
+    display.showStatus("Test 2: AEC OFF\nPlaying & Recording...");
+    lv_timer_handler();
     setAecBypass(true); // Force SpeechManager to bypass the Speex Ringbuffer
     
     Serial.println("Playing TTS & Recording (10s)...");
@@ -1072,16 +1150,23 @@ void testAEC() {
 
     // --- Playback ---
     Serial.println("\n--- Playback: With AEC ---");
+    display.showStatus("Playing Result\nWith AEC...");
+    lv_timer_handler();
     speaker.playSpeechFromFile("/aec_with.wav");
     while(speaker.isRunning()) delay(100);
     
     delay(1000);
     
     Serial.println("\n--- Playback: Without AEC ---");
+    display.showStatus("Playing Result\nWithout AEC...");
+    lv_timer_handler();
     speaker.playSpeechFromFile("/aec_raw.wav");
     while(speaker.isRunning()) delay(100);
     
     Serial.println("\nAEC Test Complete.");
+    display.showStatus("AEC Test Complete\nCheck Web UI");
+    delay(3000);
+    display.showMainUI(ttsVoice, settings.volume, voiceOptions);
 }
 
 void testHarmonic() {
@@ -1449,8 +1534,8 @@ void handleSerialCommands() {
           Serial.println("/reset_cal      - Reset touch calibration");
           Serial.println("/say <text>     - Speak text immediately");
           Serial.println("/new            - Clear conversation history");
-          Serial.println("/test_mic       - Record 5s clip to test mic (Debug only)");
-          Serial.println("/test_aec       - Run AEC diagnostics (Debug only)");
+          Serial.println("/test_mic       - Record 5s clip to test mic");
+          Serial.println("/test_aec       - Run AEC diagnostics");
           Serial.println("/test_harmonic  - Run 20s sweep and record to check mic harmonics");
           Serial.println("/tune_aec       - Auto-tune AEC delay alignment");
           Serial.println("/debug_aec      - Toggle AEC debug stats");
@@ -1545,6 +1630,7 @@ void handleSerialCommands() {
             isSpeaking = false;
             display.showMainUI(ttsVoice, settings.volume, voiceOptions);
             display.showStatus("Direct TTS...");
+            lv_timer_handler(); // Force the screen to update before blocking
             
             if (!enableTTSChunking) {
                 if (llm.downloadTTS(textToSay, network, "/speech.mp3", ttsVoice)) {
@@ -1571,20 +1657,72 @@ void handleSerialCommands() {
                     }
                     if (settings.enableInterrupt) setInterruptMode(false);
                     isSpeaking = false;
+                    display.showStatus("Ready");
                 } else {
                     display.showResponse("TTS Failed");
                 }
             } else {
-                playChunkedTTS(textToSay);
+                bool interrupted = false;
+                String sentence = "";
+                for (size_t i = 0; i < textToSay.length(); i++) {
+                    char c = textToSay[i];
+                    sentence += c;
+                    bool isPunctuation = (c == '.' || c == '?' || c == '!' || c == '\n');
+                    bool isPause = (c == ',' || c == ';' || c == ':');
+                    if (isPunctuation || (isPause && sentence.length() > 60)) {
+                        sentence.trim();
+                        bool hasWords = false;
+                        for (size_t j = 0; j < sentence.length(); j++) {
+                            if (isalnum(sentence[j])) { hasWords = true; break; }
+                        }
+                        if (hasWords) {
+                            if (!playChunkedTTS(sentence)) {
+                                interrupted = true;
+                                break;
+                            }
+                        }
+                        sentence = "";
+                    }
+                }
+                if (!interrupted) {
+                    sentence.trim();
+                    bool hasWords = false;
+                    for (size_t j = 0; j < sentence.length(); j++) {
+                        if (isalnum(sentence[j])) { hasWords = true; break; }
+                    }
+                    if (hasWords) {
+                        playChunkedTTS(sentence);
+                    }
+                }
+                
+                // Block and wait for chunked audio to finish to prevent instant UI overwrites
+                if (settings.enableInterrupt) setInterruptMode(true);
+                while(speaker.isRunning()) {
+                    if (settings.enableInterrupt) {
+                        bool triggered = speech.detectWakeWord(wakeThreshold);
+                        if (triggered && (millis() - g_audioPlaybackStart > settings.aecIgnore)) {
+                            speaker.stop();
+                            speaker.playSpeechFromFile(CHIME_FILENAME);
+                            while(speaker.isRunning()) delay(30);
+                            break;
+                        }
+                        delay(5);
+                    } else {
+                        flushAecBuffer();
+                        delay(50);
+                    }
+                }
+                if (settings.enableInterrupt) setInterruptMode(false);
+                isSpeaking = false;
+                display.showStatus("Ready");
             }
-            display.showStatus("Ready");
           }
         } else if (inputBuffer == "/factory_reset") {
           performFactoryReset();
           Serial.println("Rebooting now...");
           delay(1000);
           ESP.restart();
-        } else if (inputBuffer == "/test_mic" && settings.debugMode) {
+        } else if (inputBuffer == "/test_mic") {
           Serial.println("Testing Microphone (5s recording)...");
           display.showMainUI(ttsVoice, settings.volume, voiceOptions);
           display.showStatus("Recording (5s)...");
@@ -1626,8 +1764,6 @@ void handleSerialCommands() {
               display.showStatus("Record Failed");
           }
           display.showStatus("Ready");
-        } else if (inputBuffer == "/test_mic" && !settings.debugMode) {
-            Serial.println("Debug mode disabled. Enable debug to run mic test.");
         } else if (inputBuffer == "/new") {
           llm.clearHistory();
           if (settings.debugMode) Serial.println("Conversation history cleared.");
@@ -1681,6 +1817,40 @@ void handleSerialCommands() {
                   display.showResponse("TTS Failed");
               }
           } else {
+              bool interrupted = false;
+              if (answer != "Interrupted by user" && answer.length() > 0) {
+                  String sentence = "";
+                  for (size_t i = 0; i < answer.length(); i++) {
+                      char c = answer[i];
+                      sentence += c;
+                      bool isPunctuation = (c == '.' || c == '?' || c == '!' || c == '\n');
+                      bool isPause = (c == ',' || c == ';' || c == ':');
+                      if (isPunctuation || (isPause && sentence.length() > 60)) {
+                          sentence.trim();
+                          bool hasWords = false;
+                          for (size_t j = 0; j < sentence.length(); j++) {
+                              if (isalnum(sentence[j])) { hasWords = true; break; }
+                          }
+                          if (hasWords) {
+                              if (!playChunkedTTS(sentence)) {
+                                  interrupted = true;
+                                  break;
+                              }
+                          }
+                          sentence = "";
+                      }
+                  }
+                  if (!interrupted) {
+                      sentence.trim();
+                      bool hasWords = false;
+                      for (size_t j = 0; j < sentence.length(); j++) {
+                          if (isalnum(sentence[j])) { hasWords = true; break; }
+                      }
+                      if (hasWords) {
+                          playChunkedTTS(sentence);
+                      }
+                  }
+              }
               // Wait for chunked TTS to finish playing
               if (settings.enableInterrupt) setInterruptMode(true);
               while(speaker.isRunning()) {
@@ -1803,8 +1973,8 @@ void setup() {
 
   // Apply loaded settings
   network.setCredentials(settings.wifiSSID, settings.wifiPass);
-  // Migration: Fix API URL suffix in NVRAM if it matches the old format
-  if (String(settings.apiUrl).endsWith("/v1/chat/completions")) {
+  // Migration: Fix API URL for OpenWebUI compatibility
+  if (String(settings.apiUrl).endsWith("/v1/chat/completions") && String(settings.apiUrl).indexOf("api.openai.com") == -1) {
       String tempUrl = settings.apiUrl;
       tempUrl.replace("/v1/chat/completions", "/api/chat/completions");
       strlcpy(settings.apiUrl, tempUrl.c_str(), sizeof(settings.apiUrl));
@@ -1878,6 +2048,7 @@ void setup() {
   ttsSpeed = adminPrefs.getFloat("tts_speed", 0.8);
   setInputBalance(settings.inputBalance);
   vocAlarmThreshold = adminPrefs.getInt("voc_thresh", 50);
+  clockFormat12h = adminPrefs.getBool("clk_12h", false);
   
   enableTTSChunking = adminPrefs.getBool("tts_chunk", false);
   enableBME680 = adminPrefs.getBool("en_bme", false);
@@ -2273,6 +2444,21 @@ void loop() {
     display.updateAudioVUMeter(0, 0);
   }
 
+  if (g_runAecTuneUI) {
+      g_runAecTuneUI = false;
+      tuneAEC();
+  }
+  
+  if (g_runAecTestUI) {
+      g_runAecTestUI = false;
+      testAEC();
+  }
+  
+  if (g_runHarmonicTestUI) {
+      g_runHarmonicTestUI = false;
+      testHarmonic();
+  }
+
   // Hourly Weather Update
   if (strlen(settings.openWeatherKey) > 0 && network.isConnected()) {
       if (millis() - lastWeatherUpdate > 3600000) { // 1 hour
@@ -2415,7 +2601,8 @@ void loop() {
       if (tempInterrupt) {
           setInterruptMode(false);
       }
-  } else if (!isSpeaking) {
+  }
+  else if (!isSpeaking) {
       // If we are in a sub-menu or web config, we don't want to run the neural network,
       // but we MUST drain the AEC ringbuffer so it doesn't max out, overflow, and waste cycles!
       flushAecBuffer();
@@ -2427,8 +2614,10 @@ void loop() {
   // Check if speaking finished
   if (isSpeaking && !speaker.isRunning()) {
       isSpeaking = false;
-      String waitMsg = "Ready\nRSSI: " + String(network.getSignalStrength()) + " dBm";
-      display.showStatus(waitMsg.c_str());
+      if (!g_isSubMenuActive && !isWebServerActive) {
+          String waitMsg = "Ready\nRSSI: " + String(network.getSignalStrength()) + " dBm";
+          display.showStatus(waitMsg.c_str());
+      }
   }
   handleSerialCommands();
   if (isWebServerActive) {

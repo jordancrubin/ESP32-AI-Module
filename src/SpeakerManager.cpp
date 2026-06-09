@@ -52,11 +52,13 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
                 s_fade_samples++;
                 int32_t sample = pcm_buffer[i];
                 pcm_buffer[i] = (int16_t)((sample * s_volume_int * fade) >> 16);
-            } else {
+            }
+            else {
                 pcm_buffer[i] = (int16_t)((pcm_buffer[i] * s_volume_int) >> 8);
             }
         }
-    } else {
+    }
+    else {
         // Fast path for 99% of playback (no fade branching)
         for (size_t i = 0; i < len; i++) {
             pcm_buffer[i] = (int16_t)((pcm_buffer[i] * s_volume_int) >> 8);
@@ -67,7 +69,8 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
     // Handle 24kHz -> 16kHz resampling for AEC
     if (info.samprate == 16000) {
         speech.feedReference(pcm_buffer, len);
-    } else if (info.samprate == 24000) {
+    }
+    else if (info.samprate == 24000) {
         // Simple 24kHz -> 16kHz downsampling (3 input -> 2 output)
         size_t new_len = 0;
         
@@ -204,7 +207,7 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
             
             // Prime with a tiny burst of silence (50ms) to wake up amp and clear artifacts
             size_t bytes_written;
-            const uint8_t silence_chunk[1024] = {0};
+            static const uint8_t silence_chunk[1024] = {0};
             int silence_chunks = (sampleRate * 2 * 0.05) / sizeof(silence_chunk); // 50ms
             if (silence_chunks < 1) silence_chunks = 1;
             
@@ -239,6 +242,13 @@ void SpeakerManager::stop() {
         s_mp3_started = false;
     }
     if (tx_handle && s_i2s_enabled) {
+            // Flush with silence before disabling so the buffer doesn't hold old garbage on next playback
+            size_t bytes_written;
+            static const uint8_t tail_silence[2048] = {0};
+            for (int i = 0; i < 4; i++) {
+                i2s_channel_write(tx_handle, tail_silence, sizeof(tail_silence), &bytes_written, 20);
+            }
+            
         i2s_channel_disable(tx_handle); // Disable I2S output
         s_i2s_enabled = false;
     }
@@ -268,11 +278,13 @@ void SpeakerManager::loop() {
                                     s_fade_samples++;
                                     int32_t sample = pcm[i];
                                     pcm[i] = (int16_t)((sample * s_volume_int * fade) >> 16);
-                                } else {
+                                }
+                                else {
                                     pcm[i] = (int16_t)((pcm[i] * s_volume_int) >> 8);
                                 }
                             }
-                        } else {
+                        }
+                        else {
                             // Fast path for 99% of playback (no fade branching)
                             for (size_t i = 0; i < samples; i++) {
                                 pcm[i] = (int16_t)((pcm[i] * s_volume_int) >> 8);
@@ -283,7 +295,8 @@ void SpeakerManager::loop() {
                         // Handle 24kHz -> 16kHz resampling
                         if (s_i2s_std_cfg.clk_cfg.sample_rate_hz == 16000) {
                             speech.feedReference(pcm, samples);
-                        } else if (s_i2s_std_cfg.clk_cfg.sample_rate_hz == 24000) {
+                        }
+                        else if (s_i2s_std_cfg.clk_cfg.sample_rate_hz == 24000) {
                             size_t new_len = 0;
                             
                             for (size_t i = 0; i < samples; i += 3) {
@@ -319,11 +332,15 @@ void SpeakerManager::loop() {
                     s_mp3_started = false;
                 }
 
-                // Flush tail with silence before disabling to prevent artifacts
+                // Flush tail with enough silence to clear the entire DMA ringbuffer
                 if (tx_handle && s_i2s_enabled) {
                     size_t bytes_written;
-                    const uint8_t tail_silence[2048] = {0};
-                    i2s_channel_write(tx_handle, tail_silence, sizeof(tail_silence), &bytes_written, 100);
+                    static const uint8_t tail_silence[2048] = {0};
+                    for (int i = 0; i < 4; i++) {
+                        i2s_channel_write(tx_handle, tail_silence, sizeof(tail_silence), &bytes_written, 20);
+                    }
+                    i2s_channel_disable(tx_handle); // Disable the channel to prevent DMA underrun looping in the background
+                    s_i2s_enabled = false;
                 }
 
                 if (audioFile) audioFile.close();
@@ -343,7 +360,8 @@ void SpeakerManager::audioTask(void* parameter) {
         if (manager->isRunning() && !s_is_interrupted) {
             manager->loop();
             // No delay here to keep I2S buffer full (prevents stuttering)
-        } else {
+        }
+        else {
             vTaskDelay(pdMS_TO_TICKS(10)); // Sleep when idle
         }
     }

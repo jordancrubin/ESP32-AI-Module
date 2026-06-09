@@ -18,12 +18,14 @@ extern DisplayManager display;
 extern bool enableTTSChunking;
 extern bool playChunkedTTS(String text);
 extern float ttsSpeed;
+extern void flushAecBuffer();
 
 String LLMClient::getTtsBaseUrl() {
     if (settings.ttsProvider == 1 && strlen(settings.ttsUrl) > 0) {
         // Direct Mode: Use the specified URL
         return String(settings.ttsUrl);
-    } else {
+    }
+    else {
         // OpenWebUI Mode: Derive from main API URL (preserve port/host)
         String url = _apiUrl;
         
@@ -57,20 +59,28 @@ String LLMClient::getModels(WiFiManager& netMgr) {
     WiFiClient client;
     HTTPClient http;
 
-    // Construct models URL from _apiUrl (http://.../api/chat/completions -> http://.../api/models)
     String url = _apiUrl;
-    int splitIndex = url.indexOf("/api/");
-    if (splitIndex != -1) {
-        url = url.substring(0, splitIndex + 5) + "models";
-    } else {
-        // Also try /v1/ format (OpenAI compatible)
-        splitIndex = url.indexOf("/v1/");
-        if (splitIndex != -1) {
-            url = url.substring(0, splitIndex) + "/api/models";
+    int chatIndex = url.indexOf("/chat/completions");
+    if (chatIndex != -1) url = url.substring(0, chatIndex);
+    if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+
+    // Decouple LLM Model fetching from the TTS Provider setting.
+    // If the user points to a local /v1 endpoint, force it to /api/models for OpenWebUI compatibility.
+    int v1Index = url.indexOf("/v1");
+    if (v1Index != -1 && url.indexOf("api.openai.com") == -1) {
+        // User configured a /v1 endpoint for a local server, assume OpenWebUI
+        url = url.substring(0, v1Index) + "/api/models";
+    } else if (url.endsWith("/api")) {
+        // Ambiguous /api endpoint. Check for Ollama's default port.
+        if (url.indexOf(":11434") != -1) {
+            url += "/tags"; // Native Ollama
         } else {
-            if (settings.debugMode) Serial.println("LLMClient Error: Invalid API URL format. Current URL: " + _apiUrl);
-            return "Error: Invalid API URL format";
+            url += "/models"; // Assume OpenWebUI
         }
+    } else {
+        // Standard OpenAI or other compatible service
+        if (!url.endsWith("/v1")) url += "/v1";
+        url += "/models"; // Standard OpenAI
     }
 
     String serverPath = netMgr.resolveHost(url);
@@ -86,32 +96,46 @@ String LLMClient::getModels(WiFiManager& netMgr) {
         int httpCode = http.GET();
         
         String result = "";
-        if (httpCode > 0) {
+        if (httpCode == 200) {
             // Filter to extract only id and name from the data array
             JsonDocument filter;
             filter["data"][0]["id"] = true;
             filter["data"][0]["name"] = true;
+            filter["models"][0]["name"] = true; // Ollama native fallback
 
             JsonDocument doc;
             // Parse directly from stream to save memory (fixes OOM on boot)
             DeserializationError error = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
 
             if (!error) {
-                JsonArray data = doc["data"];
-                for (JsonObject v : data) {
-                    const char* id = v["id"];
-                    const char* name = v["name"];
-                    
-                    if (result.length() > 0) result += "\n";
-                    if (id) {
-                        result += String(id);
+                if (doc.containsKey("data")) {
+                    JsonArray data = doc["data"];
+                    for (JsonObject v : data) {
+                        const char* id = v["id"] ? v["id"] : v["name"];
+                        if (id) {
+                            if (result.length() > 0) result += "\n";
+                            result += id;
+                        }
+                    }
+                } else if (doc.containsKey("models")) {
+                    JsonArray data = doc["models"];
+                    for (JsonObject v : data) {
+                        const char* id = v["name"];
+                        if (id) {
+                            if (result.length() > 0) result += "\n";
+                            result += id;
+                        }
                     }
                 }
-                if (result.length() == 0) result = "No models found";
-            } else {
-                result = "Error: JSON Parsing failed";
+                if (result.length() == 0) result = "Error: No models found in JSON array";
             }
-        } else {
+            else {
+                result = "Error: JSON Parsing failed - " + String(error.c_str());
+            }
+        }
+        else {
+            String errorResponse = http.getString();
+            if (settings.debugMode) Serial.println("Models HTTP Error " + String(httpCode) + ": " + errorResponse);
             result = "Error: HTTP " + String(httpCode);
         }
         http.end();
@@ -126,7 +150,11 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     WiFiClient client;
     HTTPClient http;
     
-    String serverPath = netMgr.resolveHost(_apiUrl);
+    String url = _apiUrl;
+    if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+
+    
+    String serverPath = netMgr.resolveHost(url);
     if (serverPath == "") {
         return "Error: Host resolution failed";
     }
@@ -142,7 +170,8 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     while (_history.size() > MAX_HISTORY) {
         if (_history[0]["role"] == "system" && _history.size() > 1) {
             _history.remove(1);
-        } else {
+        }
+        else {
             _history.remove(0);
         }
     }
@@ -157,6 +186,11 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     doc["stream"] = true;
     doc["messages"] = _history;
     
+    // OpenWebUI Workaround: Prevent NoneType crash by supplying empty chat_id
+    doc["metadata"]["chat_id"] = "";
+    doc["chat_id"] = "";
+    doc["session_id"] = "";
+    
     // Check for web search trigger phrases in the prompt
     String lowerPrompt = prompt;
     lowerPrompt.toLowerCase();
@@ -168,7 +202,6 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
                         (lowerPrompt.indexOf("search the internet") != -1);
 
     if (useWebSearch) {
-        doc["features"]["web_search"] = true;
         
         // Dynamically append web search rules to the system prompt for this request
         if (doc["messages"].size() > 0 && doc["messages"][0]["role"] == "system") {
@@ -176,15 +209,6 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
             sysText += " Use web search ONLY for real-time info. For basic facts or math, answer immediately. IMPORTANT: Provide direct answers only. Never mention 'searching the web,' 'according to the website,' or 'my search results.' Do not use phrases like 'I'll do a web search' or 'Searching online.' If you find information via tools, integrate it naturally into your speech as if you already knew it. No citations or [1] brackets. Short, conversational responses only.";
             doc["messages"][0]["content"] = sysText;
         }
-    }
-
-    if (settings.enableMemory) {
-        doc["features"]["memory"] = true;
-    }
-
-    if (strlen(settings.knowledgeId) > 0) {
-        doc["files"][0]["type"] = "collection";
-        doc["files"][0]["id"] = settings.knowledgeId;
     }
 
     // Serialize to PSRAM to save Internal RAM
@@ -210,81 +234,82 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
             if (settings.debugMode) {
                 Serial.print("HTTP Response code: ");
                 Serial.println(httpResponseCode);
-                Serial.print("Streaming response: ");
+                Serial.println("--- Stream START ---");
             }
 
             WiFiClient* stream = http.getStreamPtr();
             String full_response = "";
-            String sentence_buffer = "";
             full_response.reserve(2048); // Pre-allocate to prevent heap fragmentation
-            sentence_buffer.reserve(512);
             
-            while (http.connected()) {
+            String streamBuffer = "";
+
+            while (http.connected() || stream->available()) {
                 if (stream->available()) {
-                    String line = stream->readStringUntil('\n');
-                    line.trim();
+                    char buf[128];
+                    int available = stream->available();
+                    int toRead = available > 127 ? 127 : available;
+                    int bytesRead = stream->read((uint8_t*)buf, toRead);
                     
-                    // Parse Server-Sent Events (SSE)
-                    if (line.startsWith("data: ")) {
-                        String jsonStr = line.substring(6);
-                        if (jsonStr == "[DONE]") break; // Stream finished
+                    if (bytesRead > 0) {
+                        buf[bytesRead] = '\0';
+                        streamBuffer += buf;
                         
-                        JsonDocument chunkDoc;
-                        DeserializationError err = deserializeJson(chunkDoc, jsonStr);
-                        if (!err) {
-                            const char* content = chunkDoc["choices"][0]["delta"]["content"];
-                            if (content) {
-                                full_response += content;
-                                // Removed Serial.print(content) to prevent audio distortion during streaming
-                                
-                                if (enableTTSChunking) {
-                                    sentence_buffer += content;
-                                    if (strchr(content, '.') || strchr(content, '!') || strchr(content, '?') || strchr(content, '\n')) {
-                                        sentence_buffer.trim();
-                                        if (sentence_buffer.length() > 5) {
-                                            if (!playChunkedTTS(sentence_buffer)) {
-                                                http.end(); // Abort stream if user interrupted
-                                                return "Interrupted by user";
-                                            }
-                                            sentence_buffer = "";
-                                        }
+                        // Parse Standard Server-Sent Events (SSE) / JSON Streams
+                        int newlineIdx;
+                        while ((newlineIdx = streamBuffer.indexOf('\n')) != -1) {
+                            String line = streamBuffer.substring(0, newlineIdx);
+                            streamBuffer = streamBuffer.substring(newlineIdx + 1);
+                            line.trim();
+                            
+                            if (line.startsWith("data:")) {
+                                String jsonStr = line.substring(5);
+                                jsonStr.trim();
+                                if (jsonStr != "[DONE]") {
+                                    JsonDocument chunkDoc;
+                                    DeserializationError err = deserializeJson(chunkDoc, jsonStr);
+                                    if (!err) {
+                                        const char* content = chunkDoc["choices"][0]["delta"]["content"];
+                                        if (!content) content = chunkDoc["message"]["content"];
+                                        if (content) full_response += content;
                                     }
                                 }
                             }
                         }
                     }
-                } else {
+                }
+                else {
+                    flushAecBuffer(); // Prevent AEC buffer overflow while blocked by network
                     delay(2); // Yield to watchdogs while waiting for next network packet
                 }
             }
             
-            if (settings.debugMode) Serial.println(); // Newline after stream
+            if (settings.debugMode) {
+                Serial.println("\n--- Stream END ---");
+                Serial.println("Parsed Response: " + full_response);
+            }
             
             // Final UI update to show the complete response now that audio processing has finished
             display.showResponse(full_response);
             lv_timer_handler();
-            
-            // Play any remaining text that didn't end in punctuation
-            if (enableTTSChunking && sentence_buffer.length() > 0) {
-                sentence_buffer.trim();
-                if (sentence_buffer.length() > 0) playChunkedTTS(sentence_buffer);
-            }
             
             if (full_response.length() > 0) {
                 result = full_response;
                 JsonObject assistantMsg = _history.add<JsonObject>();
                 assistantMsg["role"] = "assistant";
                 assistantMsg["content"] = result;
-            } else {
+            }
+            else {
                 result = "Error: Empty stream response";
             }
-        } else {
+        }
+        else {
             result = "Error: HTTP " + String(httpResponseCode);
             if (httpResponseCode > 0) result += " " + http.getString();
             if (_history.size() > 0) _history.remove(_history.size() - 1);
         }
         http.end();
-    } else {
+    }
+    else {
         result = "Error: Connection failed";
         if (_history.size() > 0) _history.remove(_history.size() - 1);
     }
@@ -359,9 +384,12 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
             file.close();
             http.end();
             
+            flushAecBuffer(); // Clear any microphone ringbuffer overflows that occurred while blocked by the network
+            
             if (settings.debugMode) Serial.println("TTS Download Complete");
             return true;
-        } else {
+        }
+        else {
             if (settings.debugMode) Serial.printf("TTS Error: HTTP %d\n", httpCode);
             if (httpCode > 0 && settings.debugMode) Serial.println(http.getString());
         }
@@ -382,9 +410,21 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
         url = url.substring(0, chatIndex);
     }
     if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
-    if (url.endsWith("/api")) {
+    
+    // Decouple transcription endpoint from TTS Provider.
+    // OpenWebUI strictly hosts the native transcription engine at /api/v1/audio/transcriptions
+    int v1Index = url.indexOf("/v1");
+    if (v1Index != -1 && url.indexOf("api.openai.com") == -1) {
+        url = url.substring(0, v1Index);
+        url += "/api/v1/audio/transcriptions";
+    }
+    else if (url.endsWith("/v1")) {
+        url += "/audio/transcriptions";
+    }
+    else if (url.endsWith("/api")) {
         url += "/v1/audio/transcriptions";
-    } else {
+    }
+    else {
         url += "/audio/transcriptions";
     }
 
@@ -424,7 +464,7 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
     String boundary = "------------------------ESP32Boundary" + String(millis());
     
     // 2. Construct the Body Parts
-    // Part 1: Model + File Header (Audio) - Send Model first for strict form parsers (like FastAPI/OpenWebUI)
+    // Part 1: Model + File Header
     String part1 = "--" + boundary + "\r\n" +
                    "Content-Disposition: form-data; name=\"model\"\r\n" +
                    "\r\n" +
@@ -455,45 +495,89 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
     if (settings.debugMode) Serial.println("[" + String(millis()) + "] Sending Body Part 1...");
     client.print(part1);
     
-    // Send audio in chunks
-    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Sending Audio Data...");
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Sending Audio Data (" + String(size) + " bytes)...");
     size_t bytesWritten = 0;
     size_t chunkSize = 1024;
+    int retryCount = 0;
     while (bytesWritten < size) {
-        if (!client.connected()) {
-            if (settings.debugMode) Serial.println("[" + String(millis()) + "] Client disconnected during audio upload");
+        // Intercept early server responses (usually HTTP errors) before writing to a potentially closed socket
+        if (client.available() || !client.connected()) {
+            if (client.available()) {
+                if (settings.debugMode) {
+                    Serial.println("[" + String(millis()) + "] SERVER REJECTED UPLOAD: Reading early response...");
+                    while(client.available()) {
+                        String line = client.readStringUntil('\n');
+                        line.trim();
+                        if (line.length() > 0) Serial.println(">> " + line);
+                    }
+                }
+            }
+            if (!client.connected()) {
+                if (settings.debugMode) Serial.println("[" + String(millis()) + "] ERROR: Client disconnected at byte " + String(bytesWritten));
+            }
             break;
         }
         size_t toWrite = (size - bytesWritten) < chunkSize ? (size - bytesWritten) : chunkSize;
         size_t written = client.write(audioData + bytesWritten, toWrite);
-        if (written == 0) break;
-        bytesWritten += written;
+        
+        if (written == 0) {
+            retryCount++;
+            if (settings.debugMode && retryCount % 10 == 0) {
+                Serial.println("[" + String(millis()) + "] Network buffer full, waiting... (Retry " + String(retryCount) + "/100)");
+            }
+            if (retryCount > 100) { // 1 second timeout
+                if (settings.debugMode) Serial.println("[" + String(millis()) + "] ERROR: Timeout writing audio data at byte " + String(bytesWritten));
+                break;
+            }
+            delay(10);
+        } else {
+            bytesWritten += written;
+            retryCount = 0;
+        }
+        flushAecBuffer(); // Prevent AEC buffer overflow while writing to network
     }
-    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Audio sent: " + String(bytesWritten) + "/" + String(size));
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Audio transmission finished. Sent: " + String(bytesWritten) + "/" + String(size));
     
+    if (!client.connected() && bytesWritten < size) {
+        client.stop();
+        return "Error: Upload rejected by server (See Debug)";
+    }
+
     if (settings.debugMode) Serial.println("[" + String(millis()) + "] Sending Body Part 2...");
     client.print(part2);
 
     // 6. Read Response
-    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Waiting for response...");
+    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Waiting for response headers...");
     String response = "";
     bool headersFinished = false;
     int contentLength = -1;
     unsigned long start = millis();
+    String httpStatusLine = "";
     
     while (client.connected() || client.available()) {
-        if (millis() - start > 60000) break;
+        if (millis() - start > 60000) {
+            if (settings.debugMode) Serial.println("[" + String(millis()) + "] ERROR: Timeout waiting for response");
+            break;
+        }
+        flushAecBuffer(); // Prevent AEC buffer overflow while blocked by network
         if (client.available()) {
             if (!headersFinished) {
                 String line = client.readStringUntil('\n');
                 line.trim();
-                if (line == "") {
+                if (httpStatusLine == "") {
+                    httpStatusLine = line;
+                    if (settings.debugMode) Serial.println("[" + String(millis()) + "] HTTP Status: " + httpStatusLine);
+                } else if (line == "") {
                     headersFinished = true;
-                } else {
+                    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Headers finished. Content-Length: " + String(contentLength));
+                }
+                else {
+                    if (settings.debugMode) Serial.println("> Header: " + line);
                     String lowerLine = line;
                     lowerLine.toLowerCase();
                     if (lowerLine.startsWith("content-length:")) {
                         contentLength = line.substring(15).toInt();
+                        if (contentLength > 0) response.reserve(contentLength); // Prevent heap fragmentation!
                     }
                 }
             } else {
@@ -501,20 +585,38 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
                 if (contentLength != -1) {
                     // If we know the length, read exactly that much and stop
                     while (response.length() < (unsigned int)contentLength && (client.connected() || client.available())) {
-                        if (client.available()) response += (char)client.read();
-                        else delay(1);
+                        if (client.available()) {
+                            uint8_t buf[256];
+                            int bytesRead = client.read(buf, sizeof(buf));
+                            if (bytesRead > 0) response.concat((const char*)buf, bytesRead);
+                        }
+                        else {
+                            flushAecBuffer(); // Prevent AEC buffer overflow during large body downloads
+                            delay(1);
+                        }
                     }
                     break; // Done reading
-                } else {
+                }
+                else {
                     // Fallback: read until close
-                    response += (char)client.read();
+                    uint8_t buf[256];
+                    int bytesRead = client.read(buf, sizeof(buf));
+                    if (bytesRead > 0) response.concat((const char*)buf, bytesRead);
                 }
             }
+        }
+        else {
+            delay(2); // Yield to prevent WDT starvation while waiting for network packet
         }
     }
     client.stop();
 
-    if (settings.debugMode) Serial.println("[" + String(millis()) + "] Transcription Response: " + response);
+    if (settings.debugMode) {
+        Serial.println("[" + String(millis()) + "] Raw Transcription Response:");
+        Serial.println("========================================");
+        Serial.println(response);
+        Serial.println("========================================");
+    }
     
     // Parse JSON result
     JsonDocument doc;
@@ -523,14 +625,18 @@ String LLMClient::transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& 
     
     if (error) {
         result = "Error: JSON " + String(error.c_str());
-    } else if (!doc["error"].isNull()) {
+    }
+    else if (!doc["error"].isNull()) {
         result = "Error: " + doc["error"]["message"].as<String>();
-    } else if (!doc["detail"].isNull()) {
+    }
+    else if (!doc["detail"].isNull()) {
         result = "Error: " + doc["detail"].as<String>();
-    } else if (!doc["text"].isNull()) {
+    }
+    else if (!doc["text"].isNull()) {
         result = doc["text"].as<String>();
         if (result.length() == 0) result = "Error: No speech";
-    } else {
+    }
+    else {
         result = "Error: Invalid API response";
     }
     
@@ -570,7 +676,36 @@ String LLMClient::getVoices(WiFiManager& netMgr) {
     if (http.begin(client, serverPath)) {
         http.addHeader("Authorization", "Bearer " + _apiKey);
         int httpCode = http.GET();
-        String result = (httpCode > 0) ? http.getString() : ("Error: HTTP " + String(httpCode));
+        String result = "";
+        if (httpCode == 200) {
+            JsonDocument filter;
+            filter["voices"][0]["id"] = true; // Only keep the ID string in memory
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+            
+            if (!error && doc["voices"].is<JsonArray>()) {
+                JsonArray voices = doc["voices"];
+                for (JsonVariant v : voices) {
+                    const char* voiceName = v.is<JsonObject>() ? v["id"] : v.as<const char*>();
+                    if (voiceName && strlen(voiceName) > 0) {
+                        char firstChar = voiceName[0];
+                        if (firstChar == 'a' || firstChar == 'b' || firstChar == 'd') {
+                            if (result.length() > 0) result += '\n';
+                            result += voiceName;
+                        }
+                    }
+                }
+                if (result.length() == 0) result = "Error: No matching voices found";
+            }
+            else {
+                result = "Error: JSON Parsing failed - " + String(error.c_str());
+            }
+        }
+        else {
+            String errorResponse = http.getString();
+            if (settings.debugMode) Serial.println("Voices HTTP Error " + String(httpCode) + ": " + errorResponse);
+            result = "Error: HTTP " + String(httpCode);
+        }
         http.end();
         return result;
     }

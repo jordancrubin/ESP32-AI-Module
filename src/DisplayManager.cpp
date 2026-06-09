@@ -12,34 +12,32 @@
 #include "BootLogo.h"
 #include <WiFi.h>
 #include <time.h>
+#include "Config.h"
 #include "SettingsManager.h"
 
-// GPIO 38 conflicts with the PSRAM bus on S3 modules, causing audio distortion.
-// GPIO 4 is a safe pin for PWM backlight control.
+// Note GPIO 38 conflicts with the PSRAM bus on S3 modules
 #define TFT_BL 4
 
-// Static reference for the callback
 static Arduino_GFX *static_gfx = nullptr;
 static DisplayManager *static_dm = nullptr;
 static TouchCalibration _currentCal;
 static bool is_touch_active = false;
 static bool touch_disabled = false;
 bool g_isSubMenuActive = false;
-
 extern bool isProcessing;
 extern bool isSpeaking;
 extern bool timerActive;
 extern bool timerRinging;
+extern bool g_runAecTuneUI;
+extern bool g_runAecTestUI;
+extern bool g_runHarmonicTestUI;
 extern unsigned long timerStartTime;
 extern uint32_t timerDurationMs;
 extern void getAudioLevels(int* l, int* r);
-
-// BME680 Globals
 extern bool enableBME680;
 extern float g_currentVocKOhms;
 extern int vocAlarmThreshold;
-
-// Global state for Clock/Idle handling
+extern bool clockFormat12h;
 static String g_lastVoice = "alloy";
 static int g_lastVolume = 21;
 static String g_voiceOptions = "alloy";
@@ -49,23 +47,65 @@ static lv_timer_t * g_idleTimer = nullptr;
 static uint32_t g_idleTimeout = 10000; // Dynamic idle timeout variable
 static void showVoiceModelConfig();
 static void showMicAecConfig();
+static void showDiagnostics();
+static void showAboutScreen();
 static void setupBootScreen();
 static lv_obj_t * boot_cont = nullptr;
 static VoiceCallback g_voiceCb = nullptr;
-static uint16_t * s_boot_buffer = nullptr;
-static uint16_t s_boot_w = 0;
-static uint16_t s_boot_h = 0;
 
 // LVGL Async Wrappers for safe screen transitions
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[async_show_main_ui]---LVGL async wrapper for main UI--------]
+// Parameters: void * p - Generic LVGL pointer
+//////////////////////////////////////////////////////////////////////////
 static void async_show_main_ui(void * p) {
     if (static_dm) static_dm->showMainUI(g_lastVoice, g_lastVolume, g_voiceOptions);
 }
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[async_show_voice_model_config]---Async wrapper for voice----]
+// Parameters: void * p - Generic LVGL pointer
+//////////////////////////////////////////////////////////////////////////
 static void async_show_voice_model_config(void *p) { showVoiceModelConfig(); }
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[async_show_audio_config]---Async wrapper for audio UI-------]
+// Parameters: void * p - Generic LVGL pointer
+//////////////////////////////////////////////////////////////////////////
 static void async_show_audio_config(void *p) { if(static_dm) static_dm->showAudioConfig(); }
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[async_show_mic_aec_config]---Async wrapper for AEC UI-------]
+// Parameters: void * p - Generic LVGL pointer
+//////////////////////////////////////////////////////////////////////////
 static void async_show_mic_aec_config(void *p) { showMicAecConfig(); }
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[async_show_web_config]---Async wrapper for web config UI----]
+// Parameters: void * p - Generic LVGL pointer
+//////////////////////////////////////////////////////////////////////////
 static void async_show_web_config(void *p) { if(static_dm) static_dm->showWebConfig(WiFi.localIP().toString(), "aiesp.local"); }
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[async_show_wifi_config]---Async wrapper for WiFi config-----]
+// Parameters: void * p - Generic LVGL pointer
+//////////////////////////////////////////////////////////////////////////
 static void async_show_wifi_config(void *p) { if(static_dm) static_dm->showWiFiConfig(); }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[async_show_diagnostics]---Async wrapper for diagnostics UI-]
+//////////////////////////////////////////////////////////////////////////
+static void async_show_diagnostics(void *p) { showDiagnostics(); }
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[async_show_about]---Async wrapper for about UI--------------]
+//////////////////////////////////////////////////////////////////////////
+static void async_show_about(void *p) { showAboutScreen(); }
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[localVoiceEventHandler]---LVGL event for voice selection----]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 static void localVoiceEventHandler(lv_event_t * e) {
     if (g_voiceCb) {
         lv_obj_t * dropdown = lv_event_get_target(e);
@@ -75,27 +115,30 @@ static void localVoiceEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[getClockColor]---Return the selected clock color hex value--]
+//////////////////////////////////////////////////////////////////////////
 static lv_color_t getClockColor() {
     if (strcmp(settings.clockColor, "green") == 0) return lv_color_make(0, 255, 0);
     if (strcmp(settings.clockColor, "white") == 0) return lv_color_make(255, 255, 255);
     return lv_color_make(255, 0, 0); // Default Red
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[segment_draw_event_cb]---Custom polygon draw for 7-segment--]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 static void segment_draw_event_cb(lv_event_t * e) {
     lv_obj_t * obj = lv_event_get_target(e);
-    lv_draw_ctx_t * draw_ctx = lv_event_get_draw_ctx(e);
-    
+    lv_draw_ctx_t * draw_ctx = lv_event_get_draw_ctx(e);  
     lv_area_t coords;
     lv_obj_get_coords(obj, &coords);
-    
     int32_t w = lv_obj_get_width(obj);
-    int32_t h = lv_obj_get_height(obj);
-    
+    int32_t h = lv_obj_get_height(obj); 
     lv_draw_rect_dsc_t draw_dsc;
     lv_draw_rect_dsc_init(&draw_dsc);
     draw_dsc.bg_color = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
     draw_dsc.bg_opa = LV_OPA_COVER;
-    
     lv_point_t points[6];
     
     if (w > h) { // Horizontal
@@ -106,7 +149,8 @@ static void segment_draw_event_cb(lv_event_t * e) {
         points[3].x = coords.x2;                  points[3].y = coords.y1 + half_h;
         points[4].x = coords.x2 - half_h;         points[4].y = coords.y2;
         points[5].x = coords.x1 + half_h;         points[5].y = coords.y2;
-    } else { // Vertical
+    }
+    else { // Vertical
         int32_t half_w = w / 2;
         points[0].x = coords.x1 + half_w;         points[0].y = coords.y1;
         points[1].x = coords.x2;                  points[1].y = coords.y1 + half_w;
@@ -115,13 +159,17 @@ static void segment_draw_event_cb(lv_event_t * e) {
         points[4].x = coords.x1;                  points[4].y = coords.y2 - half_w;
         points[5].x = coords.x1;                  points[5].y = coords.y1 + half_w;
     }
-    
     lv_draw_polygon(draw_ctx, &draw_dsc, points, 6);
 }
 
 struct SevenSegmentDigit {
     lv_obj_t* segments[7]; // A, B, C, D, E, F, G
+    int current_num = -1; // Cache to prevent redundant SPI redraws
     
+    //////////////////////////////////////////////////////////////////////////
+    //-FUNCTION-[create_segment]---Create a single 7-segment polygon part----]
+    // Parameters: lv_obj_t* parent, int x, int y, int w, int h
+    //////////////////////////////////////////////////////////////////////////
     lv_obj_t* create_segment(lv_obj_t* parent, int x, int y, int w, int h) {
         lv_obj_t* obj = lv_obj_create(parent);
         lv_obj_set_pos(obj, x, y);
@@ -130,13 +178,17 @@ struct SevenSegmentDigit {
         lv_obj_set_style_border_width(obj, 0, 0);
         lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
         lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
-        // Set initial color to inactive gray
         lv_obj_set_style_bg_color(obj, lv_color_make(40, 40, 40), 0);
         lv_obj_add_event_cb(obj, segment_draw_event_cb, LV_EVENT_DRAW_MAIN, NULL);
         return obj;
     }
 
+    //////////////////////////////////////////////////////////////////////////
+    //-FUNCTION-[create]---Construct a complete 7-segment digit object-------]
+    // Parameters: lv_obj_t* parent, int x, int y, int w, int h
+    //////////////////////////////////////////////////////////////////////////
     void create(lv_obj_t* parent, int x, int y, int w, int h) {
+        current_num = -2; // Reset cache to an impossible value to force a redraw on physical creation
         int thickness = w / 7; 
         int segLenH = w - 2 * thickness; 
         int segLenV = (h - 3 * thickness) / 2;
@@ -157,7 +209,14 @@ struct SevenSegmentDigit {
         segments[6] = create_segment(parent, x + thickness, y + thickness + segLenV, segLenH, thickness);
     }
 
+    //////////////////////////////////////////////////////////////////////////
+    //-FUNCTION-[setNumber]---Update the displayed digit on the 7-segment----]
+    // Parameters: int num - The number to display
+    //////////////////////////////////////////////////////////////////////////
     void setNumber(int num) {
+        if (num == current_num) return; // Prevent unnecessary LVGL invalidation
+        current_num = num;
+        
         // A=0, B=1, C=2, D=3, E=4, F=5, G=6
         const uint8_t patterns[10] = {
             0b00111111, // 0
@@ -172,13 +231,25 @@ struct SevenSegmentDigit {
             0b01101111  // 9
         };
         
-        if (num < 0 || num > 9) return;
-        uint8_t mask = patterns[num];
-        
+        uint8_t mask = (num >= 0 && num <= 9) ? patterns[num] : 0;
         for(int i=0; i<7; i++) {
-            if ((mask >> i) & 1) {
+            lv_obj_clear_flag(segments[i], LV_OBJ_FLAG_HIDDEN); // Ensure it's not hidden from previous bug
+            
+            if (num == 10) { // Special Case: 12-Hour Inactive '1'
+                if (i == 1 || i == 2) lv_obj_set_style_bg_color(segments[i], lv_color_make(40, 40, 40), 0);
+                else lv_obj_set_style_bg_color(segments[i], lv_color_black(), 0);
+            }
+            else if (num == 11) { // Special Case: 12-Hour Active '1'
+                if (i == 1 || i == 2) lv_obj_set_style_bg_color(segments[i], getClockColor(), 0);
+                else lv_obj_set_style_bg_color(segments[i], lv_color_black(), 0);
+            }
+            else if (num == -1) { // Fully hidden
+                lv_obj_set_style_bg_color(segments[i], lv_color_black(), 0); // Paint it black to effectively hide it
+            }
+            else if ((mask >> i) & 1) {
                 lv_obj_set_style_bg_color(segments[i], getClockColor(), 0); // Active Color
-            } else {
+            }
+            else {
                 lv_obj_set_style_bg_color(segments[i], lv_color_make(40, 40, 40), 0); // Inactive Gray
             }
         }
@@ -199,16 +270,34 @@ struct ClockWidgets {
     lv_obj_t* vocCont;
     lv_obj_t* vocBar;
     lv_obj_t* vocLabel;
+    
+    lv_obj_t* amLabel;
+    lv_obj_t* pmLabel;
+    
+    int cached_rssi_level = -1;
+    int cached_day = -1;
+    int cached_voc_state = -1;
+    int cached_blink = -1;
+    int cached_pm = -1;
+    char cached_weather[64] = "";
 };
 
 static ClockWidgets g_clockWidgets;
 static void showClockScreen();
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[kb_enable_timer_cb]---Re-enable touch after keyboard use----]
+// Parameters: lv_timer_t * timer - The LVGL timer
+//////////////////////////////////////////////////////////////////////////
 static void kb_enable_timer_cb(lv_timer_t * timer) {
     touch_disabled = false;
     lv_timer_del(timer);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[my_touchpad_read]---LVGL touch input driver callback--------]
+// Parameters: lv_indev_drv_t * indev_driver, lv_indev_data_t * data
+//////////////////////////////////////////////////////////////////////////
 // LVGL Touchpad Read Callback
 void my_touchpad_read(lv_indev_drv_t * indev_driver, lv_indev_data_t * data) {
     if (!static_dm) return;
@@ -222,21 +311,24 @@ void my_touchpad_read(lv_indev_drv_t * indev_driver, lv_indev_data_t * data) {
     if (static_dm->getRawTouch(&touchX, &touchY)) {
         data->state = LV_INDEV_STATE_PR;
         is_touch_active = true;
-
-        // Use saved calibration if valid, otherwise fallback to defaults
+        // Use saved calibration if valid, otherwise fallback
         uint16_t xMin = _currentCal.isValid ? _currentCal.xMin : 200;
         uint16_t xMax = _currentCal.isValid ? _currentCal.xMax : 3800;
         uint16_t yMin = _currentCal.isValid ? _currentCal.yMin : 200;
         uint16_t yMax = _currentCal.isValid ? _currentCal.yMax : 3800;
-
         data->point.x = map(touchX, xMin, xMax, 0, SCREEN_WIDTH);
         data->point.y = map(touchY, yMin, yMax, 0, SCREEN_HEIGHT);
-    } else {
+    }
+    else {
         data->state = LV_INDEV_STATE_REL;
         is_touch_active = false;
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[tft_output]---TJpg_Decoder output render callback-----------]
+// Parameters: int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap
+//////////////////////////////////////////////////////////////////////////
 // Callback function for TJpg_Decoder
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
     if (static_gfx) {
@@ -245,15 +337,6 @@ bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) 
     return true;
 }
 
-// Callback for decoding JPG to memory buffer
-static bool memory_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
-    if (s_boot_buffer) {
-        for (int j = 0; j < h; j++) {
-            memcpy(&s_boot_buffer[(y + j) * s_boot_w + x], &bitmap[j * w], w * 2);
-        }
-    }
-    return true;
-}
 
 VolumeCallback DisplayManager::volumeCb = nullptr;
 WiFiConfigCallback DisplayManager::wifiCb = nullptr;
@@ -264,6 +347,10 @@ VoiceCallback DisplayManager::voiceCb = nullptr;
 SetupModeCallback DisplayManager::setupModeCb = nullptr;
 BalanceCallback DisplayManager::balanceCb = nullptr;
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[my_disp_flush]---LVGL display driver flush callback---------]
+// Parameters: lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p
+//////////////////////////////////////////////////////////////////////////
 // LVGL Flush Callback
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
     if (static_gfx) {
@@ -274,6 +361,9 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
     lv_disp_flush_ready(disp);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[DisplayManager]---Constructor for the Display Manager-------]
+//////////////////////////////////////////////////////////////////////////
 DisplayManager::DisplayManager() {
     bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCK, TFT_MOSI, TFT_MISO);
     gfx = new Arduino_ILI9341(bus, TFT_RST, 0, false);
@@ -292,6 +382,10 @@ DisplayManager::DisplayManager() {
     _currentBrightness = 255;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[begin]---Initialize display, backlight, touch, and LVGL-----]
+// Parameters: TouchCalibration cal - Saved calibration data
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::begin(TouchCalibration cal) {
     _currentCal = cal;
     gfx->begin(20000000);
@@ -342,6 +436,10 @@ void DisplayManager::begin(TouchCalibration cal) {
     setupBootScreen();
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[clock_update_cb]---LVGL timer callback to update clock UI---]
+// Parameters: lv_timer_t * t - The LVGL timer
+//////////////////////////////////////////////////////////////////////////
 // Callback to update the clock label every second
 static void clock_update_cb(lv_timer_t * t) {
     time_t now;
@@ -349,16 +447,46 @@ static void clock_update_cb(lv_timer_t * t) {
     time(&now);
     localtime_r(&now, &timeinfo);
     
-    g_clockWidgets.h1.setNumber(timeinfo.tm_hour / 10);
-    g_clockWidgets.h2.setNumber(timeinfo.tm_hour % 10);
+    int displayHour = timeinfo.tm_hour;
+    bool isPM = timeinfo.tm_hour >= 12;
+    
+    if (clockFormat12h) {
+        displayHour = displayHour % 12;
+        if (displayHour == 0) displayHour = 12;
+        
+        if (isPM != g_clockWidgets.cached_pm) {
+            g_clockWidgets.cached_pm = isPM;
+            if (g_clockWidgets.amLabel) {
+                lv_obj_set_style_text_color(g_clockWidgets.amLabel, !isPM ? getClockColor() : lv_color_make(40, 40, 40), 0);
+            }
+            if (g_clockWidgets.pmLabel) {
+                lv_obj_set_style_text_color(g_clockWidgets.pmLabel, isPM ? getClockColor() : lv_color_make(40, 40, 40), 0);
+            }
+        }
+    }
+    
+    int h1_val = displayHour / 10;
+    if (clockFormat12h) {
+        g_clockWidgets.h1.setNumber((h1_val == 0) ? 10 : 11);
+    }
+    else {
+        g_clockWidgets.h1.setNumber(h1_val);
+    }
+    g_clockWidgets.h2.setNumber(displayHour % 10);
     g_clockWidgets.m1.setNumber(timeinfo.tm_min / 10);
     g_clockWidgets.m2.setNumber(timeinfo.tm_min % 10);
     
     // Blink colon
     bool blink = (timeinfo.tm_sec % 2) == 0;
-    lv_color_t col = blink ? getClockColor() : lv_color_make(40, 40, 40);
-    if(g_clockWidgets.colon[0]) lv_obj_set_style_bg_color(g_clockWidgets.colon[0], col, 0);
-    if(g_clockWidgets.colon[1]) lv_obj_set_style_bg_color(g_clockWidgets.colon[1], col, 0);
+    if (blink != g_clockWidgets.cached_blink) {
+        g_clockWidgets.cached_blink = blink;
+        lv_color_t col = blink ? getClockColor() : lv_color_make(40, 40, 40);
+        if(g_clockWidgets.colon[0]) lv_obj_set_style_bg_color(g_clockWidgets.colon[0], col, 0);
+        if(g_clockWidgets.colon[1]) lv_obj_set_style_bg_color(g_clockWidgets.colon[1], col, 0);
+        
+        if (g_clockWidgets.timerColon[0]) lv_obj_set_style_bg_color(g_clockWidgets.timerColon[0], col, 0);
+        if (g_clockWidgets.timerColon[1]) lv_obj_set_style_bg_color(g_clockWidgets.timerColon[1], col, 0);
+    }
 
     // Update WiFi Signal (Throttled to every 5 seconds to prevent radio locking)
     static int rssi = -100;
@@ -375,36 +503,43 @@ static void clock_update_cb(lv_timer_t * t) {
         else if (rssi > -85) level = 1;
     }
     
-    for (int i = 0; i < 4; i++) {
-        if (g_clockWidgets.wifiBars[i]) {
-            // Active bars are Green, inactive are Dark Gray
-            lv_color_t barColor = (i < level) ? lv_color_make(0, 255, 0) : lv_color_make(40, 40, 40);
-            lv_obj_set_style_bg_color(g_clockWidgets.wifiBars[i], barColor, 0);
+    if (level != g_clockWidgets.cached_rssi_level) {
+        g_clockWidgets.cached_rssi_level = level;
+        for (int i = 0; i < 4; i++) {
+            if (g_clockWidgets.wifiBars[i]) {
+                // Active bars are Green, inactive are Dark Gray
+                lv_color_t barColor = (i < level) ? lv_color_make(0, 255, 0) : lv_color_make(40, 40, 40);
+                lv_obj_set_style_bg_color(g_clockWidgets.wifiBars[i], barColor, 0);
+            }
         }
     }
 
     // Update Day of Week
     int currentDay = timeinfo.tm_wday;
-    int labelIdx = (currentDay + 6) % 7; // Convert to 0=Mon, 6=Sun
-    for(int i=0; i<7; i++) {
-        if(g_clockWidgets.dayLabels[i]) {
-             if(i == labelIdx) {
-                 lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], getClockColor(), 0);
-             } else {
-                 lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], lv_color_make(40, 40, 40), 0);
-             }
+    if (currentDay != g_clockWidgets.cached_day) {
+        g_clockWidgets.cached_day = currentDay;
+        int labelIdx = (currentDay + 6) % 7; // Convert to 0=Mon, 6=Sun
+        for(int i=0; i<7; i++) {
+            if(g_clockWidgets.dayLabels[i]) {
+                 if(i == labelIdx) {
+                     lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], getClockColor(), 0);
+                 }
+                 else {
+                     lv_obj_set_style_text_color(g_clockWidgets.dayLabels[i], lv_color_make(40, 40, 40), 0);
+                 }
+            }
         }
     }
 
     // Update Timer if active
     if (g_clockWidgets.timerCont) {
+        static int last_clock_sec = -1;
+        static uint32_t display_rem = 0;
+        static unsigned long last_start_time = 0;
+
         if (timerActive || timerRinging) {
             lv_obj_clear_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_HIDDEN);
             uint32_t rem = 0;
-            
-            static int last_clock_sec = -1;
-            static uint32_t display_rem = 0;
-            static unsigned long last_start_time = 0;
 
             if (timerActive) {
                 unsigned long elapsed = millis() - timerStartTime;
@@ -421,12 +556,10 @@ static void clock_update_cb(lv_timer_t * t) {
                     display_rem = actual_rem;
                     last_clock_sec = timeinfo.tm_sec;
                 }
-                rem = display_rem;
-            } else {
-                display_rem = 0;
-                last_start_time = 0;
             }
             
+            rem = display_rem;
+
             int m = rem / 60;
             int s = rem % 60;
             if (m > 99) m = 99; // Cap at 99 mins
@@ -441,8 +574,13 @@ static void clock_update_cb(lv_timer_t * t) {
             if (g_clockWidgets.timerColon[1]) lv_obj_set_style_bg_color(g_clockWidgets.timerColon[1], timerCol, 0);
             
             // Blink entire timer when ringing
-            if (timerRinging && !blink) lv_obj_add_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_HIDDEN);
-        } else {
+            if (timerRinging && !blink) {
+                lv_obj_add_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        else {
+            display_rem = 0;
+            last_start_time = 0;
             lv_obj_add_flag(g_clockWidgets.timerCont, LV_OBJ_FLAG_HIDDEN);
         }
     }
@@ -450,23 +588,39 @@ static void clock_update_cb(lv_timer_t * t) {
     // Update Weather Label if it exists
     if (g_clockWidgets.weatherLabel && static_dm) {
         if (strlen(static_dm->_weatherTemp) > 0) {
-            lv_label_set_text_fmt(g_clockWidgets.weatherLabel, "%s %s", static_dm->_weatherTemp, static_dm->_weatherDesc);
+            char w_buf[64];
+            snprintf(w_buf, sizeof(w_buf), "%s %s", static_dm->_weatherTemp, static_dm->_weatherDesc);
+            if (strcmp(w_buf, g_clockWidgets.cached_weather) != 0) {
+                strlcpy(g_clockWidgets.cached_weather, w_buf, sizeof(g_clockWidgets.cached_weather));
+                lv_label_set_text(g_clockWidgets.weatherLabel, w_buf);
+            }
         }
     }
 
     // Update VOC Bar if it exists
     if (enableBME680 && g_clockWidgets.vocBar) {
         lv_bar_set_value(g_clockWidgets.vocBar, (int)g_currentVocKOhms, LV_ANIM_ON);
-        if (g_currentVocKOhms < vocAlarmThreshold) {
-            lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_RED), LV_PART_INDICATOR);
-        } else if (g_currentVocKOhms < (vocAlarmThreshold * 2)) {
-            lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_ORANGE), LV_PART_INDICATOR);
-        } else {
-            lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_GREEN), LV_PART_INDICATOR);
+        int voc_state = (g_currentVocKOhms < vocAlarmThreshold) ? 0 : (g_currentVocKOhms < (vocAlarmThreshold * 2) ? 1 : 2);
+        
+        if (voc_state != g_clockWidgets.cached_voc_state) {
+            g_clockWidgets.cached_voc_state = voc_state;
+            if (voc_state == 0) {
+                lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_RED), LV_PART_INDICATOR);
+            }
+            else if (voc_state == 1) {
+                lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_ORANGE), LV_PART_INDICATOR);
+            }
+            else {
+                lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_palette_main(LV_PALETTE_GREEN), LV_PART_INDICATOR);
+            }
         }
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[clock_click_cb]---LVGL event to handle clock screen touch---]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 // Callback when Clock screen is touched
 static void clock_click_cb(lv_event_t * e) {
     if (g_clockTimer) {
@@ -477,6 +631,10 @@ static void clock_click_cb(lv_event_t * e) {
     lv_async_call(async_show_main_ui, NULL);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[idle_timer_cb]---LVGL timer callback to detect inactivity---]
+// Parameters: lv_timer_t * t - The LVGL timer
+//////////////////////////////////////////////////////////////////////////
 // Callback to check for inactivity
 static void idle_timer_cb(lv_timer_t * t) {
     // Prevent clock screen during active interactions
@@ -495,6 +653,9 @@ static void idle_timer_cb(lv_timer_t * t) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showClockScreen]---Render the idle clock UI screen----------]
+//////////////////////////////////////////////////////////////////////////
 static void showClockScreen() {
     g_isSubMenuActive = false;
     if (static_dm) {
@@ -513,6 +674,14 @@ static void showClockScreen() {
 
     lv_obj_clean(lv_scr_act());
     boot_cont = nullptr;
+    
+    // Reset caches so elements actually draw the first time
+    g_clockWidgets.cached_rssi_level = -1;
+    g_clockWidgets.cached_day = -1;
+    g_clockWidgets.cached_voc_state = -1;
+    g_clockWidgets.cached_blink = -1;
+    g_clockWidgets.cached_pm = -1;
+    g_clockWidgets.cached_weather[0] = '\0';
 
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
 
@@ -534,6 +703,24 @@ static void showClockScreen() {
 
     g_clockWidgets.h1.create(cont, startX, y, dW, dH);
     g_clockWidgets.h2.create(cont, startX + dW + gap, y, dW, dH);
+    
+    // AM/PM Indicators (Placed in the empty left-side pocket of the first digit)
+    g_clockWidgets.amLabel = lv_label_create(cont);
+    lv_label_set_text(g_clockWidgets.amLabel, "AM");
+    lv_obj_set_style_text_font(g_clockWidgets.amLabel, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_clockWidgets.amLabel, lv_color_make(40, 40, 40), 0); // Default inactive
+    lv_obj_set_pos(g_clockWidgets.amLabel, startX + 4, y + 10);
+
+    g_clockWidgets.pmLabel = lv_label_create(cont);
+    lv_label_set_text(g_clockWidgets.pmLabel, "PM");
+    lv_obj_set_style_text_font(g_clockWidgets.pmLabel, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_clockWidgets.pmLabel, lv_color_make(40, 40, 40), 0); // Default inactive
+    lv_obj_set_pos(g_clockWidgets.pmLabel, startX + 4, y + 26);
+    
+    if (!clockFormat12h) {
+        lv_obj_add_flag(g_clockWidgets.amLabel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_clockWidgets.pmLabel, LV_OBJ_FLAG_HIDDEN);
+    }
     
     // Colon
     int colonX = startX + 2 * dW + gap + 15; // Centered in the 41px gap
@@ -674,6 +861,9 @@ static void showClockScreen() {
     lv_obj_add_event_cb(lv_scr_act(), clock_click_cb, LV_EVENT_CLICKED, NULL);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showVoiceModelConfig]---Render the voice/model setup UI-----]
+//////////////////////////////////////////////////////////////////////////
 static void showVoiceModelConfig() {
     g_isSubMenuActive = true;
     // Use public method to reset private pointers (statusLabel)
@@ -770,6 +960,10 @@ static void showVoiceModelConfig() {
     }, LV_EVENT_VALUE_CHANGED, NULL);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showMainUI]---Render the primary interactive user interface-]
+// Parameters: String currentVoice, int currentVolume, String voiceOptions
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showMainUI(String currentVoice, int currentVolume, String voiceOptions) {
     g_isSubMenuActive = false;
     lv_disp_trig_activity(NULL); // Reset idle timer to keep screen awake
@@ -798,7 +992,8 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
 
     // Hamburger Dropdown Menu
     lv_obj_t * dd_menu = lv_dropdown_create(lv_scr_act());
-    lv_dropdown_set_options(dd_menu, "Voice & Model\nAudio & Interrupt\nMic Mode & AEC\nSystem Setup");
+    lv_dropdown_set_options(dd_menu, "Voice & Model\nAudio & Interrupt\nMic Mode & AEC\nSystem Setup\nDiagnostics");
+    lv_dropdown_set_options(dd_menu, "Voice & Model\nAudio & Interrupt\nMic Mode & AEC\nSystem Setup\nDiagnostics\nAbout");
     lv_dropdown_set_text(dd_menu, LV_SYMBOL_LIST); // Static icon text
     lv_dropdown_set_symbol(dd_menu, NULL); // Hide standard down arrow
     lv_dropdown_set_dir(dd_menu, LV_DIR_LEFT); // Expand to the left so it stays on screen
@@ -810,13 +1005,25 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_set_style_pad_right(dd_menu, 0, 0); // Remove arrow padding to perfectly center the icon
     lv_obj_add_event_cb(dd_menu, [](lv_event_t * e){
         uint16_t idx = lv_dropdown_get_selected(lv_event_get_target(e));
-        if (idx == 0) lv_async_call(async_show_voice_model_config, NULL);
-        else if (idx == 1) lv_async_call(async_show_audio_config, NULL);
-        else if (idx == 2) lv_async_call(async_show_mic_aec_config, NULL);
+        if (idx == 0) {
+            lv_async_call(async_show_voice_model_config, NULL);
+        }
+        else if (idx == 1) {
+            lv_async_call(async_show_audio_config, NULL);
+        }
+        else if (idx == 2) {
+            lv_async_call(async_show_mic_aec_config, NULL);
+        }
         else if (idx == 3 && static_dm) {
             if (settings.debugMode) Serial.println("Setup menu pressed. Web Server active.");
             if (DisplayManager::setupModeCb) DisplayManager::setupModeCb(true);
             lv_async_call(async_show_web_config, NULL);
+        }
+        else if (idx == 4) {
+            lv_async_call(async_show_diagnostics, NULL);
+        }
+        else if (idx == 5) {
+            lv_async_call(async_show_about, NULL);
         }
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
@@ -885,9 +1092,11 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
     if (g_lastStatus.length() < 13) {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
-    } else if (g_lastStatus.length() < 20) {
+        }
+        else if (g_lastStatus.length() < 20) {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_28, 0);
-    } else {
+        }
+        else {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
     }
     
@@ -897,23 +1106,37 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[resetUIPointers]---Safely nullify global UI element ptrs----]
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::resetUIPointers() {
     statusLabel = nullptr;
     audio_vu_l = nullptr;
     audio_vu_r = nullptr;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[clear]---Clear text off the active status label-------------]
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::clear() {
     g_lastStatus = "";
     // LVGL handles background clearing automatically
     if (statusLabel) lv_label_set_text(statusLabel, "");
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setBacklight]---Instantly set the TFT display brightness----]
+// Parameters: uint8_t brightness - Brightness level (0-255)
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setBacklight(uint8_t brightness) {
     ledcWrite(TFT_BL, brightness);
     _currentBrightness = brightness;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[fadeBacklight]---Smoothly transition the TFT brightness-----]
+// Parameters: uint8_t target, int durationMs
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::fadeBacklight(uint8_t target, int durationMs) {
     int start = _currentBrightness;
     int steps = 50; // Number of steps for the fade
@@ -928,6 +1151,9 @@ void DisplayManager::fadeBacklight(uint8_t target, int durationMs) {
     _currentBrightness = target;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setupBootScreen]---Initialize the generic boot loading UI---]
+//////////////////////////////////////////////////////////////////////////
 static void setupBootScreen() {
     // Use public method to reset private pointers (statusLabel)
     if (static_dm) static_dm->showWiFiError("");
@@ -944,6 +1170,10 @@ static void setupBootScreen() {
     lv_obj_set_style_pad_gap(boot_cont, 5, 0);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showStatus]---Display a generic status message on the UI----]
+// Parameters: const char* message - The text to display
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showStatus(const char* message) {
     lv_disp_trig_activity(NULL); // Reset idle timer
     g_lastStatus = message;
@@ -992,14 +1222,20 @@ void DisplayManager::showStatus(const char* message) {
         lv_label_set_text(statusLabel, message);
         if (String(message).length() < 13) {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
-        } else if (String(message).length() < 20) {
+        }
+        else if (String(message).length() < 20) {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_28, 0);
-        } else {
+        }
+        else {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
         }
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showResponse]---Display the AI text response on the UI------]
+// Parameters: const String& response - The transcribed text to display
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showResponse(const String& response) {
     lv_disp_trig_activity(NULL); // Reset idle timer
     g_lastStatus = response;
@@ -1010,14 +1246,19 @@ void DisplayManager::showResponse(const String& response) {
         lv_label_set_text(statusLabel, response.c_str());
         if (response.length() < 13) {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
-        } else if (response.length() < 20) {
+        }
+        else if (response.length() < 20) {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_28, 0);
-        } else {
+        }
+        else {
             lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
         }
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showBootLogo]---Render the decoded JPG splash screen--------]
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showBootLogo() {
     gfx->fillScreen(WHITE);
     
@@ -1033,14 +1274,20 @@ void DisplayManager::showBootLogo() {
             int x = (gfx->width() - w) / 2;
             int y = (gfx->height() - h) / 2;
             TJpgDec.drawJpg(x, y, boot_logo, sizeof(boot_logo));
-        } else {
+        }
+        else {
             if (settings.debugMode) Serial.println("Boot Logo Error: Invalid JPG data.");
         }
-    } else {
+    }
+    else {
         if (settings.debugMode) Serial.println("Boot Logo Error: Unknown format.");
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showThinking]---Show or hide the thinking/loading spinner---]
+// Parameters: bool active - True to show spinner, false to hide
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showThinking(bool active) {
     lv_disp_trig_activity(NULL); // Reset idle timer
     if (g_clockTimer) {
@@ -1049,16 +1296,24 @@ void DisplayManager::showThinking(bool active) {
     if (spinner) {
         if (active) {
             lv_obj_clear_flag(spinner, LV_OBJ_FLAG_HIDDEN);
-        } else {
+        }
+        else {
             lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setWiFiConfigCallback]---Attach network config callback-----]
+// Parameters: WiFiConfigCallback cb - The function to call
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setWiFiConfigCallback(WiFiConfigCallback cb) {
     wifiCb = cb;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showWiFiConfig]---Render the network credential entry UI----]
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showWiFiConfig() {
     g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
@@ -1111,10 +1366,18 @@ void DisplayManager::showWiFiConfig() {
     lv_dropdown_set_options(wifi_dd, opts.c_str());
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setAPIConfigCallback]---Attach API Key config callback------]
+// Parameters: APIConfigCallback cb - The function to call
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setAPIConfigCallback(APIConfigCallback cb) {
     apiCb = cb;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showAPIConfig]---Render the API Key entry screen------------]
+// Parameters: String currentKey - The existing API Key (if any)
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showAPIConfig(String currentKey) {
     g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
@@ -1200,7 +1463,8 @@ void DisplayManager::showAPIConfig(String currentKey) {
             lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
             touch_disabled = true;
             lv_timer_create(kb_enable_timer_cb, 1000, NULL);
-        } else if (strcmp(txt, "abc") == 0) {
+        }
+        else if (strcmp(txt, "abc") == 0) {
             lv_obj_t* ta = lv_keyboard_get_textarea(kb);
             if (ta) {
                 const char* curr = lv_textarea_get_text(ta);
@@ -1228,10 +1492,18 @@ void DisplayManager::showAPIConfig(String currentKey) {
     lv_obj_add_event_cb(btn, apiConfigEventHandler, LV_EVENT_CLICKED, api_ta);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setAPIUrlConfigCallback]---Attach API URL config callback---]
+// Parameters: APIUrlConfigCallback cb - The function to call
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setAPIUrlConfigCallback(APIUrlConfigCallback cb) {
     apiUrlCb = cb;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showAPIUrlConfig]---Render the API URL entry screen---------]
+// Parameters: String currentUrl - The existing API URL (if any)
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showAPIUrlConfig(String currentUrl) {
     g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
@@ -1277,10 +1549,17 @@ void DisplayManager::showAPIUrlConfig(String currentUrl) {
     lv_obj_add_event_cb(btn, apiUrlConfigEventHandler, LV_EVENT_CLICKED, url_ta);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setAdminConfigCallback]---Attach Admin Pass config cb-------]
+// Parameters: AdminConfigCallback cb - The function to call
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setAdminConfigCallback(AdminConfigCallback cb) {
     adminCb = cb;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showAdminConfig]---Render the Admin Password entry screen---]
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showAdminConfig() {
     g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
@@ -1311,6 +1590,10 @@ void DisplayManager::showAdminConfig() {
     lv_obj_add_event_cb(btn, adminConfigEventHandler, LV_EVENT_CLICKED, pass_ta);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showWebConfig]---Render the headless Web Server info UI-----]
+// Parameters: String ip, String hostname - Device network details
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showWebConfig(String ip, String hostname) {
     g_isSubMenuActive = true;
     if (g_idleTimer) {
@@ -1389,6 +1672,10 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showWiFiError]---Render the connection failure screen-------]
+// Parameters: const char* message - The error text to display
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showWiFiError(const char* message) {
     g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
@@ -1407,6 +1694,10 @@ void DisplayManager::showWiFiError(const char* message) {
     lv_obj_add_event_cb(btn, wifiRetryHandler, LV_EVENT_CLICKED, NULL);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[wifiConfigEventHandler]---LVGL event for WiFi button--------]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::wifiConfigEventHandler(lv_event_t * e) {
     DisplayManager* dm = (DisplayManager*)lv_event_get_user_data(e);
     if (dm && wifiCb) {
@@ -1416,6 +1707,10 @@ void DisplayManager::wifiConfigEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[apiConfigEventHandler]---LVGL event for API Key button------]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::apiConfigEventHandler(lv_event_t * e) {
     lv_obj_t * ta = (lv_obj_t *)lv_event_get_user_data(e);
     if (apiCb) {
@@ -1423,6 +1718,10 @@ void DisplayManager::apiConfigEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[apiUrlConfigEventHandler]---LVGL event for API URL button---]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::apiUrlConfigEventHandler(lv_event_t * e) {
     lv_obj_t * ta = (lv_obj_t *)lv_event_get_user_data(e);
     if (apiUrlCb) {
@@ -1430,6 +1729,10 @@ void DisplayManager::apiUrlConfigEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[adminConfigEventHandler]---LVGL event for Admin Pass btn----]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::adminConfigEventHandler(lv_event_t * e) {
     lv_obj_t * ta = (lv_obj_t *)lv_event_get_user_data(e);
     if (adminCb) {
@@ -1437,6 +1740,10 @@ void DisplayManager::adminConfigEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setupEventHandler]---LVGL event to trigger Web Config-------]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setupEventHandler(lv_event_t * e) {
     DisplayManager* dm = (DisplayManager*)lv_event_get_user_data(e);
     if (dm) {
@@ -1446,6 +1753,10 @@ void DisplayManager::setupEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[closeSetupEventHandler]---LVGL event to close Web Config----]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::closeSetupEventHandler(lv_event_t * e) {
     DisplayManager* dm = (DisplayManager*)lv_event_get_user_data(e);
     if (dm) {
@@ -1454,15 +1765,27 @@ void DisplayManager::closeSetupEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setVoiceCallback]---Attach Voice Selection callback---------]
+// Parameters: VoiceCallback cb - The function to call
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setVoiceCallback(VoiceCallback cb) {
     voiceCb = cb;
     g_voiceCb = cb;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setSetupModeCallback]---Attach Web Setup Mode callback------]
+// Parameters: SetupModeCallback cb - The function to call
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setSetupModeCallback(SetupModeCallback cb) {
     setupModeCb = cb;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[voiceEventHandler]---LVGL event for Voice Selection list----]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::voiceEventHandler(lv_event_t * e) {
     if (voiceCb) {
         lv_obj_t * dropdown = lv_event_get_target(e);
@@ -1472,14 +1795,26 @@ void DisplayManager::voiceEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[wifiRetryHandler]---LVGL event to retry WiFi connection-----]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::wifiRetryHandler(lv_event_t * e) {
     lv_async_call(async_show_wifi_config, NULL);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setVolumeCallback]---Attach Volume Slider callback----------]
+// Parameters: VolumeCallback cb - The function to call
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setVolumeCallback(VolumeCallback cb) {
     volumeCb = cb;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[volumeEventHandler]---LVGL event for Volume Slider----------]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::volumeEventHandler(lv_event_t * e) {
     if (volumeCb) {
         lv_obj_t * slider = lv_event_get_target(e);
@@ -1487,8 +1822,12 @@ void DisplayManager::volumeEventHandler(lv_event_t * e) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[getRawTouch]---Read hardware SPI touchscreen coordinates----]
+// Parameters: uint16_t *x, uint16_t *y - Pointers to store results
+//////////////////////////////////////////////////////////////////////////
 bool DisplayManager::getRawTouch(uint16_t *x, uint16_t *y) {
-    if (ts && (ts->touched() || ts->getPoint().z > 500)) {
+    if (ts && ts->touched()) {
         TS_Point p = ts->getPoint();
         *x = p.x;
         *y = p.y;
@@ -1497,6 +1836,10 @@ bool DisplayManager::getRawTouch(uint16_t *x, uint16_t *y) {
     return false; 
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[calibrateTouch]---Render manual touchscreen calibration UI--]
+// Parameters: TouchCalibration& cal - Reference to save calibration data
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::calibrateTouch(TouchCalibration& cal) {
     gfx->fillScreen(BLACK);
     gfx->setFont(NULL); // Use system font for smaller text
@@ -1588,11 +1931,18 @@ void DisplayManager::calibrateTouch(TouchCalibration& cal) {
     delay(1000);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[updateWeather]---Store new weather string for Clock Screen--]
+// Parameters: const char* temp, const char* desc
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::updateWeather(const char* temp, const char* desc) {
     strlcpy(_weatherTemp, temp, sizeof(_weatherTemp));
     strlcpy(_weatherDesc, desc, sizeof(_weatherDesc));
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showAudioConfig]---Render the Audio/AEC setup screen--------]
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::showAudioConfig() {
     g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
@@ -1695,6 +2045,9 @@ void DisplayManager::showAudioConfig() {
     }, LV_EVENT_CLICKED, NULL);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showMicAecConfig]---Render the Mic Mode and AEC settings----]
+//////////////////////////////////////////////////////////////////////////
 static void showMicAecConfig() {
     g_isSubMenuActive = true;
     g_idleTimeout = 60000; // 60 seconds on sub-screens
@@ -1735,18 +2088,6 @@ static void showMicAecConfig() {
     lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_NUMBER);
     lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 
-    // Auto-Tune Button
-    lv_obj_t * btnTune = lv_btn_create(cont);
-    lv_obj_set_size(btnTune, 270, 40);
-    lv_obj_set_style_bg_color(btnTune, lv_palette_main(LV_PALETTE_BLUE), 0);
-    lv_obj_t * lblTune = lv_label_create(btnTune);
-    lv_label_set_text(lblTune, "Auto-Tune AEC");
-    lv_obj_center(lblTune);
-    lv_obj_add_event_cb(btnTune, [](lv_event_t * e){
-        extern void tuneAEC();
-        tuneAEC();
-    }, LV_EVENT_CLICKED, NULL);
-
     // Mic Mode
     lv_obj_t * label_mic = lv_label_create(cont);
     lv_label_set_text(label_mic, "Microphone Mode");
@@ -1781,7 +2122,8 @@ static void showMicAecConfig() {
             lv_obj_set_height(cont, 90); // Shrink container to fit above keyboard
             lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
             lv_obj_scroll_to_view(ta, LV_ANIM_ON);
-        } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+        }
+        else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
             lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_height(cont, 170); // Restore container size
             lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -1812,7 +2154,8 @@ static void showMicAecConfig() {
             lv_obj_set_height(cont, 90);
             lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
             lv_obj_scroll_to_view(ta, LV_ANIM_ON);
-        } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+        }
+        else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
             lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_height(cont, 170);
             lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -1846,7 +2189,8 @@ static void showMicAecConfig() {
             lv_obj_set_height(cont, 90);
             lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
             lv_obj_scroll_to_view(ta, LV_ANIM_ON);
-        } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+        }
+        else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
             lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_height(cont, 170);
             lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -1883,7 +2227,8 @@ static void showMicAecConfig() {
             lv_obj_set_height(cont, 90);
             lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
             lv_obj_scroll_to_view(ta, LV_ANIM_ON);
-        } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+        }
+        else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
             lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_height(cont, 170);
             lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -1896,6 +2241,169 @@ static void showMicAecConfig() {
     }, LV_EVENT_ALL, kb);
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showDiagnostics]---Render the Diagnostics menu--------------]
+//////////////////////////////////////////////////////////////////////////
+static void showDiagnostics() {
+    g_isSubMenuActive = true;
+    g_idleTimeout = 60000;
+    if (static_dm) static_dm->showWiFiError("");
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
+    boot_cont = nullptr;
+
+    lv_obj_t * title = lv_label_create(lv_scr_act());
+    lv_label_set_text(title, "Diagnostics");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+    lv_obj_t * btnBack = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btnBack, 50, 40);
+    lv_obj_align(btnBack, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btnBack, lv_color_make(60, 60, 60), 0);
+    lv_obj_t * lblBack = lv_label_create(btnBack);
+    lv_label_set_text(lblBack, LV_SYMBOL_LEFT);
+    lv_obj_center(lblBack);
+    lv_obj_add_event_cb(btnBack, [](lv_event_t * e){
+        lv_async_call(async_show_main_ui, NULL);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * cont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(cont, 300, 170); // Restored to 170 to prevent invisible overlap over the Back button
+    lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(cont, 5, 0);
+    lv_obj_set_style_pad_gap(cont, 15, 0);
+
+    // Auto-Tune Button
+    lv_obj_t * btnTune = lv_btn_create(cont);
+    lv_obj_set_size(btnTune, 270, 40);
+    lv_obj_set_style_bg_color(btnTune, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_t * lblTune = lv_label_create(btnTune);
+    lv_label_set_text(lblTune, "Auto-Tune AEC");
+    lv_obj_center(lblTune);
+    lv_obj_add_event_cb(btnTune, [](lv_event_t * e){
+        g_runAecTuneUI = true;
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Run AEC Diagnostics Button
+    lv_obj_t * btnTest = lv_btn_create(cont);
+    lv_obj_set_size(btnTest, 270, 40);
+    lv_obj_set_style_bg_color(btnTest, lv_palette_main(LV_PALETTE_DEEP_ORANGE), 0);
+    lv_obj_t * lblTest = lv_label_create(btnTest);
+    lv_label_set_text(lblTest, "Run AEC Diagnostics");
+    lv_obj_center(lblTest);
+    lv_obj_add_event_cb(btnTest, [](lv_event_t * e){
+        g_runAecTestUI = true;
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Run Harmonic Sweep Test Button
+    lv_obj_t * btnHarmonic = lv_btn_create(cont);
+    lv_obj_set_size(btnHarmonic, 270, 40);
+    lv_obj_set_style_bg_color(btnHarmonic, lv_palette_main(LV_PALETTE_PURPLE), 0);
+    lv_obj_t * lblHarmonic = lv_label_create(btnHarmonic);
+    lv_label_set_text(lblHarmonic, "Run Harmonic Sweep Test");
+    lv_obj_center(lblHarmonic);
+    lv_obj_add_event_cb(btnHarmonic, [](lv_event_t * e){
+        g_runHarmonicTestUI = true;
+    }, LV_EVENT_CLICKED, NULL);
+}
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[cursor_blink_anim_cb]---Animation callback for C64 cursor---]
+//////////////////////////////////////////////////////////////////////////
+static void cursor_blink_anim_cb(void * var, int32_t v) {
+    lv_obj_set_style_bg_opa((lv_obj_t *)var, v, 0);
+}
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showAboutScreen]---Render the About screen------------------]
+//////////////////////////////////////////////////////////////////////////
+static void showAboutScreen() {
+    g_isSubMenuActive = true;
+    g_idleTimeout = 60000;
+    if (static_dm) static_dm->showWiFiError("");
+    lv_obj_clean(lv_scr_act());
+    boot_cont = nullptr;
+
+    // Classic C64 Colors
+    lv_color_t c64_border = lv_color_make(164, 198, 226); // Light Blue
+    lv_color_t c64_bg     = lv_color_make(62, 49, 162);   // Dark Blue
+    lv_color_t c64_text   = lv_color_make(164, 198, 226); // Light Blue
+
+    // Outer Border
+    lv_obj_set_style_bg_color(lv_scr_act(), c64_border, 0);
+
+    // Inner Screen
+    lv_obj_t * inner_scr = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(inner_scr, 280, 200);
+    lv_obj_center(inner_scr);
+    lv_obj_set_style_bg_color(inner_scr, c64_bg, 0);
+    lv_obj_set_style_border_width(inner_scr, 0, 0);
+    lv_obj_set_style_radius(inner_scr, 0, 0);
+    lv_obj_clear_flag(inner_scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(inner_scr, LV_OBJ_FLAG_EVENT_BUBBLE); // Pass clicks to the main screen
+
+    // Top Centered Header
+    lv_obj_t * lblTop = lv_label_create(inner_scr);
+    lv_label_set_text(lblTop, "**** ESP32-S3 AI ASSISTANT ****\n16M PSRAM SYSTEM  V." FIRMWARE_VERSION);
+    lv_obj_set_style_text_align(lblTop, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lblTop, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lblTop, c64_text, 0);
+    lv_obj_align(lblTop, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_add_flag(lblTop, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    // Terminal Readout
+    lv_obj_t * lblTerm = lv_label_create(inner_scr);
+    lv_label_set_text(lblTerm, "READY.\nLOAD\"RETROTECH\",8,1\n\nSEARCHING FOR RETROTECH\nLOADING...\nREADY.\nRUN\n\nBY JORDAN RUBIN 2026");
+    lv_obj_set_style_text_font(lblTerm, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lblTerm, c64_text, 0);
+    lv_obj_align(lblTerm, LV_ALIGN_TOP_LEFT, 5, 55);
+    lv_obj_add_flag(lblTerm, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    // Solid Flashing Cursor Impression
+    lv_obj_t * cursor = lv_obj_create(inner_scr);
+    lv_obj_set_size(cursor, 12, 14);
+    lv_obj_set_style_bg_color(cursor, c64_text, 0);
+    lv_obj_set_style_border_width(cursor, 0, 0);
+    lv_obj_set_style_radius(cursor, 0, 0);
+    lv_obj_align_to(cursor, lblTerm, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 5);
+    lv_obj_add_flag(cursor, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    // Animate the cursor to make it blink
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, cursor);
+    lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_TRANSP);
+    lv_anim_set_time(&a, 400); // 400ms blink rate
+    lv_anim_set_playback_time(&a, 400);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_step); // Hard blink, no smooth fading
+    lv_anim_set_exec_cb(&a, cursor_blink_anim_cb);
+    lv_anim_start(&a);
+
+    // Exit Instruction (Bottom border)
+    lv_obj_t * lblExit = lv_label_create(lv_scr_act());
+    lv_label_set_text(lblExit, "TAP ANYWHERE TO RETURN");
+    lv_obj_set_style_text_font(lblExit, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lblExit, c64_bg, 0); // Dark blue on light blue border
+    lv_obj_align(lblExit, LV_ALIGN_BOTTOM_MID, 0, -5);
+    lv_obj_add_flag(lblExit, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    // Allow tapping absolutely anywhere to exit back to main UI
+    lv_obj_add_flag(lv_scr_act(), LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(lv_scr_act(), [](lv_event_t * e){
+        lv_async_call(async_show_main_ui, NULL);
+    }, LV_EVENT_CLICKED, NULL);
+}
+
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[updateAudioVUMeter]---Render real-time Audio VU levels------]
+// Parameters: int l, int r - Left and right channel amplitudes
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::updateAudioVUMeter(int l, int r) {
     if (!audio_vu_l && !audio_vu_r) return; // Completely skip if menu is not in focus
     
@@ -1909,10 +2417,18 @@ void DisplayManager::updateAudioVUMeter(int l, int r) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[setBalanceCallback]---Attach Input Balance Slider callback--]
+// Parameters: BalanceCallback cb - The function to call
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::setBalanceCallback(BalanceCallback cb) {
     balanceCb = cb;
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[balanceEventHandler]---LVGL event for Input Balance Slider--]
+// Parameters: lv_event_t * e - The triggered LVGL event
+//////////////////////////////////////////////////////////////////////////
 void DisplayManager::balanceEventHandler(lv_event_t * e) {
     if (balanceCb) {
         lv_obj_t * slider = lv_event_get_target(e);
@@ -1921,6 +2437,9 @@ void DisplayManager::balanceEventHandler(lv_event_t * e) {
 }
 
 // --- Easter Egg ---
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[renderBSOD]---Easter Egg: Render a Blue Screen of Death-----]
+//////////////////////////////////////////////////////////////////////////
 void renderBSOD() {
     if (g_clockTimer) {
         lv_timer_del(g_clockTimer);
@@ -1953,6 +2472,9 @@ void renderBSOD() {
     lv_timer_handler(); // Force the screen to draw instantly
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[renderGuruMeditation]---Easter Egg: Render Amiga Error------]
+//////////////////////////////////////////////////////////////////////////
 void renderGuruMeditation() {
     if (g_clockTimer) {
         lv_timer_del(g_clockTimer);
@@ -1985,6 +2507,9 @@ void renderGuruMeditation() {
     lv_timer_handler(); // Force the screen to draw instantly
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[forceClockScreen]---External access to render clock screen--]
+//////////////////////////////////////////////////////////////////////////
 void forceClockScreen() {
     showClockScreen();
 }
@@ -1992,6 +2517,9 @@ void forceClockScreen() {
 static lv_obj_t * aec_progress_bar = nullptr;
 static lv_obj_t * aec_status_label = nullptr;
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showAecTuningUI]---Render AEC automatic calibration screen--]
+//////////////////////////////////////////////////////////////////////////
 void showAecTuningUI() {
     if (g_clockTimer) {
         lv_timer_del(g_clockTimer);
@@ -2016,7 +2544,10 @@ void showAecTuningUI() {
     lv_obj_align(aec_progress_bar, LV_ALIGN_CENTER, 0, -10);
     lv_bar_set_range(aec_progress_bar, 0, 100);
     lv_bar_set_value(aec_progress_bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(aec_progress_bar, lv_color_make(120, 120, 120), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(aec_progress_bar, LV_OPA_COVER, LV_PART_MAIN); // Force 100% solid opacity
+    lv_obj_set_style_bg_color(aec_progress_bar, lv_color_white(), LV_PART_MAIN); // Pure white background
+    lv_obj_set_style_border_width(aec_progress_bar, 2, LV_PART_MAIN); // Add a clear border
+    lv_obj_set_style_border_color(aec_progress_bar, lv_color_make(100, 100, 100), LV_PART_MAIN);
     lv_obj_set_style_bg_color(aec_progress_bar, lv_palette_main(LV_PALETTE_BLUE), LV_PART_INDICATOR);
 
     aec_status_label = lv_label_create(lv_scr_act());
@@ -2029,6 +2560,10 @@ void showAecTuningUI() {
     lv_timer_handler(); // Force the screen to draw instantly
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[updateAecTuningUI]---Update progress bar on tuning screen---]
+// Parameters: int percent, const char* msg
+//////////////////////////////////////////////////////////////////////////
 void updateAecTuningUI(int percent, const char* msg) {
     if (aec_progress_bar) lv_bar_set_value(aec_progress_bar, percent, LV_ANIM_ON); // Animate the fill
     if (aec_status_label) {
@@ -2038,6 +2573,9 @@ void updateAecTuningUI(int percent, const char* msg) {
     lv_timer_handler();
 }
 
+//////////////////////////////////////////////////////////////////////////
+//-FUNCTION-[showHelpScreen]---Render the available voice commands UI----]
+//////////////////////////////////////////////////////////////////////////
 void showHelpScreen() {
     g_isSubMenuActive = false;
     if (g_clockTimer) {

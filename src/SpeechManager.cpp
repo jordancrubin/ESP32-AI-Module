@@ -37,8 +37,23 @@ static volatile int32_t s_peak_r = 0;
 static volatile int s_aec_attenuation = 75;
 static volatile int s_aec_cutoff = 600;
 
+#define MAX_AEC_DEBUG_LOGS 250
+struct AecDebugRecord {
+    uint16_t refBuf;
+    uint16_t micL;
+    uint16_t micR;
+    uint16_t refPk;
+    uint16_t outPk;
+};
+static AecDebugRecord s_aec_debug_log[MAX_AEC_DEBUG_LOGS];
+static volatile size_t s_aec_debug_log_count = 0;
+
 // Global functions for main.cpp to call
-void setAecDebug(bool enable) { s_debug_aec = enable; Serial.printf("AEC Debug: %s\n", enable ? "ON" : "OFF"); }
+void setAecDebug(bool enable) { 
+    s_debug_aec = enable; 
+    s_aec_debug_log_count = 0; // Reset log on toggle
+    Serial.printf("AEC Debug: %s\n", enable ? "ON" : "OFF"); 
+}
 void setAecDelay(int delay) { s_aec_target_delay = delay; Serial.printf("AEC Target Delay: %d samples\n", delay); }
 void setAecAttenuation(int atten) { s_aec_attenuation = (atten >= 0 && atten <= 100) ? atten : 75; }
 void setAecCutoff(int cutoff) { s_aec_cutoff = cutoff >= 0 ? cutoff : 0; }
@@ -49,10 +64,12 @@ void setInputBalance(int balance) {
     if (balance < 0) {
         s_gain_l = 256;
         s_gain_r = (256 * (100 - abs(balance))) / 100;
-    } else if (balance > 0) {
+    }
+    else if (balance > 0) {
         s_gain_l = (256 * (100 - balance)) / 100;
         s_gain_r = 256;
-    } else {
+    }
+    else {
         s_gain_l = 256;
         s_gain_r = 256;
     }
@@ -207,12 +224,15 @@ void feed_Task(void *arg) {
                     }
                     
                     static int debug_skip = 0;
-                    if (++debug_skip >= 10) { // Print every ~200ms
-                        debug_skip = 0; // Always reset to prevent integer overflow
-                        if (Serial && Serial.availableForWrite() > 64) {
-                            Serial.printf("AEC: RefBuf=%5d | MicL=%5d MicR=%5d | RefPk=%5d | OutPk=%5d\n", 
-                                (int)((s_ref_write_index >= s_ref_read_index) ? (s_ref_write_index - s_ref_read_index) : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index))), 
-                                s_peak_l, s_peak_r, max_ref, max_out);
+                    if (++debug_skip >= 10) { // Store every ~200ms
+                        debug_skip = 0;
+                        if (s_aec_debug_log_count < MAX_AEC_DEBUG_LOGS) {
+                            s_aec_debug_log[s_aec_debug_log_count].refBuf = (uint16_t)((s_ref_write_index >= s_ref_read_index) ? (s_ref_write_index - s_ref_read_index) : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index)));
+                            s_aec_debug_log[s_aec_debug_log_count].micL = s_peak_l;
+                            s_aec_debug_log[s_aec_debug_log_count].micR = s_peak_r;
+                            s_aec_debug_log[s_aec_debug_log_count].refPk = max_ref;
+                            s_aec_debug_log[s_aec_debug_log_count].outPk = max_out;
+                            s_aec_debug_log_count++;
                         }
                     }
                 }
@@ -221,7 +241,8 @@ void feed_Task(void *arg) {
                 if (s_processed_ringbuf) {
                     if (xRingbufferSend(s_processed_ringbuf, out_frame, sizeof(out_frame), 0) != pdTRUE) {
                         s_aec_overflows = s_aec_overflows + 1;
-                    } else {
+                        }
+                        else {
                         s_aec_bytes_written += sizeof(out_frame);
                         if (s_debug_aec) {
                             UBaseType_t uxFree, uxRead, uxWrite, uxAcquire, uxItemsWaiting;
@@ -241,7 +262,8 @@ void feed_Task(void *arg) {
                     yield_cnt = 0;
                 }
             }
-        } else {
+            }
+            else {
              vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
@@ -332,10 +354,12 @@ bool SpeechManager::detectWakeWord(float threshold) {
         processed_buff = (int16_t*)xRingbufferReceive(s_processed_ringbuf, &bytes_fetched, 0);
         if (processed_buff) {
             samplesRead = bytes_fetched / sizeof(int16_t);
-        } else {
+            }
+            else {
             return false; // No data ready
         }
-    } else {
+        }
+        else {
         // Fallback: Raw I2S Mode
         size_t bytes_read = 0;
         if (i2s_channel_read(rx_handle, raw_i2s_buffer, sizeof(raw_i2s_buffer), &bytes_read, 20) == ESP_OK) {
@@ -370,7 +394,8 @@ bool SpeechManager::detectWakeWord(float threshold) {
         if (processed_buff) {
             // Speex returns 16-bit clean audio
             raw = processed_buff[i];
-        } else {
+        }
+        else {
             // Fallback processing: Convert 32-bit Stereo to 16-bit Mono
             int32_t l = raw_i2s_buffer[i*2] >> 14;
             int32_t r = raw_i2s_buffer[i*2+1] >> 14;
@@ -595,10 +620,12 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
                     pcmBuffer[samplesRead++] = raw;
                 }
                 vRingbufferReturnItem(s_processed_ringbuf, processed_data);
-            } else {
+            }
+            else {
                 s_aec_underflows = s_aec_underflows + 1;
             }
-        } else {
+        }
+        else {
             // Read from Raw I2S
             if (i2s_channel_read(rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
                 int samplesInBatch = bytesRead / 8; // 8 bytes per stereo frame
@@ -625,7 +652,8 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
         // Common Silence Logic
         if (voiceDetectedInBatch) {
             silenceStart = millis();
-        } else {
+        }
+        else {
             unsigned long silenceTime = millis() - silenceStart;
             if (voiceDetectedTotal && (silenceTime > SILENCE_DURATION)) {
                 if (settings.debugMode) Serial.println("Silence detected. Stopping recording.");
@@ -661,8 +689,22 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
         Serial.printf("Overflows (Write Fails): %u\n", s_aec_overflows);
         Serial.printf("Underflows (Read Fails): %u\n", s_aec_underflows);
         Serial.printf("Max Buffer Usage: %u / %u bytes\n", s_aec_max_usage, 16 * 1024);
+        
+        if (s_debug_aec && s_aec_debug_log_count > 0) {
+            Serial.println("\n--- AEC Performance Log ---");
+            for (size_t i = 0; i < s_aec_debug_log_count; i++) {
+                Serial.printf("AEC: RefBuf=%5d | MicL=%5d MicR=%5d | RefPk=%5d | OutPk=%5d\n", 
+                    s_aec_debug_log[i].refBuf, 
+                    s_aec_debug_log[i].micL, 
+                    s_aec_debug_log[i].micR, 
+                    s_aec_debug_log[i].refPk, 
+                    s_aec_debug_log[i].outPk);
+            }
+            s_aec_debug_log_count = 0; // Clear after printing
+        }
         Serial.println("--------------------------------");
-    } else {
+    }
+    else {
         s_is_recording = false; // Resume AEC task if it was paused
     }
     return wavBuffer;
