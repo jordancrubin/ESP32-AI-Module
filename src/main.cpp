@@ -104,6 +104,9 @@ bool timerRinging = false;
 unsigned long lastInterruptTime = 0;
 unsigned long lastRingTime = 0;
 
+bool alarmRinging = false;
+unsigned long lastAlarmRingTime = 0;
+
 // Chime Configuration
 const char* CHIME_FILENAME = "/chime.mp3";
 
@@ -738,6 +741,13 @@ void handleWebRoot() {
     html += "<div class='checkbox-group' style='margin-top:15px;'><input type='checkbox' id='clockFormat12h' name='clockFormat12h' value='1'" + String(clockFormat12h ? " checked" : "") + "><label for='clockFormat12h'>Use 12-Hour Time Format</label></div>";
     html += "</div>";
 
+    html += "<div class='card'><h3>Alarm Clock</h3>";
+    html += "<div class='checkbox-group'><input type='checkbox' id='alarmEnabled' name='alarmEnabled' value='1'" + String(settings.alarmEnabled ? " checked" : "") + "><label for='alarmEnabled'>Enable Alarm</label></div>";
+    char timeBuf[6];
+    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", settings.alarmHour, settings.alarmMinute);
+    html += "<label>Alarm Time</label><input type='time' name='alarmTime' value='" + String(timeBuf) + "'>";
+    html += "</div>";
+
     html += "<div class='card'><h3>Weather (OpenWeatherMap)</h3>";
     html += "<label>API Key</label><input type='text' name='owKey' value='" + String(settings.openWeatherKey) + "' placeholder='Leave empty to disable'>";
     html += "<label>Location (City,CC)</label><input type='text' name='owLoc' value='" + String(settings.weatherLocation) + "'>";
@@ -921,6 +931,16 @@ void handleWebSave() {
     if (newClockFormat12h != clockFormat12h) {
         clockFormat12h = newClockFormat12h;
         adminPrefs.putBool("clk_12h", clockFormat12h);
+    }
+
+    settings.alarmEnabled = server.hasArg("alarmEnabled");
+    if (server.hasArg("alarmTime")) {
+        String at = server.arg("alarmTime");
+        int colonIdx = at.indexOf(':');
+        if (colonIdx != -1) {
+            settings.alarmHour = at.substring(0, colonIdx).toInt();
+            settings.alarmMinute = at.substring(colonIdx + 1).toInt();
+        }
     }
 
     // Save to NVRAM immediately
@@ -1916,6 +1936,9 @@ void performFactoryReset() {
     settings.aecAttenuation = 75;
     settings.aecCutoff = 1000;
     settings.aecIgnore = 3000;
+    settings.alarmEnabled = false;
+    settings.alarmHour = 7;
+    settings.alarmMinute = 0;
     strlcpy(settings.knowledgeId, "", sizeof(settings.knowledgeId));
     settings.save();
 
@@ -2574,6 +2597,52 @@ void loop() {
       }
   }
 
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    // Alarm Clock State Machine
+    static int lastAlarmDay = -1;
+    if (settings.alarmEnabled && timeinfo.tm_hour == settings.alarmHour && timeinfo.tm_min == settings.alarmMinute) {
+        if (lastAlarmDay != timeinfo.tm_yday && timeinfo.tm_year > 100) { // Time synced & not already triggered today
+            alarmRinging = true;
+            lastAlarmDay = timeinfo.tm_yday;
+            if (settings.debugMode) Serial.println("Alarm Triggered!");
+        }
+    }
+
+    if (alarmRinging && !isSpeaking && !isProcessing && !isWebServerActive && !g_isSubMenuActive) {
+        if (millis() - lastAlarmRingTime > 5000) { // Repeat every 5 seconds
+            lastAlarmRingTime = millis();
+            
+            if (!LittleFS.exists("/alarm.mp3")) {
+                llm.downloadTTS("Alarm! It is time to wake up.", network, "/alarm.mp3", ttsVoice);
+            }
+            
+            speaker.playSpeechFromFile("/alarm.mp3");
+            if (!isSpeaking) g_audioPlaybackStart = millis();
+            isSpeaking = true;
+            
+            if (settings.enableInterrupt) setInterruptMode(true);
+            
+            while(speaker.isRunning()) {
+                if (settings.enableInterrupt && speech.detectWakeWord(wakeThreshold) && (millis() - g_audioPlaybackStart > 800)) {
+                    speaker.stop();
+                    speaker.playSpeechFromFile(CHIME_FILENAME);
+                    while(speaker.isRunning()) delay(30);
+                    alarmRinging = false; // Turn off ringing when user interrupts
+                    flushAecBuffer();
+                    break;
+                }
+                if (!settings.enableInterrupt) flushAecBuffer();
+                delay(5);
+            }
+            if (settings.enableInterrupt) setInterruptMode(false);
+            isSpeaking = false;
+        }
+    }
+
   // Check for Wake Word if not already speaking, in web config mode, or in a sub-menu
   if (!isSpeaking && !isWebServerActive && !g_isSubMenuActive) {
       // Allow any loud word (barge-in) to cancel the timer during the silence between rings
@@ -2581,6 +2650,9 @@ void loop() {
       if (timerRinging && settings.enableInterrupt) {
           setInterruptMode(true);
           tempInterrupt = true;
+        } else if (alarmRinging && settings.enableInterrupt) {
+            setInterruptMode(true);
+            tempInterrupt = true;
       }
 
       if (speech.detectWakeWord(wakeThreshold)) {
@@ -2593,6 +2665,10 @@ void loop() {
               timerRinging = false; // Cancel timer if they use the wake word during silence
               display.showStatus("Ready"); // Just return to standby
                     flushAecBuffer();
+            } else if (alarmRinging) {
+                alarmRinging = false; // Cancel alarm ringing
+                display.showStatus("Ready");
+                flushAecBuffer();
           } else {
               onVoiceChange("TALK_ACTION");
           }

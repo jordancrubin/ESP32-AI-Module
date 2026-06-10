@@ -35,6 +35,9 @@ SettingsManager::SettingsManager() {
     aecCutoff = 1000; // Default 1000 raw amplitude
     aecIgnore = 3000; // Default 3000ms ignore window
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
+    alarmEnabled = false;
+    alarmHour = 7;
+    alarmMinute = 0;
 }
 
 void SettingsManager::begin() {
@@ -69,6 +72,9 @@ void SettingsManager::load() {
     aecCutoff = prefs.getInt("aec_cut", aecCutoff);
     aecIgnore = prefs.getInt("aec_ign", aecIgnore);
     if (prefs.isKey("know_id")) prefs.getString("know_id", knowledgeId, sizeof(knowledgeId));
+    alarmEnabled = prefs.getBool("alrm_en", alarmEnabled);
+    alarmHour = prefs.getInt("alrm_hr", alarmHour);
+    alarmMinute = prefs.getInt("alrm_min", alarmMinute);
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
         prefs.getBytes("cal", &calibration, sizeof(TouchCalibration));
@@ -102,4 +108,7 @@ void SettingsManager::save() {
     prefs.putInt("aec_cut", aecCutoff);
     prefs.putInt("aec_ign", aecIgnore);
     prefs.putString("know_id", knowledgeId);
+    prefs.putBool("alrm_en", alarmEnabled);
+    prefs.putInt("alrm_hr", alarmHour);
+    prefs.putInt("alrm_min", alarmMinute);
 }

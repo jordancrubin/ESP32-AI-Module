@@ -274,11 +274,17 @@ struct ClockWidgets {
     lv_obj_t* amLabel;
     lv_obj_t* pmLabel;
     
+    lv_obj_t* alarmCont = nullptr;
+    lv_obj_t* alarmLabel = nullptr;
+    
     int cached_rssi_level = -1;
     int cached_day = -1;
     int cached_voc_state = -1;
     int cached_blink = -1;
     int cached_pm = -1;
+    int cached_alarm_h = -1;
+    int cached_alarm_m = -1;
+    bool cached_alarm_en = false;
     char cached_weather[64] = "";
 };
 
@@ -585,6 +591,32 @@ static void clock_update_cb(lv_timer_t * t) {
         }
     }
 
+    // Update Alarm Label
+    if (g_clockWidgets.alarmCont) {
+        if (settings.alarmEnabled) {
+            lv_obj_clear_flag(g_clockWidgets.alarmCont, LV_OBJ_FLAG_HIDDEN);
+            if (settings.alarmHour != g_clockWidgets.cached_alarm_h || settings.alarmMinute != g_clockWidgets.cached_alarm_m || !g_clockWidgets.cached_alarm_en) {
+                g_clockWidgets.cached_alarm_h = settings.alarmHour;
+                g_clockWidgets.cached_alarm_m = settings.alarmMinute;
+                g_clockWidgets.cached_alarm_en = true;
+                
+                int dH = settings.alarmHour;
+                String ampm = "";
+                if (clockFormat12h) {
+                    ampm = dH >= 12 ? " PM" : " AM";
+                    dH = dH % 12;
+                    if (dH == 0) dH = 12;
+                }
+                char buf[32];
+                snprintf(buf, sizeof(buf), LV_SYMBOL_BELL " %02d:%02d%s", dH, settings.alarmMinute, ampm.c_str());
+                lv_label_set_text(g_clockWidgets.alarmLabel, buf);
+            }
+        } else {
+            lv_obj_add_flag(g_clockWidgets.alarmCont, LV_OBJ_FLAG_HIDDEN);
+            g_clockWidgets.cached_alarm_en = false;
+        }
+    }
+
     // Update Weather Label if it exists
     if (g_clockWidgets.weatherLabel && static_dm) {
         if (strlen(static_dm->_weatherTemp) > 0) {
@@ -681,6 +713,9 @@ static void showClockScreen() {
     g_clockWidgets.cached_voc_state = -1;
     g_clockWidgets.cached_blink = -1;
     g_clockWidgets.cached_pm = -1;
+    g_clockWidgets.cached_alarm_h = -1;
+    g_clockWidgets.cached_alarm_m = -1;
+    g_clockWidgets.cached_alarm_en = false;
     g_clockWidgets.cached_weather[0] = '\0';
 
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
@@ -806,6 +841,20 @@ static void showClockScreen() {
         lv_obj_set_style_radius(g_clockWidgets.wifiBars[i], 2, 0);
         lv_obj_set_style_border_width(g_clockWidgets.wifiBars[i], 0, 0);
     }
+
+    // Alarm Container (Bottom Mid, above VOC)
+    g_clockWidgets.alarmCont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(g_clockWidgets.alarmCont, 120, 25);
+    lv_obj_align(g_clockWidgets.alarmCont, LV_ALIGN_BOTTOM_MID, 0, -45);
+    lv_obj_set_style_bg_opa(g_clockWidgets.alarmCont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g_clockWidgets.alarmCont, 0, 0);
+    lv_obj_clear_flag(g_clockWidgets.alarmCont, LV_OBJ_FLAG_SCROLLABLE);
+    
+    g_clockWidgets.alarmLabel = lv_label_create(g_clockWidgets.alarmCont);
+    lv_obj_set_style_text_font(g_clockWidgets.alarmLabel, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_clockWidgets.alarmLabel, lv_color_make(180, 180, 180), 0);
+    lv_obj_center(g_clockWidgets.alarmLabel);
+    lv_obj_add_flag(g_clockWidgets.alarmCont, LV_OBJ_FLAG_HIDDEN);
 
     // Weather Label (Bottom Left)
     if (static_dm && strlen(static_dm->_weatherTemp) > 0) {

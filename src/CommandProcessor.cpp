@@ -17,6 +17,7 @@ extern void onVolumeChange(int value);
 
 uint32_t g_pendingTimerSeconds  = 0;
 bool g_cancelTimer  = false;
+extern bool alarmRinging;
 
 //////////////////////////////////////////////////////////////////////////
 //-FUNCTION-[wordToInt]---Convert spoken number words to integers--------]
@@ -215,6 +216,68 @@ CommandResult CommandProcessor::processCommand(const String& text) {
     else if (lowerText.indexOf("cancel timer") != -1 || lowerText.indexOf("stop timer") != -1 || lowerText.indexOf("cancel the timer") != -1 || lowerText.indexOf("stop the timer") != -1) {
         g_cancelTimer = true;
         result.response = "The timer has been cancelled.";
+        result.handled = true;
+    }
+    else if (lowerText.indexOf("set alarm for") != -1 || lowerText.indexOf("set the alarm for") != -1) {
+        int idx = lowerText.indexOf("alarm for");
+        String after = lowerText.substring(idx + 9);
+        after.replace(":", " ");
+        after.replace(".", ""); // Normalize a.m. to am
+        int h = -1, m = 0;
+        bool isPM = after.indexOf("pm") != -1 || after.indexOf("p m") != -1 || after.indexOf("evening") != -1 || after.indexOf("night") != -1;
+        bool isAM = after.indexOf("am") != -1 || after.indexOf("a m") != -1 || after.indexOf("morning") != -1;
+
+        int start = 0;
+        int end = after.indexOf(' ');
+        while (end != -1 || start < after.length()) {
+            String word = (end == -1) ? after.substring(start) : after.substring(start, end);
+            word.trim();
+            if (word.length() > 0) {
+                int val = wordToInt(word);
+                if (val > 0 || word == "0" || word == "zero") {
+                    if (h == -1) h = val;
+                    else if (m == 0) m = val; // assumes second number is the minute
+                }
+            }
+            if (end == -1) break;
+            start = end + 1;
+            end = after.indexOf(' ', start);
+        }
+
+        if (h != -1) {
+            if (isPM && h < 12) h += 12;
+            if (isAM && h == 12) h = 0;
+            if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+                settings.alarmHour = h;
+                settings.alarmMinute = m;
+                settings.alarmEnabled = true;
+                settings.save();
+                
+                String ampm = (h >= 12) ? "PM" : "AM";
+                int dispH = h % 12;
+                if (dispH == 0) dispH = 12;
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Alarm set for %d:%02d %s.", dispH, m, ampm.c_str());
+                result.response = buf;
+            } else {
+                result.response = "Invalid time provided for the alarm.";
+            }
+        } else {
+            result.response = "I couldn't understand the alarm time.";
+        }
+        result.handled = true;
+    }
+    else if (lowerText.indexOf("turn off alarm") != -1 || lowerText.indexOf("disable alarm") != -1 || lowerText.indexOf("cancel alarm") != -1 || lowerText.indexOf("stop alarm") != -1) {
+        settings.alarmEnabled = false;
+        alarmRinging = false;
+        settings.save();
+        result.response = "The alarm has been turned off.";
+        result.handled = true;
+    }
+    else if (lowerText.indexOf("turn on alarm") != -1 || lowerText.indexOf("enable alarm") != -1) {
+        settings.alarmEnabled = true;
+        settings.save();
+        result.response = "The alarm has been turned on.";
         result.handled = true;
     }
     else if (lowerText.indexOf("clock color to") != -1 || lowerText.indexOf("clock colour to") != -1) {

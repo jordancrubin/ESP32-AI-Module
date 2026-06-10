@@ -52,6 +52,9 @@ public:
     int aecCutoff;
     int aecIgnore;
     char knowledgeId[64];
+    bool alarmEnabled;
+    int alarmHour;
+    int alarmMinute;
 
 private:
     Preferences prefs;
