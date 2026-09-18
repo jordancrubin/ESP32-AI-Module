@@ -117,7 +117,8 @@ If you want to gather audio samples directly from the device's specific micropho
 
 ## 📄 License
 
-This project is provided as-is for educational and hobbyist use.
-Please respect the licensing of the included sub-libraries (LVGL, ArduinoJson, SpeexDSP, etc.).
+This project is licensed under the **GNU General Public License v3.0** (GPLv3) — see the [LICENSE](LICENSE) file for the full text.
+
+This license applies to the project's own source code. The included third-party sub-libraries (LVGL, ArduinoJson, SpeexDSP, kissfft, etc.) remain under their own licenses; please respect their terms as well.
 
 **Designed by Retro Tech & Electronics (2026)**
