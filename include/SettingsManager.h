@@ -2,7 +2,7 @@
   SettingsManager.h - ESP32 AI Module Configuration
   Defines persistent settings structure and NVS storage interface.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 #pragma once

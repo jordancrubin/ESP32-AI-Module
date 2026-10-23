@@ -2,7 +2,7 @@
   CommandProcessor.cpp - ESP32 AI Module
   Handles local voice command interception.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 #include "CommandProcessor.h"

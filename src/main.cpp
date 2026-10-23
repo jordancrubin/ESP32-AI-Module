@@ -3,7 +3,7 @@
   Main application entry point. Orchestrates Display, WiFi, LLM, and Audio subsystems.
   Functionality requires WiFi connection and valid API credentials.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 #include <Arduino.h>

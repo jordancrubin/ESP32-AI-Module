@@ -3,6 +3,10 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.vscode/settings.json
+.cache
+.clangd
+compile_commands.json
 
 # Secrets
 include/Secrets.h

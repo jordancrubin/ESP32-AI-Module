@@ -16,10 +16,6 @@ public:
 private:
     void setupI2S();
     i2s_chan_handle_t rx_handle = NULL; // Handle for the new I2S driver
-
-    // Edge Impulse Inference
-    float *inference_buffer = nullptr;
-    size_t inference_buf_ptr = 0;
 };
 
 struct WavHeader {

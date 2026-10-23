@@ -2,7 +2,7 @@
   LLMClient.cpp - ESP32 AI Module LLM Interface
   Handles HTTP communication with OpenAI-compatible APIs for Chat and TTS.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 #include "LLMClient.h"

@@ -2,7 +2,7 @@
   SettingsManager.cpp - ESP32 AI Module Configuration
   Implementation of NVS preference storage for system settings.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 #include "SettingsManager.h"

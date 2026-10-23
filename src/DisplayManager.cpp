@@ -3,7 +3,7 @@
   Designed for ESP32-S3 with ILI9341 TFT and LVGL.
   Manages UI rendering, touch input, and screen transitions.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 #include "DisplayManager.h"

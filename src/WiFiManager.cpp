@@ -2,7 +2,7 @@
   WiFiManager.cpp - ESP32 AI Module Network Controller
   Handles WiFi connectivity, mDNS resolution, and connection recovery.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 #include "WiFiManager.h"

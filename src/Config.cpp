@@ -2,7 +2,7 @@
   Config.cpp - ESP32 AI Module Configuration
   Hardware pin definitions and static configuration constants.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 #include "Config.h"

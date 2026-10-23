@@ -6,7 +6,7 @@
 
 A powerful, fully-featured AI Voice Assistant built on the ESP32-S3. This project seamlessly integrates Large Language Models (LLMs), Text-to-Speech (TTS), Wake Word detection, and Acoustic Echo Cancellation (AEC) into a standalone hardware module with a beautiful touch UI.
 
-Created by **Jordan Rubin** ([Retro Tech & Electronics](https://www.youtube.com/@retrotechandelectronics)).
+Created by **Jordan Rubin** ([Rubintech](https://www.youtube.com/@rubin-tech)).
 
 ---
 
@@ -43,7 +43,7 @@ This project is built using **PlatformIO** and the Arduino framework.
 - `paulstoffregen/XPT2046_Touchscreen` - Touch controller
 - `rjsachse/ESP32-SpeexDSP` - Hardware-accelerated AEC and noise suppression
 - `pschatzmann/arduino-libhelix` - MP3 audio decoding
-- `ESP-ai-wakeword_inferencing` - Edge Impulse ML library (Custom generated)
+- `microWakeWord` - On-device streaming wake word engine ("Excuse me Hal") using TensorFlow Lite Micro & `esp-micro-speech-features`
 
 ---
 
@@ -121,4 +121,4 @@ This project is licensed under the **GNU General Public License v3.0** (GPLv3) â
 
 This license applies to the project's own source code. The included third-party sub-libraries (LVGL, ArduinoJson, SpeexDSP, kissfft, etc.) remain under their own licenses; please respect their terms as well.
 
-**Designed by Retro Tech & Electronics (2026)**
+**Designed by Rubintech (2026)**

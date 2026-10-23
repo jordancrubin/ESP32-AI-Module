@@ -2,12 +2,18 @@
   SpeechManager.cpp - ESP32 AI Module Audio Input
   Handles I2S microphone recording (ICS-43434) and buffer management.
   
-  https://www.youtube.com/@retrotechandelectronics
+  https://www.youtube.com/@rubin-tech
   2026 Jordan Rubin.
 */
 
 #include "SpeechManager.h"
-#include <ESP-ai-wakeword_inferencing.h>
+#include <tensorflow/lite/core/c/common.h>
+#include <tensorflow/lite/micro/micro_interpreter.h>
+#include <tensorflow/lite/micro/micro_mutable_op_resolver.h>
+#include <tensorflow/lite/micro/micro_resource_variable.h>
+#include <frontend.h>
+#include <frontend_util.h>
+#include "excuse_me_hal.h"
 #include "SettingsManager.h"
 #include <freertos/ringbuf.h>
 
@@ -105,14 +111,146 @@ static volatile size_t s_aec_bytes_written = 0;
 
 extern bool g_isSubMenuActive; // To track if the VU meter is actually visible
 
-// Pointer to the buffer for the static callback
-static float *s_inference_buffer = nullptr;
+// microWakeWord Settings from excuse_me_hal.json
+static const char *const MWW_NAME = "Excuse me Hal";
+static const size_t MWW_SLIDING_WINDOW_SIZE = 5;
+static const size_t MWW_TENSOR_ARENA_SIZE = 40 * 1024; // 40KB (model requires 32000)
+static const size_t MWW_VAR_ARENA_SIZE = 2048;
+static const uint8_t MWW_FEATURE_SIZE = 40;
+static const uint16_t MWW_STEP_SAMPLES = 160; // 10ms @ 16kHz
+static const int16_t MWW_MIN_IGNORE_WINDOWS = 74; // Warmup windows before triggering
 
-// Callback function for Edge Impulse to fetch data
-static int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
-    memcpy(out_ptr, s_inference_buffer + offset, length * sizeof(float));
-    return 0;
+// microWakeWord State
+static uint8_t *s_mww_tensor_arena = nullptr;
+static uint8_t *s_mww_var_arena = nullptr;
+static tflite::MicroAllocator *s_mww_ma = nullptr;
+static tflite::MicroResourceVariables *s_mww_mrv = nullptr;
+static tflite::MicroMutableOpResolver<20> s_mww_op_resolver;
+static tflite::MicroInterpreter *s_mww_interpreter = nullptr;
+static struct FrontendConfig s_mww_frontend_config;
+static struct FrontendState s_mww_frontend_state;
+static bool s_mww_initialized = false;
+
+static uint8_t s_mww_sliding_window[MWW_SLIDING_WINDOW_SIZE] = {0};
+static size_t s_mww_sliding_window_idx = 0;
+static uint8_t s_mww_current_stride_step = 0;
+static int16_t s_mww_ignore_windows = -MWW_MIN_IGNORE_WINDOWS;
+
+// Audio accumulator for microWakeWord
+static const size_t MWW_AUDIO_ACCUM_MAX = 2048;
+static int16_t s_mww_audio_accum[MWW_AUDIO_ACCUM_MAX];
+static size_t s_mww_audio_accum_len = 0;
+
+static bool register_mww_ops(tflite::MicroMutableOpResolver<20> &resolver) {
+    if (resolver.AddCallOnce() != kTfLiteOk) return false;
+    if (resolver.AddVarHandle() != kTfLiteOk) return false;
+    if (resolver.AddReshape() != kTfLiteOk) return false;
+    if (resolver.AddReadVariable() != kTfLiteOk) return false;
+    if (resolver.AddStridedSlice() != kTfLiteOk) return false;
+    if (resolver.AddConcatenation() != kTfLiteOk) return false;
+    if (resolver.AddAssignVariable() != kTfLiteOk) return false;
+    if (resolver.AddConv2D() != kTfLiteOk) return false;
+    if (resolver.AddMul() != kTfLiteOk) return false;
+    if (resolver.AddAdd() != kTfLiteOk) return false;
+    if (resolver.AddMean() != kTfLiteOk) return false;
+    if (resolver.AddFullyConnected() != kTfLiteOk) return false;
+    if (resolver.AddLogistic() != kTfLiteOk) return false;
+    if (resolver.AddQuantize() != kTfLiteOk) return false;
+    if (resolver.AddDepthwiseConv2D() != kTfLiteOk) return false;
+    if (resolver.AddAveragePool2D() != kTfLiteOk) return false;
+    if (resolver.AddMaxPool2D() != kTfLiteOk) return false;
+    if (resolver.AddPad() != kTfLiteOk) return false;
+    if (resolver.AddPack() != kTfLiteOk) return false;
+    if (resolver.AddSplitV() != kTfLiteOk) return false;
+    return true;
 }
+
+static void resetMicroWakeWord() {
+    memset(s_mww_sliding_window, 0, sizeof(s_mww_sliding_window));
+    s_mww_sliding_window_idx = 0;
+    s_mww_current_stride_step = 0;
+    s_mww_ignore_windows = -MWW_MIN_IGNORE_WINDOWS;
+    s_mww_audio_accum_len = 0;
+    if (s_mww_initialized) {
+        FrontendReset(&s_mww_frontend_state);
+    }
+}
+
+static bool initMicroWakeWord() {
+    if (s_mww_initialized) return true;
+
+    // 1. Setup Audio Frontend
+    FrontendFillConfigWithDefaults(&s_mww_frontend_config);
+    s_mww_frontend_config.window.size_ms = 30;
+    s_mww_frontend_config.window.step_size_ms = 10;
+    s_mww_frontend_config.filterbank.num_channels = MWW_FEATURE_SIZE;
+    s_mww_frontend_config.filterbank.lower_band_limit = 125.0;
+    s_mww_frontend_config.filterbank.upper_band_limit = 7500.0;
+    s_mww_frontend_config.noise_reduction.smoothing_bits = 10;
+    s_mww_frontend_config.noise_reduction.even_smoothing = 0.025;
+    s_mww_frontend_config.noise_reduction.odd_smoothing = 0.06;
+    s_mww_frontend_config.noise_reduction.min_signal_remaining = 0.05;
+    s_mww_frontend_config.pcan_gain_control.enable_pcan = 1;
+    s_mww_frontend_config.pcan_gain_control.strength = 0.95;
+    s_mww_frontend_config.pcan_gain_control.offset = 80.0;
+    s_mww_frontend_config.pcan_gain_control.gain_bits = 21;
+    s_mww_frontend_config.log_scale.enable_log = 1;
+    s_mww_frontend_config.log_scale.scale_shift = 6;
+
+    if (!FrontendPopulateState(&s_mww_frontend_config, &s_mww_frontend_state, 16000)) {
+        Serial.println("SpeechManager [mWW]: Failed to populate frontend state");
+        FrontendFreeStateContents(&s_mww_frontend_state);
+        return false;
+    }
+
+    // 2. Register TFLM Ops
+    if (!register_mww_ops(s_mww_op_resolver)) {
+        Serial.println("SpeechManager [mWW]: Failed to register streaming ops");
+        return false;
+    }
+
+    // 3. Allocate Arenas in PSRAM (fallback to internal RAM)
+    if (!s_mww_tensor_arena) {
+        s_mww_tensor_arena = (uint8_t*)ps_malloc(MWW_TENSOR_ARENA_SIZE);
+        if (!s_mww_tensor_arena) s_mww_tensor_arena = (uint8_t*)malloc(MWW_TENSOR_ARENA_SIZE);
+    }
+    if (!s_mww_var_arena) {
+        s_mww_var_arena = (uint8_t*)ps_malloc(MWW_VAR_ARENA_SIZE);
+        if (!s_mww_var_arena) s_mww_var_arena = (uint8_t*)malloc(MWW_VAR_ARENA_SIZE);
+    }
+
+    if (!s_mww_tensor_arena || !s_mww_var_arena) {
+        Serial.println("SpeechManager [mWW]: Failed to allocate arena memory");
+        return false;
+    }
+
+    // 4. Create Resource Variables
+    s_mww_ma = tflite::MicroAllocator::Create(s_mww_var_arena, MWW_VAR_ARENA_SIZE);
+    s_mww_mrv = tflite::MicroResourceVariables::Create(s_mww_ma, 20);
+
+    // 5. Load Model & Create Interpreter
+    const tflite::Model *model = tflite::GetModel(excuse_me_hal_tflite);
+    if (model->version() != TFLITE_SCHEMA_VERSION) {
+        Serial.println("SpeechManager [mWW]: Model schema version mismatch");
+        return false;
+    }
+
+    s_mww_interpreter = new tflite::MicroInterpreter(
+        model, s_mww_op_resolver, s_mww_tensor_arena, MWW_TENSOR_ARENA_SIZE, s_mww_mrv);
+
+    if (s_mww_interpreter->AllocateTensors() != kTfLiteOk) {
+        Serial.println("SpeechManager [mWW]: Failed to allocate model tensors");
+        return false;
+    }
+
+    Serial.printf("SpeechManager [mWW]: Initialized model '%s' (Arena used: %d bytes)\n",
+                  MWW_NAME, s_mww_interpreter->arena_used_bytes());
+
+    resetMicroWakeWord();
+    s_mww_initialized = true;
+    return true;
+}
+
 
 // Background Task to feed the AFE pipeline
 void feed_Task(void *arg) {
@@ -232,7 +370,7 @@ void feed_Task(void *arg) {
                             s_aec_debug_log[s_aec_debug_log_count].micR = s_peak_r;
                             s_aec_debug_log[s_aec_debug_log_count].refPk = max_ref;
                             s_aec_debug_log[s_aec_debug_log_count].outPk = max_out;
-                            s_aec_debug_log_count++;
+                            s_aec_debug_log_count = s_aec_debug_log_count + 1;
                         }
                     }
                 }
@@ -273,22 +411,15 @@ SpeechManager::SpeechManager() {}
 
 void SpeechManager::begin() {
     setupI2S();
-    run_classifier_init();
-    
     s_rx_handle = rx_handle;
 
-    // Allocate inference buffer in PSRAM
-    inference_buffer = (float*)ps_malloc(EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float));
-    s_inference_buffer = inference_buffer;
-    
-    if (!inference_buffer) {
-        Serial.println("SpeechManager: Failed to allocate inference buffer!");
+    if (!initMicroWakeWord()) {
+        Serial.println("SpeechManager: Failed to initialize microWakeWord!");
     }
 
     if (settings.debugMode) {
         Serial.println("SpeechManager: ICS-43434 I2S Initialized");
-        Serial.printf("Edge Impulse: %d classification labels loaded.\n", EI_CLASSIFIER_LABEL_COUNT);
-        Serial.printf("Edge Impulse: Expected Sample Rate: %d Hz\n", EI_CLASSIFIER_FREQUENCY);
+        Serial.printf("microWakeWord: Loaded model '%s'\n", MWW_NAME);
     }
 
     // Initialize Speex AEC (Enabled for all modes)
@@ -341,7 +472,7 @@ void SpeechManager::setupI2S() {
 }
 
 bool SpeechManager::detectWakeWord(float threshold) {
-    if (!inference_buffer) return false;
+    if (!s_mww_initialized) return false;
 
     int samplesRead = 0;
     int16_t* processed_buff = NULL;
@@ -354,12 +485,10 @@ bool SpeechManager::detectWakeWord(float threshold) {
         processed_buff = (int16_t*)xRingbufferReceive(s_processed_ringbuf, &bytes_fetched, 0);
         if (processed_buff) {
             samplesRead = bytes_fetched / sizeof(int16_t);
-            }
-            else {
+        } else {
             return false; // No data ready
         }
-        }
-        else {
+    } else {
         // Fallback: Raw I2S Mode
         size_t bytes_read = 0;
         if (i2s_channel_read(rx_handle, raw_i2s_buffer, sizeof(raw_i2s_buffer), &bytes_read, 20) == ESP_OK) {
@@ -369,16 +498,12 @@ bool SpeechManager::detectWakeWord(float threshold) {
         }
         if (samplesRead == 0) return false;
     }
-    
-    // Use static to persist peak level across multiple calls until inference runs
+
     static int32_t max_audio_level = 0;
     static int32_t max_l_level = 0;
     static int32_t max_r_level = 0;
     static int32_t dc_offset_int = 0;
-    static int32_t debug_min_val = 32767;
-    static int32_t debug_max_val = -32768;
-    
-    // Capture AEC peaks if available (snapshot from feed_Task) just once per batch
+
     if (processed_buff) {
         if (s_peak_l > max_l_level) max_l_level = s_peak_l;
         if (s_peak_r > max_r_level) max_r_level = s_peak_r;
@@ -386,134 +511,154 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
     int local_mic_mode = settings.micMode;
     bool local_interrupt = s_interrupt_mode;
-    int local_attenuation_mult = 100 - s_aec_attenuation; // Compute once outside the loop
+    int local_attenuation_mult = 100 - s_aec_attenuation;
 
-    for (int i = 0; i < samplesRead; i++) { 
+    for (int i = 0; i < samplesRead; i++) {
         int32_t raw;
-        
         if (processed_buff) {
-            // Speex returns 16-bit clean audio
             raw = processed_buff[i];
-        }
-        else {
-            // Fallback processing: Convert 32-bit Stereo to 16-bit Mono
+        } else {
             int32_t l = raw_i2s_buffer[i*2] >> 14;
             int32_t r = raw_i2s_buffer[i*2+1] >> 14;
-            
+
             if (abs(l) > max_l_level) max_l_level = abs(l);
             if (abs(r) > max_r_level) max_r_level = abs(r);
-            
-            // Respect Microphone Mode setting
-            if (local_mic_mode == 2) raw = r;      // Right
-            else if (local_mic_mode == 1) raw = l; // Left
-            else raw = (l + r) >> 1;                 // Stereo Mix (Bitshift for speed)
 
-            // DC Offset removal (High-pass filter) using fast fixed-point math
-            // alpha = ~0.0039 (1/256), functionally identical to 0.005 but uses 0 hardware multiply cycles
+            if (local_mic_mode == 2) raw = r;
+            else if (local_mic_mode == 1) raw = l;
+            else raw = (l + r) >> 1;
+
             dc_offset_int += raw - (dc_offset_int >> 8);
             raw -= (dc_offset_int >> 8);
-            
+
             if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
         }
 
-        // Lower microphone sensitivity specifically during Voice Interrupt (Barge-in)
-        // to help prevent the AI's own early echo from triggering the wake word
         if (local_interrupt) {
-            raw = (raw * local_attenuation_mult) / 100; 
+            raw = (raw * local_attenuation_mult) / 100;
         }
 
         if (abs(raw) > max_audio_level) max_audio_level = abs(raw);
-        if (raw < debug_min_val) debug_min_val = raw;
-        if (raw > debug_max_val) debug_max_val = raw;
 
-        if (inference_buf_ptr < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
-            inference_buffer[inference_buf_ptr++] = (float)raw;
+        if (s_mww_audio_accum_len < MWW_AUDIO_ACCUM_MAX) {
+            s_mww_audio_accum[s_mww_audio_accum_len++] = (int16_t)raw;
         }
-
-        // ... (Rest of inference logic remains the same)
     }
 
-    // Return item to ringbuffer if we used it
     if (processed_buff) {
         vRingbufferReturnItem(s_processed_ringbuf, processed_buff);
     }
 
-    // ... (Rest of function: inference execution)
-    // 3. Run Inference if buffer is full
-    if (inference_buf_ptr >= EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
-        // ... (Existing inference code)
-        // (Keep the existing code block here, just ensure the closing braces match)
-        
-        signal_t signal;
-        signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
-        signal.get_data = &raw_feature_get_data;
+    bool wake_word_detected = false;
 
-        ei_impulse_result_t result = { 0 };
-        bool debug_mode = false;
+    // Process all full 160-sample (10ms) slices in accumulator
+    while (s_mww_audio_accum_len >= MWW_STEP_SAMPLES) {
+        size_t samples_read = 0;
+        struct FrontendOutput frontend_output = FrontendProcessSamples(
+            &s_mww_frontend_state, s_mww_audio_accum, MWW_STEP_SAMPLES, &samples_read);
 
-        EI_IMPULSE_ERROR res = run_classifier(&signal, &result, debug_mode);
-        if (res != EI_IMPULSE_OK) {
-            Serial.printf("ERR: Failed to run classifier (%d)\n", res);
-            return false;
+        s_mww_audio_accum_len -= MWW_STEP_SAMPLES;
+        if (s_mww_audio_accum_len > 0) {
+            memmove(s_mww_audio_accum, s_mww_audio_accum + MWW_STEP_SAMPLES, s_mww_audio_accum_len * sizeof(int16_t));
         }
 
-        // This is the most performance-critical debug output. To prevent audio artifacts,
-        // only print if the Serial monitor is connected and has enough buffer space.
-        if (settings.debugMode && Serial && Serial.availableForWrite() > 64) {
-            char buf[256];
-            int len = snprintf(buf, sizeof(buf), "Raw: %d | L: %d R: %d | Time: %dms | ", max_audio_level, max_l_level, max_r_level, result.timing.dsp + result.timing.classification);
-            for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-                // Safely append to the buffer, ensuring we never write out of bounds
-                if (len >= 0 && len < sizeof(buf)) {
-                    int written = snprintf(buf + len, sizeof(buf) - len, "%s: %.2f ", result.classification[ix].label, result.classification[ix].value);
-                    if (written > 0) len += written;
+        if (frontend_output.size != MWW_FEATURE_SIZE || frontend_output.values == NULL) {
+            continue;
+        }
+
+        // Quantize features to int8 matching microWakeWord training pipeline
+        int8_t audio_features[MWW_FEATURE_SIZE];
+        for (size_t i = 0; i < MWW_FEATURE_SIZE; ++i) {
+            constexpr int32_t value_scale = 256;
+            constexpr int32_t value_div = 666;
+            int32_t value = ((frontend_output.values[i] * value_scale) + (value_div / 2)) / value_div;
+            value -= 128;
+            if (value < -128) value = -128;
+            if (value > 127) value = 127;
+            audio_features[i] = (int8_t)value;
+        }
+
+        // Feed features into model input
+        TfLiteTensor *input = s_mww_interpreter->input(0);
+        uint8_t stride = input->dims->data[1]; // stride (typically 1 or 2)
+        int8_t *input_data = tflite::GetTensorData<int8_t>(input);
+        memcpy(input_data + (MWW_FEATURE_SIZE * s_mww_current_stride_step), audio_features, MWW_FEATURE_SIZE);
+        s_mww_current_stride_step++;
+
+        if (s_mww_current_stride_step >= stride) {
+            s_mww_current_stride_step = 0;
+
+            TfLiteStatus invoke_status = s_mww_interpreter->Invoke();
+            if (invoke_status != kTfLiteOk) {
+                Serial.println("SpeechManager [mWW]: Interpreter invoke failed");
+                continue;
+            }
+
+            TfLiteTensor *output = s_mww_interpreter->output(0);
+            uint8_t raw_prob = output->data.uint8[0];
+
+            // Sliding window rolling buffer
+            s_mww_sliding_window[s_mww_sliding_window_idx] = raw_prob;
+            s_mww_sliding_window_idx = (s_mww_sliding_window_idx + 1) % MWW_SLIDING_WINDOW_SIZE;
+
+            // Startup / post-detection warmup
+            if (s_mww_ignore_windows < 0) {
+                s_mww_ignore_windows++;
+                continue;
+            }
+
+            // Calculate rolling window average
+            uint32_t sum = 0;
+            for (size_t k = 0; k < MWW_SLIDING_WINDOW_SIZE; k++) {
+                sum += s_mww_sliding_window[k];
+            }
+            float avg_prob = (float)sum / (float)(255 * MWW_SLIDING_WINDOW_SIZE);
+            float current_prob = (float)raw_prob / 255.0f;
+
+            // Debug logging
+            if (settings.debugMode && Serial && Serial.availableForWrite() > 64) {
+                static uint32_t s_last_log_ms = 0;
+                if (millis() - s_last_log_ms > 250 || avg_prob > 0.35f) {
+                    Serial.printf("mWW ['%s']: Avg: %.2f | Instant: %.2f | Thresh: %.2f | Level: %d\n",
+                                  MWW_NAME, avg_prob, current_prob, threshold, max_audio_level);
+                    s_last_log_ms = millis();
                 }
             }
-            Serial.println(buf);
-        }
-        
-        int32_t current_max_level = max_audio_level; // Capture before reset
 
-        max_audio_level = 0;
-        max_l_level = 0;
-        max_r_level = 0;
-        debug_min_val = 32767;
-        debug_max_val = -32768;
-
-        bool wake_word_detected = false;
-        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-            // Standard Wake Word Detection (Only when NOT in interrupt mode)
+            // Detection check
             if (!s_interrupt_mode) {
-                if (result.classification[ix].value > threshold) {
-                    const char* label = result.classification[ix].label;
-                    if (strcmp(label, "noise") != 0 && strcmp(label, "unknown") != 0) {
-                        if (settings.debugMode) Serial.printf(">>> WAKE WORD DETECTED: %s (%.2f) <<<\n", label, result.classification[ix].value);
-                        wake_word_detected = true;
+                if (avg_prob >= threshold) {
+                    if (settings.debugMode) {
+                        Serial.printf(">>> WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
+                                      MWW_NAME, avg_prob, current_prob);
                     }
+                    wake_word_detected = true;
                 }
-            }
-            
-            // Voice Barge-in Detection (Trigger on ANY loud speech "unknown" if confidence is 0.95+)
-            if (s_interrupt_mode && strcmp(result.classification[ix].label, "unknown") == 0 && result.classification[ix].value >= 0.95f) {
-                if (current_max_level > s_aec_cutoff) { // Amplitude gate to block AEC speaker bleed
-                    if (settings.debugMode) Serial.printf(">>> INTERRUPT (UNKNOWN) DETECTED: %s (%.2f) <<<\n", result.classification[ix].label, result.classification[ix].value);
+            } else {
+                // Voice Interrupt (Barge-in) during audio playback
+                if (avg_prob >= threshold && max_audio_level > s_aec_cutoff) {
+                    if (settings.debugMode) {
+                        Serial.printf(">>> INTERRUPT WAKE WORD DETECTED: '%s' (avg: %.2f) <<<\n",
+                                      MWW_NAME, avg_prob);
+                    }
                     wake_word_detected = true;
                 }
             }
+
+            if (wake_word_detected) {
+                resetMicroWakeWord();
+                break;
+            }
         }
-        
-        if (wake_word_detected) {
-            inference_buf_ptr = 0;
-            return true;
-        }
-        
-        int slide = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE / 2;
-        memmove(inference_buffer, inference_buffer + slide, (EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - slide) * sizeof(float));
-        inference_buf_ptr -= slide;
     }
 
-    return false;
+    max_audio_level = 0;
+    max_l_level = 0;
+    max_r_level = 0;
+
+    return wake_word_detected;
 }
+
 
 void SpeechManager::feedReference(const int16_t *data, size_t samples) {
     // Feed reference data to the Ring Buffer
