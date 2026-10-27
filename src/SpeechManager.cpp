@@ -705,8 +705,6 @@ bool SpeechManager::detectWakeWord(float threshold) {
     if (s_peak_r > max_r_level) max_r_level = s_peak_r;
 
     int local_mic_mode = settings.micMode;
-    bool local_interrupt = s_interrupt_mode;
-    int local_attenuation_mult = 100 - s_aec_attenuation;
 
     int total_samples_read = 0;
     int32_t burst_max_level = 0;
@@ -723,10 +721,6 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
             for (int i = 0; i < samplesRead; i++) {
                 int32_t raw = processed_buff[i];
-
-                if (local_interrupt) {
-                    raw = (raw * local_attenuation_mult) / 100;
-                }
 
                 int32_t abs_raw = abs(raw);
                 if (abs_raw > burst_max_level) burst_max_level = abs_raw;
@@ -879,8 +873,9 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
             // Detection check (only trigger after initial warmup windows)
             if (s_mww_ignore_windows >= 0) {
+                bool mww_detected = (avg_prob >= threshold || current_prob >= 0.75f);
                 if (!s_interrupt_mode) {
-                    if (avg_prob >= threshold || current_prob >= 0.75f) {
+                    if (mww_detected) {
                         if (settings.debugMode) {
                             Serial.printf(">>> WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
                                           MWW_NAME, avg_prob, current_prob);
@@ -888,11 +883,19 @@ bool SpeechManager::detectWakeWord(float threshold) {
                         wake_word_detected = true;
                     }
                 } else {
-                    // Voice Interrupt (Barge-in) during audio playback
-                    if ((avg_prob >= threshold || current_prob >= 0.75f) && max_audio_level > s_aec_cutoff) {
+                    // Voice Interrupt (Barge-in) during audio playback:
+                    // Triggers either when microWakeWord hears "Excuse me Hal"
+                    // OR when a loud voice/yell exceeds s_aec_cutoff
+                    bool loud_voice = (s_aec_cutoff > 0 && burst_max_level > s_aec_cutoff);
+                    if (mww_detected || loud_voice) {
                         if (settings.debugMode) {
-                            Serial.printf(">>> INTERRUPT WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
-                                          MWW_NAME, avg_prob, current_prob);
+                            if (mww_detected) {
+                                Serial.printf(">>> INTERRUPT WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
+                                              MWW_NAME, avg_prob, current_prob);
+                            } else {
+                                Serial.printf(">>> INTERRUPT (LOUD VOICE) DETECTED (level: %d > cutoff: %d) <<<\n",
+                                              burst_max_level, s_aec_cutoff);
+                            }
                         }
                         wake_word_detected = true;
                     }

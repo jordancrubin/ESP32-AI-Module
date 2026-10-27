@@ -2108,6 +2108,10 @@ void setup() {
       wakeThreshold = 0.5f;
       adminPrefs.putFloat("wake_thresh", 0.5f);
   }
+  if (settings.aecIgnore > 1000) {
+      settings.aecIgnore = 800;
+      settings.save();
+  }
   ttsSpeed = adminPrefs.getFloat("tts_speed", 0.8);
   setInputBalance(settings.inputBalance);
   vocAlarmThreshold = adminPrefs.getInt("voc_thresh", 50);

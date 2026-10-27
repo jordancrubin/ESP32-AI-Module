@@ -31,9 +31,9 @@ SettingsManager::SettingsManager() {
     enableMemory = false;
     enableInterrupt = false;
     aecDelay = 640; // Default ~40ms
-    aecAttenuation = 75; // Default 75% attenuation
+    aecAttenuation = 0; // Default 0% (natural volume, band-aid removed)
     aecCutoff = 1000; // Default 1000 raw amplitude
-    aecIgnore = 3000; // Default 3000ms ignore window
+    aecIgnore = 800; // Default 800ms ignore window
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
     alarmEnabled = false;
     alarmHour = 7;
