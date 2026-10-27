@@ -1,6 +1,22 @@
 #ifndef KISS_FFT_H
 #define KISS_FFT_H
 
+/* Prefix all KissFFT symbols to prevent collision with external libraries (e.g. SpeexDSP) */
+#define kiss_fft_state                mww_kiss_fft_state
+#define kiss_fft_cpx                  mww_kiss_fft_cpx
+#define kiss_fft_cfg                  mww_kiss_fft_cfg
+#define kiss_fft_alloc                mww_kiss_fft_alloc
+#define kiss_fft_stride               mww_kiss_fft_stride
+#define kiss_fft                      mww_kiss_fft
+#define kiss_fft_cleanup              mww_kiss_fft_cleanup
+#define kiss_fft_next_fast_size       mww_kiss_fft_next_fast_size
+
+#define kiss_fftr_state               mww_kiss_fftr_state
+#define kiss_fftr_cfg                 mww_kiss_fftr_cfg
+#define kiss_fftr_alloc               mww_kiss_fftr_alloc
+#define kiss_fftr                     mww_kiss_fftr
+#define kiss_fftri                    mww_kiss_fftri
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>

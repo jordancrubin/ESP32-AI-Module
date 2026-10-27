@@ -12,6 +12,10 @@ public:
     bool detectWakeWord(float threshold);
     uint8_t* record(int durationMs, size_t* outSize, int silenceThreshold);
     void feedReference(const int16_t *data, size_t samples);
+    void runSelfTest();
+    void setBitShift(int shift);
+    int getBitShift();
+    void resetStats();
 
 private:
     void setupI2S();

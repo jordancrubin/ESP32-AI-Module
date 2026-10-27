@@ -16,6 +16,8 @@ limitations under the License.
 
 #include "bits.h"
 
+#include <stdio.h>
+
 struct FrontendOutput FrontendProcessSamples(struct FrontendState *state, const int16_t *samples, size_t num_samples,
                                              size_t *num_samples_read) {
   struct FrontendOutput output;
@@ -38,6 +40,7 @@ struct FrontendOutput FrontendProcessSamples(struct FrontendState *state, const 
   FilterbankConvertFftComplexToEnergy(&state->filterbank, state->fft.output, energy);
 
   FilterbankAccumulateChannels(&state->filterbank, energy);
+
   uint32_t *scaled_filterbank = FilterbankSqrt(&state->filterbank, input_shift);
 
   // Apply noise reduction.

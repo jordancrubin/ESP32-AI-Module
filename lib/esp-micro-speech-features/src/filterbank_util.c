@@ -14,14 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "filterbank_util.h"
+#include "frontend_mem.h"
 
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
-
-#ifdef USE_ESP32
-#include <esp_heap_caps.h>
-#endif
 
 #define kFilterbankIndexAlignment 4
 #define kFilterbankChannelBlockSize 4
@@ -69,72 +66,22 @@ int FilterbankPopulateState(const struct FilterbankConfig *config, struct Filter
   const int index_alignment =
       (kFilterbankIndexAlignment < sizeof(int16_t) ? 1 : kFilterbankIndexAlignment / sizeof(int16_t));
 
-#ifdef USE_ESP32
-  state->channel_frequency_starts = heap_caps_malloc(num_channels_plus_1 * sizeof(*state->channel_frequency_starts), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->channel_frequency_starts == NULL)
-#endif
-  {
-    state->channel_frequency_starts = malloc(num_channels_plus_1 * sizeof(*state->channel_frequency_starts));
-  }
+  state->channel_frequency_starts = (int16_t *)frontend_malloc(num_channels_plus_1 * sizeof(*state->channel_frequency_starts));
+  state->channel_weight_starts = (int16_t *)frontend_malloc(num_channels_plus_1 * sizeof(*state->channel_weight_starts));
+  state->channel_widths = (int16_t *)frontend_malloc(num_channels_plus_1 * sizeof(*state->channel_widths));
+  state->work = (uint64_t *)frontend_malloc(num_channels_plus_1 * sizeof(*state->work));
 
-#ifdef USE_ESP32
-  state->channel_weight_starts = heap_caps_malloc(num_channels_plus_1 * sizeof(*state->channel_weight_starts), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->channel_weight_starts == NULL)
-#endif
-  {
-    state->channel_weight_starts = malloc(num_channels_plus_1 * sizeof(*state->channel_weight_starts));
-  }
-
-#ifdef USE_ESP32
-  state->channel_widths = heap_caps_malloc(num_channels_plus_1 * sizeof(*state->channel_widths), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->channel_widths == NULL)
-#endif
-  {
-    state->channel_widths = malloc(num_channels_plus_1 * sizeof(*state->channel_widths));
-  }
-
-#ifdef USE_ESP32
-  state->work = heap_caps_malloc(num_channels_plus_1 * sizeof(*state->work), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->work == NULL)
-#endif
-  {
-    state->work = malloc(num_channels_plus_1 * sizeof(*state->work));
-  }
-
-  float *center_mel_freqs = NULL;
-#ifdef USE_ESP32
-  center_mel_freqs = heap_caps_malloc(num_channels_plus_1 * sizeof(*center_mel_freqs), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (center_mel_freqs == NULL)
-#endif
-  {
-    center_mel_freqs = malloc(num_channels_plus_1 * sizeof(*center_mel_freqs));
-  }
-
-  int16_t *actual_channel_starts = NULL;
-#ifdef USE_ESP32
-  actual_channel_starts = heap_caps_malloc(num_channels_plus_1 * sizeof(*actual_channel_starts), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (actual_channel_starts == NULL)
-#endif
-  {
-    actual_channel_starts = malloc(num_channels_plus_1 * sizeof(*actual_channel_starts));
-  }
-
-  int16_t *actual_channel_widths = NULL;
-#ifdef USE_ESP32
-  actual_channel_widths = heap_caps_malloc(num_channels_plus_1 * sizeof(*actual_channel_widths), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (actual_channel_widths == NULL)
-#endif
-  {
-    actual_channel_widths = malloc(num_channels_plus_1 * sizeof(*actual_channel_widths));
-  }
+  float *center_mel_freqs = (float *)frontend_malloc(num_channels_plus_1 * sizeof(*center_mel_freqs));
+  int16_t *actual_channel_starts = (int16_t *)frontend_malloc(num_channels_plus_1 * sizeof(*actual_channel_starts));
+  int16_t *actual_channel_widths = (int16_t *)frontend_malloc(num_channels_plus_1 * sizeof(*actual_channel_widths));
 
   if (state->channel_frequency_starts == NULL || state->channel_weight_starts == NULL ||
       state->channel_widths == NULL || center_mel_freqs == NULL || actual_channel_starts == NULL ||
       actual_channel_widths == NULL)
   {
-    free(center_mel_freqs);
-    free(actual_channel_starts);
-    free(actual_channel_widths);
+    frontend_free(center_mel_freqs);
+    frontend_free(actual_channel_starts);
+    frontend_free(actual_channel_widths);
     fprintf(stderr, "Failed to allocate channel buffers\n");
     return 0;
   }
@@ -210,16 +157,15 @@ int FilterbankPopulateState(const struct FilterbankConfig *config, struct Filter
 
   // Allocate the two arrays to store the weights - weight_index_start contains
   // the index of what would be the next set of weights that we would need to
-  // add, so that's how many weights we need to allocate.
-  state->weights = (int16_t *)calloc(weight_index_start, sizeof(*state->weights));
-  state->unweights = (int16_t *)calloc(weight_index_start, sizeof(*state->unweights));
+  state->weights = (int16_t *)frontend_calloc(weight_index_start, sizeof(*state->weights));
+  state->unweights = (int16_t *)frontend_calloc(weight_index_start, sizeof(*state->unweights));
 
   // If the alloc failed, we also need to nuke the arrays.
   if (state->weights == NULL || state->unweights == NULL)
   {
-    free(center_mel_freqs);
-    free(actual_channel_starts);
-    free(actual_channel_widths);
+    frontend_free(center_mel_freqs);
+    frontend_free(actual_channel_starts);
+    frontend_free(actual_channel_widths);
     fprintf(stderr, "Failed to allocate weights or unweights\n");
     return 0;
   }
@@ -252,9 +198,9 @@ int FilterbankPopulateState(const struct FilterbankConfig *config, struct Filter
     }
   }
 
-  free(center_mel_freqs);
-  free(actual_channel_starts);
-  free(actual_channel_widths);
+  frontend_free(center_mel_freqs);
+  frontend_free(actual_channel_starts);
+  frontend_free(actual_channel_widths);
   if (state->end_index >= spectrum_size)
   {
     fprintf(stderr, "Filterbank end_index is above spectrum size.\n");
@@ -265,10 +211,10 @@ int FilterbankPopulateState(const struct FilterbankConfig *config, struct Filter
 
 void FilterbankFreeStateContents(struct FilterbankState *state)
 {
-  free(state->channel_frequency_starts);
-  free(state->channel_weight_starts);
-  free(state->channel_widths);
-  free(state->weights);
-  free(state->unweights);
-  free(state->work);
+  frontend_free(state->channel_frequency_starts);
+  frontend_free(state->channel_weight_starts);
+  frontend_free(state->channel_widths);
+  frontend_free(state->weights);
+  frontend_free(state->unweights);
+  frontend_free(state->work);
 }

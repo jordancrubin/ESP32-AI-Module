@@ -15,7 +15,9 @@ limitations under the License.
 ==============================================================================*/
 #include "fft.h"
 
+#include <stdio.h>
 #include "kiss_fftr.h"
+#include "_kiss_fft_guts.h"
 
 void FftCompute(struct FftState *state, const int16_t *input, int input_scale_shift) {
   const size_t input_size = state->input_size;

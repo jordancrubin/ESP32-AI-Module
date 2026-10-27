@@ -38,7 +38,7 @@ String adminPassword = "";
 String ttsVoice = "alloy";
 String voiceOptions = "alloy";
 String modelOptions = "";
-float wakeThreshold = 0.8;
+float wakeThreshold = 0.5;
 float ttsSpeed = 0.8;
 
 float g_currentVocKOhms = 0.0;
@@ -1555,6 +1555,11 @@ void handleSerialCommands() {
           Serial.println("/say <text>     - Speak text immediately");
           Serial.println("/new            - Clear conversation history");
           Serial.println("/test_mic       - Record 5s clip to test mic");
+          Serial.println("/mic_mode <0|1|2> - Mic Channel: 1=Left, 2=Right, 0=Auto");
+          Serial.println("/mic_shift <n>  - I2S Bit Shift gain (8-16, default: 12)");
+          Serial.println("/wake_thresh <n>- Set wake word threshold (e.g. 0.40)");
+          Serial.println("/reset_pk       - Reset peak stats session tracking");
+          Serial.println("/test_hal       - Run on-device wake word verification test");
           Serial.println("/test_aec       - Run AEC diagnostics");
           Serial.println("/test_harmonic  - Run 20s sweep and record to check mic harmonics");
           Serial.println("/tune_aec       - Auto-tune AEC delay alignment");
@@ -1631,6 +1636,37 @@ void handleSerialCommands() {
           settings.calibration = {0, 0, 0, 0, false};
           settings.save();
           Serial.println("Calibration reset. Restart the device to recalibrate.");
+        } else if (inputBuffer == "/test_hal") {
+          speech.runSelfTest();
+        } else if (inputBuffer.startsWith("/mic_mode ")) {
+          int m = inputBuffer.substring(10).toInt();
+          if (m >= 0 && m <= 2) {
+              settings.micMode = m;
+              settings.save();
+              Serial.printf("Microphone Mode set to %d (%s)\n", m, m == 1 ? "Left Channel Only" : (m == 2 ? "Right Channel Only" : "Auto Stronger Channel"));
+          } else {
+              Serial.println("Usage: /mic_mode <0=Auto, 1=Left, 2=Right>");
+          }
+        } else if (inputBuffer.startsWith("/mic_shift ")) {
+          int s = inputBuffer.substring(11).toInt();
+          if (s >= 8 && s <= 16) {
+              speech.setBitShift(s);
+              Serial.printf("I2S bit shift set to %d\n", s);
+          } else {
+              Serial.println("Usage: /mic_shift <8..16> (11=+30dB, 12=+24dB, 13=+18dB, 14=+12dB)");
+          }
+        } else if (inputBuffer.startsWith("/wake_thresh ")) {
+          float t = inputBuffer.substring(13).toFloat();
+          if (t >= 0.05f && t <= 1.0f) {
+              wakeThreshold = t;
+              adminPrefs.putFloat("wake_thresh", wakeThreshold);
+              Serial.printf("Wake word threshold set to %.2f\n", wakeThreshold);
+          } else {
+              Serial.println("Usage: /wake_thresh <0.05 - 1.00>");
+          }
+        } else if (inputBuffer == "/reset_pk" || inputBuffer == "/reset_stats") {
+          speech.resetStats();
+          Serial.println("microWakeWord peak statistics reset.");
         } else if (inputBuffer == "/test_aec") {
           testAEC();
         } else if (inputBuffer == "/test_harmonic") {
@@ -2067,7 +2103,11 @@ void setup() {
   // Admin Password Check
   adminPassword = adminPrefs.getString("pass", "");
   ttsVoice = adminPrefs.getString("voice", "alloy");
-  wakeThreshold = adminPrefs.getFloat("wake_thresh", 0.8);
+  wakeThreshold = adminPrefs.getFloat("wake_thresh", 0.5);
+  if (wakeThreshold > 0.65f) {
+      wakeThreshold = 0.5f;
+      adminPrefs.putFloat("wake_thresh", 0.5f);
+  }
   ttsSpeed = adminPrefs.getFloat("tts_speed", 0.8);
   setInputBalance(settings.inputBalance);
   vocAlarmThreshold = adminPrefs.getInt("voc_thresh", 50);

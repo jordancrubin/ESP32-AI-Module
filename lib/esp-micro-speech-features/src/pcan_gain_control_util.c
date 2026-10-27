@@ -14,13 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "pcan_gain_control_util.h"
+#include "frontend_mem.h"
 
 #include <math.h>
 #include <stdio.h>
-
-#ifdef USE_ESP32
-#include <esp_heap_caps.h>
-#endif
 
 #define kint16max 0x00007FFF
 
@@ -56,13 +53,7 @@ int PcanGainControlPopulateState(const struct PcanGainControlConfig *config, str
   }
   state->noise_estimate = noise_estimate;
   state->num_channels = num_channels;
-#ifdef USE_ESP32
-  state->gain_lut = heap_caps_malloc(kWideDynamicFunctionLUTSize * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->gain_lut == NULL)
-#endif
-  {
-    state->gain_lut = malloc(kWideDynamicFunctionLUTSize * sizeof(int16_t));
-  }
+  state->gain_lut = (int16_t *)frontend_malloc(kWideDynamicFunctionLUTSize * sizeof(int16_t));
   if (state->gain_lut == NULL)
   {
     fprintf(stderr, "Failed to allocate gain LUT\n");
@@ -98,4 +89,4 @@ int PcanGainControlPopulateState(const struct PcanGainControlConfig *config, str
   return 1;
 }
 
-void PcanGainControlFreeStateContents(struct PcanGainControlState *state) { free(state->gain_lut); }
+void PcanGainControlFreeStateContents(struct PcanGainControlState *state) { frontend_free(state->gain_lut); }

@@ -14,15 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "window_util.h"
+#include "frontend_mem.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef USE_ESP32
-#include <esp_heap_caps.h>
-#endif
 
 // Some platforms don't have M_PI
 #ifndef M_PI
@@ -40,13 +37,7 @@ int WindowPopulateState(const struct WindowConfig *config, struct WindowState *s
   state->size = config->size_ms * sample_rate / 1000;
   state->step = config->step_size_ms * sample_rate / 1000;
 
-#ifdef USE_ESP32
-  state->coefficients = heap_caps_malloc(state->size * sizeof(*state->coefficients), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->coefficients == NULL)
-#endif
-  {
-    state->coefficients = malloc(state->size * sizeof(*state->coefficients));
-  }
+  state->coefficients = (int16_t *)frontend_malloc(state->size * sizeof(*state->coefficients));
   if (state->coefficients == NULL)
   {
     fprintf(stderr, "Failed to allocate window coefficients\n");
@@ -64,26 +55,14 @@ int WindowPopulateState(const struct WindowConfig *config, struct WindowState *s
   }
 
   state->input_used = 0;
-#ifdef USE_ESP32
-  state->input = heap_caps_malloc(state->size * sizeof(*state->input), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->input == NULL)
-#endif
-  {
-    state->input = malloc(state->size * sizeof(*state->input));
-  }
+  state->input = (int16_t *)frontend_malloc(state->size * sizeof(*state->input));
   if (state->input == NULL)
   {
     fprintf(stderr, "Failed to allocate window input\n");
     return 0;
   }
 
-#ifdef USE_ESP32
-  state->output = heap_caps_malloc(state->size * sizeof(*state->output), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->output == NULL)
-#endif
-  {
-    state->output = malloc(state->size * sizeof(*state->output));
-  }
+  state->output = (int16_t *)frontend_malloc(state->size * sizeof(*state->output));
   if (state->output == NULL)
   {
     fprintf(stderr, "Failed to allocate window output\n");
@@ -95,7 +74,7 @@ int WindowPopulateState(const struct WindowConfig *config, struct WindowState *s
 
 void WindowFreeStateContents(struct WindowState *state)
 {
-  free(state->coefficients);
-  free(state->input);
-  free(state->output);
+  frontend_free(state->coefficients);
+  frontend_free(state->input);
+  frontend_free(state->output);
 }

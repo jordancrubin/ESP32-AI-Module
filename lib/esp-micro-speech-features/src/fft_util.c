@@ -14,12 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "fft_util.h"
+#include "frontend_mem.h"
 
 #include <stdio.h>
-
-#ifdef USE_ESP32
-#include <esp_heap_caps.h>
-#endif
 
 #include "kiss_fftr.h"
 
@@ -32,28 +29,14 @@ int FftPopulateState(struct FftState *state, size_t input_size)
     state->fft_size <<= 1;
   }
 
-#ifdef USE_ESP32
-  state->input =
-      heap_caps_malloc(state->fft_size * sizeof(*state->input), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->input == NULL)
-#endif
-  {
-    state->input = malloc(state->fft_size * sizeof(*state->input));
-  }
+  state->input = (int16_t *)frontend_malloc(state->fft_size * sizeof(*state->input));
   if (state->input == NULL)
   {
     fprintf(stderr, "Failed to alloc fft input buffer\n");
     return 0;
   }
 
-#ifdef USE_ESP32
-  state->output = heap_caps_malloc((state->fft_size / 2 + 1) * sizeof(*state->output) * 2,
-                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->output == NULL)
-#endif
-  {
-    state->output = malloc((state->fft_size / 2 + 1) * sizeof(*state->output) * 2);
-  }
+  state->output = (struct complex_int16_t *)frontend_malloc((state->fft_size / 2 + 1) * sizeof(*state->output) * 2);
   if (state->output == NULL)
   {
     fprintf(stderr, "Failed to alloc fft output buffer\n");
@@ -69,14 +52,7 @@ int FftPopulateState(struct FftState *state, size_t input_size)
     return 0;
   }
 
-#ifdef USE_ESP32
-  state->scratch = heap_caps_malloc(scratch_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (state->scratch == NULL)
-#endif
-  {
-    state->scratch = malloc(scratch_size);
-  }
-
+  state->scratch = frontend_malloc(scratch_size);
   if (state->scratch == NULL)
   {
     fprintf(stderr, "Failed to alloc fft scratch buffer\n");
@@ -95,7 +71,7 @@ int FftPopulateState(struct FftState *state, size_t input_size)
 
 void FftFreeStateContents(struct FftState *state)
 {
-  free(state->input);
-  free(state->output);
-  free(state->scratch);
+  frontend_free(state->input);
+  frontend_free(state->output);
+  frontend_free(state->scratch);
 }

@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "noise_reduction_util.h"
+#include "frontend_mem.h"
 
 #include <stdio.h>
 
@@ -30,7 +31,7 @@ int NoiseReductionPopulateState(const struct NoiseReductionConfig *config, struc
   state->even_smoothing = config->even_smoothing * (1 << kNoiseReductionBits);
   state->min_signal_remaining = config->min_signal_remaining * (1 << kNoiseReductionBits);
   state->num_channels = num_channels;
-  state->estimate = (uint32_t *) calloc(state->num_channels, sizeof(*state->estimate));
+  state->estimate = (uint32_t *) frontend_calloc(state->num_channels, sizeof(*state->estimate));
   if (state->estimate == NULL) {
     fprintf(stderr, "Failed to alloc estimate buffer\n");
     return 0;
@@ -38,4 +39,4 @@ int NoiseReductionPopulateState(const struct NoiseReductionConfig *config, struc
   return 1;
 }
 
-void NoiseReductionFreeStateContents(struct NoiseReductionState *state) { free(state->estimate); }
+void NoiseReductionFreeStateContents(struct NoiseReductionState *state) { frontend_free(state->estimate); }

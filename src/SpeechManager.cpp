@@ -14,6 +14,8 @@
 #include <frontend.h>
 #include <frontend_util.h>
 #include "excuse_me_hal.h"
+#include "hal_test_audio.h"
+#include "hal_test_features.h"
 #include "SettingsManager.h"
 #include <freertos/ringbuf.h>
 
@@ -91,6 +93,7 @@ void setAecBypass(bool bypass) { s_aec_bypass = bypass; }
 static RingbufHandle_t s_processed_ringbuf = NULL; // Buffer for clean audio
 static i2s_chan_handle_t s_rx_handle = NULL;
 static volatile bool s_is_recording = false; // Flag to pause AEC task
+static void resetMicroWakeWord();
 
 void flushAecBuffer() {
     if (s_processed_ringbuf) {
@@ -101,6 +104,7 @@ void flushAecBuffer() {
             vRingbufferReturnItem(s_processed_ringbuf, data);
         }
     }
+    resetMicroWakeWord();
 }
 
 // Buffer Health Stats
@@ -114,11 +118,11 @@ extern bool g_isSubMenuActive; // To track if the VU meter is actually visible
 // microWakeWord Settings from excuse_me_hal.json
 static const char *const MWW_NAME = "Excuse me Hal";
 static const size_t MWW_SLIDING_WINDOW_SIZE = 5;
-static const size_t MWW_TENSOR_ARENA_SIZE = 40 * 1024; // 40KB (model requires 32000)
-static const size_t MWW_VAR_ARENA_SIZE = 2048;
+static const size_t MWW_TENSOR_ARENA_SIZE = 64 * 1024; // 64KB
+static const size_t MWW_VAR_ARENA_SIZE = 16 * 1024;   // 16KB for streaming delay-line states
 static const uint8_t MWW_FEATURE_SIZE = 40;
 static const uint16_t MWW_STEP_SAMPLES = 160; // 10ms @ 16kHz
-static const int16_t MWW_MIN_IGNORE_WINDOWS = 74; // Warmup windows before triggering
+static const int16_t MWW_MIN_IGNORE_WINDOWS = 20; // Warmup windows before triggering (~600ms)
 
 // microWakeWord State
 static uint8_t *s_mww_tensor_arena = nullptr;
@@ -136,8 +140,28 @@ static size_t s_mww_sliding_window_idx = 0;
 static uint8_t s_mww_current_stride_step = 0;
 static int16_t s_mww_ignore_windows = -MWW_MIN_IGNORE_WINDOWS;
 
+static int s_boot_test_status = -99;
+static uint8_t s_boot_test_val = 0;
+static size_t s_mww_arena_used = 0;
+static uint8_t s_max_raw_prob_session = 0;
+static float s_max_avg_prob_session = 0.0f;
+static volatile int s_i2s_shift = 12; // Configurable bitshift (11=+30dB, 12=+24dB, 13=+18dB, 14=+12dB)
+
+void SpeechManager::setBitShift(int shift) {
+    if (shift >= 8 && shift <= 16) s_i2s_shift = shift;
+}
+
+int SpeechManager::getBitShift() {
+    return s_i2s_shift;
+}
+
+void SpeechManager::resetStats() {
+    s_max_raw_prob_session = 0;
+    s_max_avg_prob_session = 0.0f;
+}
+
 // Audio accumulator for microWakeWord
-static const size_t MWW_AUDIO_ACCUM_MAX = 2048;
+static const size_t MWW_AUDIO_ACCUM_MAX = 4096;
 static int16_t s_mww_audio_accum[MWW_AUDIO_ACCUM_MAX];
 static size_t s_mww_audio_accum_len = 0;
 
@@ -171,10 +195,17 @@ static void resetMicroWakeWord() {
     s_mww_current_stride_step = 0;
     s_mww_ignore_windows = -MWW_MIN_IGNORE_WINDOWS;
     s_mww_audio_accum_len = 0;
+    s_max_raw_prob_session = 0;
+    s_max_avg_prob_session = 0.0f;
     if (s_mww_initialized) {
         FrontendReset(&s_mww_frontend_state);
+        if (s_mww_mrv) {
+            s_mww_mrv->ResetAll();
+        }
     }
 }
+
+void runMicroWakeWordSelfTest();
 
 static bool initMicroWakeWord() {
     if (s_mww_initialized) return true;
@@ -243,14 +274,175 @@ static bool initMicroWakeWord() {
         return false;
     }
 
-    Serial.printf("SpeechManager [mWW]: Initialized model '%s' (Arena used: %d bytes)\n",
-                  MWW_NAME, s_mww_interpreter->arena_used_bytes());
+    // Test invocation with zeros to verify interpreter produces expected output
+    TfLiteTensor *test_in = s_mww_interpreter->input(0);
+    memset(test_in->data.int8, 0, test_in->bytes);
+    TfLiteStatus test_status = s_mww_interpreter->Invoke();
+    TfLiteTensor *test_out = s_mww_interpreter->output(0);
+    s_boot_test_status = (int)test_status;
+    s_boot_test_val = test_out->data.uint8[0];
+    s_mww_arena_used = s_mww_interpreter->arena_used_bytes();
+    Serial.printf("SpeechManager [mWW]: Initialized model '%s' (Arena used: %d bytes, Test Invoke: status=%d, out_val=%u)\n",
+                  MWW_NAME, s_mww_interpreter->arena_used_bytes(), (int)test_status, test_out->data.uint8[0]);
 
     resetMicroWakeWord();
     s_mww_initialized = true;
+
+    // Run on-device verification test with 1.2s synthetic "Excuse me Hal"
+    runMicroWakeWordSelfTest();
+
     return true;
 }
 
+void runMicroWakeWordSelfTest() {
+    Serial.println("\n==================================================");
+    Serial.println(">> RUNNING ON-DEVICE microWakeWord DUAL SELF-TEST <<");
+    bool prev_recording = s_is_recording;
+    s_is_recording = true; // Pause background audio processing
+
+    // ----------------------------------------------------
+    // TEST 1: Direct Feature Inference (Pre-extracted features)
+    // Bypasses FrontendProcessSamples completely
+    // ----------------------------------------------------
+    Serial.printf(">> TEST 1: Feeding %u pre-extracted slices directly to TFLM...\n", (unsigned)HAL_TEST_SLICES_COUNT);
+    resetMicroWakeWord();
+    uint8_t t1_peak_raw = 0;
+    float t1_peak_avg = 0.0f;
+    uint32_t t1_steps = 0;
+
+    TfLiteTensor *input = s_mww_interpreter->input(0);
+    uint8_t stride = input->dims->data[1];
+    int8_t *input_data = tflite::GetTensorData<int8_t>(input);
+
+    for (size_t s = 0; s < HAL_TEST_SLICES_COUNT; s++) {
+        const int8_t *slice_features = HAL_TEST_FEATURES + (s * MWW_FEATURE_SIZE);
+        memcpy(input_data + (MWW_FEATURE_SIZE * s_mww_current_stride_step), slice_features, MWW_FEATURE_SIZE);
+        s_mww_current_stride_step++;
+
+        if (s_mww_current_stride_step >= stride) {
+            s_mww_current_stride_step = 0;
+            t1_steps++;
+            TfLiteStatus st = s_mww_interpreter->Invoke();
+            if (st != kTfLiteOk) {
+                Serial.printf("  [TEST 1] Invoke failed at step %u (status=%d)!\n", t1_steps, (int)st);
+                continue;
+            }
+            TfLiteTensor *out = s_mww_interpreter->output(0);
+            uint8_t raw = out->data.uint8[0];
+            s_mww_sliding_window[s_mww_sliding_window_idx] = raw;
+            s_mww_sliding_window_idx = (s_mww_sliding_window_idx + 1) % MWW_SLIDING_WINDOW_SIZE;
+            uint32_t sum = 0;
+            for (size_t k = 0; k < MWW_SLIDING_WINDOW_SIZE; k++) sum += s_mww_sliding_window[k];
+            float avg = (float)sum / (float)(255 * MWW_SLIDING_WINDOW_SIZE);
+            if (raw > t1_peak_raw) t1_peak_raw = raw;
+            if (avg > t1_peak_avg) t1_peak_avg = avg;
+
+            if (raw > 20 || t1_steps == 1 || t1_steps % 10 == 0) {
+                Serial.printf("  [TEST 1] Step %2u: raw=%3u (%.2f), avg=%.2f\n", t1_steps, raw, (float)raw / 255.0f, avg);
+            }
+        }
+    }
+    Serial.printf(">> TEST 1 COMPLETE: peak_raw=%u (%.2f), peak_avg=%.2f (Steps: %u) <<\n",
+                  t1_peak_raw, (float)t1_peak_raw / 255.0f, t1_peak_avg, t1_steps);
+
+    // ----------------------------------------------------
+    // TEST 2: Audio Samples via Frontend
+    // Tests FrontendProcessSamples + TFLM
+    // ----------------------------------------------------
+    Serial.printf("\n>> TEST 2: Feeding %u raw audio samples through Frontend...\n", (unsigned)HAL_TEST_SAMPLES_COUNT);
+    FrontendReset(&s_mww_frontend_state);
+    resetMicroWakeWord();
+    uint8_t t2_peak_raw = 0;
+    float t2_peak_avg = 0.0f;
+    size_t offset = 0;
+    uint32_t t2_slices = 0;
+    uint32_t t2_steps = 0;
+
+    while (offset + MWW_STEP_SAMPLES <= HAL_TEST_SAMPLES_COUNT) {
+        size_t samples_read = 0;
+        struct FrontendOutput frontend_output = FrontendProcessSamples(
+            &s_mww_frontend_state, HAL_TEST_SAMPLES + offset, MWW_STEP_SAMPLES, &samples_read);
+        offset += MWW_STEP_SAMPLES;
+
+        if (frontend_output.size != MWW_FEATURE_SIZE || frontend_output.values == NULL) {
+            continue;
+        }
+        t2_slices++;
+
+        int8_t audio_features[MWW_FEATURE_SIZE];
+        for (size_t i = 0; i < MWW_FEATURE_SIZE; ++i) {
+            constexpr int32_t value_scale = 256;
+            constexpr int32_t value_div = 666;
+            int32_t value = ((frontend_output.values[i] * value_scale) + (value_div / 2)) / value_div;
+            value -= 128;
+            if (value < -128) value = -128;
+            if (value > 127) value = 127;
+            audio_features[i] = (int8_t)value;
+        }
+
+        if (t2_slices <= 10 || (t2_slices >= 33 && t2_slices <= 45) || t2_slices == 100) {
+            int8_t f_min = 127, f_max = -128;
+            for (int f = 0; f < MWW_FEATURE_SIZE; f++) {
+                if (audio_features[f] < f_min) f_min = audio_features[f];
+                if (audio_features[f] > f_max) f_max = audio_features[f];
+            }
+            Serial.printf("  [TEST 2] Slice %3u: v[0]=%4d, v[20]=%4d | win_max=%5d | feat[min:%4d, max:%4d, f0:%4d, f20:%4d]\n",
+                          t2_slices, frontend_output.values[0], frontend_output.values[20],
+                          (int)s_mww_frontend_state.window.max_abs_output_value,
+                          f_min, f_max, audio_features[0], audio_features[20]);
+        }
+
+        memcpy(input_data + (MWW_FEATURE_SIZE * s_mww_current_stride_step), audio_features, MWW_FEATURE_SIZE);
+        s_mww_current_stride_step++;
+
+        if (s_mww_current_stride_step >= stride) {
+            s_mww_current_stride_step = 0;
+            t2_steps++;
+            TfLiteStatus st = s_mww_interpreter->Invoke();
+            if (st != kTfLiteOk) {
+                Serial.printf("  [TEST 2] Invoke failed at step %u (status=%d)!\n", t2_steps, (int)st);
+                continue;
+            }
+            TfLiteTensor *out = s_mww_interpreter->output(0);
+            uint8_t raw = out->data.uint8[0];
+            s_mww_sliding_window[s_mww_sliding_window_idx] = raw;
+            s_mww_sliding_window_idx = (s_mww_sliding_window_idx + 1) % MWW_SLIDING_WINDOW_SIZE;
+            uint32_t sum = 0;
+            for (size_t k = 0; k < MWW_SLIDING_WINDOW_SIZE; k++) sum += s_mww_sliding_window[k];
+            float avg = (float)sum / (float)(255 * MWW_SLIDING_WINDOW_SIZE);
+            if (raw > t2_peak_raw) t2_peak_raw = raw;
+            if (avg > t2_peak_avg) t2_peak_avg = avg;
+
+            if (raw > 0 || t2_steps == 1 || t2_steps % 10 == 0) {
+                Serial.printf("  [TEST 2] Step %2u: raw=%3u (%.2f), avg=%.2f\n", t2_steps, raw, (float)raw / 255.0f, avg);
+            }
+        }
+    }
+    Serial.printf(">> TEST 2 COMPLETE: peak_raw=%u (%.2f), peak_avg=%.2f (Slices: %u, Steps: %u) <<\n",
+                  t2_peak_raw, (float)t2_peak_raw / 255.0f, t2_peak_avg, t2_slices, t2_steps);
+
+    if (t1_peak_raw >= 128 && t2_peak_raw >= 128) {
+        Serial.println(">> SELF-TEST PASSED: Both Direct Features and Frontend Audio triggered successfully! <<\n==================================================\n");
+    } else if (t1_peak_raw >= 128) {
+        Serial.println(">> TEST 1 PASSED but TEST 2 FAILED: TFLM works! Check FrontendProcessSamples. <<\n==================================================\n");
+    } else {
+        Serial.println(">> TEST 1 FAILED: TFLM model did not trigger on pre-extracted features. <<\n==================================================\n");
+    }
+
+    resetMicroWakeWord();
+    s_is_recording = prev_recording;
+}
+
+void SpeechManager::runSelfTest() {
+    runMicroWakeWordSelfTest();
+}
+
+
+// Peak stats for debugging and channel routing
+static volatile int32_t s_peak_raw_l = 0;
+static volatile int32_t s_peak_raw_r = 0;
+static volatile int32_t s_peak_mic = 0;
+static volatile int32_t s_peak_out = 0;
 
 // Background Task to feed the AFE pipeline
 void feed_Task(void *arg) {
@@ -283,19 +475,26 @@ void feed_Task(void *arg) {
                     }
                 }
                 
-                // Debug: Analyze Stereo Input Levels (Only calculate if VU Meter is visible or AEC debug is on!)
-                if (g_isSubMenuActive || s_debug_aec) {
-                    int32_t max_l = 0;
-                    int32_t max_r = 0;
-                    for (int i = 0; i < FRAME_SIZE; i++) {
-                        int32_t l = abs(i2s_raw_buff[i*2] >> 14);
-                        int32_t r = abs(i2s_raw_buff[i*2+1] >> 14);
-                        if (l > max_l) max_l = l;
-                        if (r > max_r) max_r = r;
-                    }
-                    s_peak_l = max_l;
-                    s_peak_r = max_r;
+                // Track Stereo Input Levels on EVERY frame
+                int32_t frame_max_l = 0;
+                int32_t frame_max_r = 0;
+                int32_t frame_max_raw_l = 0;
+                int32_t frame_max_raw_r = 0;
+                for (int i = 0; i < FRAME_SIZE; i++) {
+                    int32_t raw_l = abs(i2s_raw_buff[i*2]);
+                    int32_t raw_r = abs(i2s_raw_buff[i*2+1]);
+                    if (raw_l > frame_max_raw_l) frame_max_raw_l = raw_l;
+                    if (raw_r > frame_max_raw_r) frame_max_raw_r = raw_r;
+
+                    int32_t l = abs(i2s_raw_buff[i*2] >> s_i2s_shift);
+                    int32_t r = abs(i2s_raw_buff[i*2+1] >> s_i2s_shift);
+                    if (l > frame_max_l) frame_max_l = l;
+                    if (r > frame_max_r) frame_max_r = r;
                 }
+                s_peak_l = frame_max_l;
+                s_peak_r = frame_max_r;
+                s_peak_raw_l = frame_max_raw_l;
+                s_peak_raw_r = frame_max_raw_r;
 
                 // 2. Read Reference from Circular Buffer
                 bool has_ref = false;
@@ -305,9 +504,6 @@ void feed_Task(void *arg) {
                         ? (s_ref_write_index - s_ref_read_index) 
                         : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index));
                     
-                    // Sync Delay: Hold reference back to align with physical echo
-                    // Latency ~100ms. Delay Ref by ~1600 samples
-                    // const size_t TARGET_DELAY = 1600; 
                     if (available >= (FRAME_SIZE + s_aec_target_delay)) {
                         int local_gain = s_aec_gain; // Cache volatile
                         for (int i = 0; i < FRAME_SIZE; i++) {
@@ -330,35 +526,62 @@ void feed_Task(void *arg) {
 
                 int local_mic_mode = settings.micMode; // Cache external
                 bool local_invert = s_aec_invert;      // Cache volatile
+
                 // 3. Prepare Mic Frame (Convert 32-bit Stereo to 16-bit Mono)
+                static int32_t s_dc_offset = 0;
                 for (int i = 0; i < FRAME_SIZE; i++) {
-                    // Prepare Mono Frame for AEC based on Mic Mode
-                    int32_t l = i2s_raw_buff[i*2] >> 14;
-                    int32_t r = i2s_raw_buff[i*2+1] >> 14;
+                    int32_t l = i2s_raw_buff[i*2] >> s_i2s_shift;
+                    int32_t r = i2s_raw_buff[i*2+1] >> s_i2s_shift;
                     int32_t val = 0;
 
-                    if (local_mic_mode == 2) val = r;      // Right
-                    else if (local_mic_mode == 1) val = l; // Left
-                    else val = (l + r) >> 1;                 // Stereo Mix (Bitshift for speed)
+                    if (local_mic_mode == 2) {
+                        val = r; // Strict Right Channel
+                    } else if (local_mic_mode == 1) {
+                        val = l; // Strict Left Channel
+                    } else {
+                        // Mode 0: Auto - pick the stronger channel with hysteresis
+                        static bool s_use_right = false;
+                        if (frame_max_r > (frame_max_l * 5) / 4 && frame_max_r > 500) s_use_right = true;
+                        else if (frame_max_l > (frame_max_r * 5) / 4 && frame_max_l > 500) s_use_right = false;
+                        val = s_use_right ? r : l;
+                    }
+
+                    // High-pass DC offset filter to keep waveform centered at 0
+                    s_dc_offset += val - (s_dc_offset >> 8);
+                    val -= (s_dc_offset >> 8);
 
                     if (val > 32767) val = 32767; else if (val < -32768) val = -32768;
                     if (local_invert) val = -val;
                     mic_frame[i] = (int16_t)val;
                 }
 
-                // 4. Run Echo Cancellation
-                speex_echo_cancellation(st, mic_frame, ref_frame, out_frame);
+                int32_t frame_max_mic = 0;
+                for (int i = 0; i < FRAME_SIZE; i++) {
+                    if (abs(mic_frame[i]) > frame_max_mic) frame_max_mic = abs(mic_frame[i]);
+                }
+                s_peak_mic = frame_max_mic;
 
-                // 5. Run Noise Suppression
-                speex_preprocess_run(den, out_frame);
+                // 4. Run Echo Cancellation & Noise Suppression
+                // During standby wake word listening, bypass Speex to preserve
+                // clean, unattenuated high frequencies for microWakeWord
+                if (s_aec_bypass || !s_interrupt_mode) {
+                    memcpy(out_frame, mic_frame, sizeof(out_frame));
+                } else {
+                    speex_echo_cancellation(st, mic_frame, ref_frame, out_frame);
+                    speex_preprocess_run(den, out_frame);
+                }
+
+                int32_t frame_max_out = 0;
+                for (int i = 0; i < FRAME_SIZE; i++) {
+                    if (abs(out_frame[i]) > frame_max_out) frame_max_out = abs(out_frame[i]);
+                }
+                s_peak_out = frame_max_out;
 
                 // Debug Output
                 if (s_debug_aec) {
                     int16_t max_ref = 0;
-                    int16_t max_out = 0;
                     for (int i = 0; i < FRAME_SIZE; i++) {
                         if (abs(ref_frame[i]) > max_ref) max_ref = abs(ref_frame[i]);
-                        if (abs(out_frame[i]) > max_out) max_out = abs(out_frame[i]);
                     }
                     
                     static int debug_skip = 0;
@@ -369,7 +592,7 @@ void feed_Task(void *arg) {
                             s_aec_debug_log[s_aec_debug_log_count].micL = s_peak_l;
                             s_aec_debug_log[s_aec_debug_log_count].micR = s_peak_r;
                             s_aec_debug_log[s_aec_debug_log_count].refPk = max_ref;
-                            s_aec_debug_log[s_aec_debug_log_count].outPk = max_out;
+                            s_aec_debug_log[s_aec_debug_log_count].outPk = frame_max_out;
                             s_aec_debug_log_count = s_aec_debug_log_count + 1;
                         }
                     }
@@ -424,7 +647,7 @@ void SpeechManager::begin() {
 
     // Initialize Speex AEC (Enabled for all modes)
     s_ref_mutex = xSemaphoreCreateMutex();
-    s_processed_ringbuf = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_BYTEBUF); // Increased to 16KB
+    s_processed_ringbuf = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_NOSPLIT); // 16KB, no byte splitting
     
     int sampleRate = 16000;
     int frameSize = 256;
@@ -474,79 +697,78 @@ void SpeechManager::setupI2S() {
 bool SpeechManager::detectWakeWord(float threshold) {
     if (!s_mww_initialized) return false;
 
-    int samplesRead = 0;
-    int16_t* processed_buff = NULL;
-    int32_t raw_i2s_buffer[256]; // Buffer for raw fallback
-    size_t bytes_fetched = 0;
-
-    // 1. Fetch Audio
-    if (s_processed_ringbuf) {
-        // AEC Mode: Fetch clean audio from Speex pipeline
-        processed_buff = (int16_t*)xRingbufferReceive(s_processed_ringbuf, &bytes_fetched, 0);
-        if (processed_buff) {
-            samplesRead = bytes_fetched / sizeof(int16_t);
-        } else {
-            return false; // No data ready
-        }
-    } else {
-        // Fallback: Raw I2S Mode
-        size_t bytes_read = 0;
-        if (i2s_channel_read(rx_handle, raw_i2s_buffer, sizeof(raw_i2s_buffer), &bytes_read, 20) == ESP_OK) {
-            if (bytes_read > 0) {
-                samplesRead = bytes_read / 8; // 8 bytes per stereo frame
-            }
-        }
-        if (samplesRead == 0) return false;
-    }
-
     static int32_t max_audio_level = 0;
     static int32_t max_l_level = 0;
     static int32_t max_r_level = 0;
-    static int32_t dc_offset_int = 0;
 
-    if (processed_buff) {
-        if (s_peak_l > max_l_level) max_l_level = s_peak_l;
-        if (s_peak_r > max_r_level) max_r_level = s_peak_r;
-    }
+    if (s_peak_l > max_l_level) max_l_level = s_peak_l;
+    if (s_peak_r > max_r_level) max_r_level = s_peak_r;
 
     int local_mic_mode = settings.micMode;
     bool local_interrupt = s_interrupt_mode;
     int local_attenuation_mult = 100 - s_aec_attenuation;
 
-    for (int i = 0; i < samplesRead; i++) {
-        int32_t raw;
-        if (processed_buff) {
-            raw = processed_buff[i];
-        } else {
-            int32_t l = raw_i2s_buffer[i*2] >> 14;
-            int32_t r = raw_i2s_buffer[i*2+1] >> 14;
+    int total_samples_read = 0;
+    int32_t burst_max_level = 0;
 
-            if (abs(l) > max_l_level) max_l_level = abs(l);
-            if (abs(r) > max_r_level) max_r_level = abs(r);
+    // 1. Drain ALL pending frames from the ringbuffer to eliminate lag and prevent overflow
+    if (s_processed_ringbuf) {
+        while (true) {
+            size_t bytes_fetched = 0;
+            int16_t* processed_buff = (int16_t*)xRingbufferReceive(s_processed_ringbuf, &bytes_fetched, 0);
+            if (!processed_buff) break;
 
-            if (local_mic_mode == 2) raw = r;
-            else if (local_mic_mode == 1) raw = l;
-            else raw = (l + r) >> 1;
+            int samplesRead = bytes_fetched / sizeof(int16_t);
+            total_samples_read += samplesRead;
 
-            dc_offset_int += raw - (dc_offset_int >> 8);
-            raw -= (dc_offset_int >> 8);
+            for (int i = 0; i < samplesRead; i++) {
+                int32_t raw = processed_buff[i];
 
-            if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
+                if (local_interrupt) {
+                    raw = (raw * local_attenuation_mult) / 100;
+                }
+
+                int32_t abs_raw = abs(raw);
+                if (abs_raw > burst_max_level) burst_max_level = abs_raw;
+                if (abs_raw > max_audio_level) max_audio_level = abs_raw;
+
+                if (s_mww_audio_accum_len < MWW_AUDIO_ACCUM_MAX) {
+                    s_mww_audio_accum[s_mww_audio_accum_len++] = (int16_t)raw;
+                }
+            }
+
+            vRingbufferReturnItem(s_processed_ringbuf, processed_buff);
         }
+    } else {
+        // Fallback: Raw I2S Mode
+        int32_t raw_i2s_buffer[256];
+        size_t bytes_read = 0;
+        if (i2s_channel_read(rx_handle, raw_i2s_buffer, sizeof(raw_i2s_buffer), &bytes_read, 20) == ESP_OK) {
+            if (bytes_read > 0) {
+                int samplesRead = bytes_read / 8; // 8 bytes per stereo frame
+                total_samples_read += samplesRead;
+                for (int i = 0; i < samplesRead; i++) {
+                    int32_t l = raw_i2s_buffer[i*2] >> s_i2s_shift;
+                    int32_t r = raw_i2s_buffer[i*2+1] >> s_i2s_shift;
+                    int32_t raw;
+                    if (local_mic_mode == 2) raw = r;
+                    else if (local_mic_mode == 1) raw = l;
+                    else raw = (s_peak_r > s_peak_l) ? r : l;
 
-        if (local_interrupt) {
-            raw = (raw * local_attenuation_mult) / 100;
-        }
-
-        if (abs(raw) > max_audio_level) max_audio_level = abs(raw);
-
-        if (s_mww_audio_accum_len < MWW_AUDIO_ACCUM_MAX) {
-            s_mww_audio_accum[s_mww_audio_accum_len++] = (int16_t)raw;
+                    if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
+                    int32_t abs_raw = abs(raw);
+                    if (abs_raw > burst_max_level) burst_max_level = abs_raw;
+                    if (abs_raw > max_audio_level) max_audio_level = abs_raw;
+                    if (s_mww_audio_accum_len < MWW_AUDIO_ACCUM_MAX) {
+                        s_mww_audio_accum[s_mww_audio_accum_len++] = (int16_t)raw;
+                    }
+                }
+            }
         }
     }
 
-    if (processed_buff) {
-        vRingbufferReturnItem(s_processed_ringbuf, processed_buff);
+    if (total_samples_read == 0 && s_mww_audio_accum_len < MWW_STEP_SAMPLES) {
+        return false;
     }
 
     bool wake_word_detected = false;
@@ -601,10 +823,9 @@ bool SpeechManager::detectWakeWord(float threshold) {
             s_mww_sliding_window[s_mww_sliding_window_idx] = raw_prob;
             s_mww_sliding_window_idx = (s_mww_sliding_window_idx + 1) % MWW_SLIDING_WINDOW_SIZE;
 
-            // Startup / post-detection warmup
+            // Startup / post-detection warmup counter
             if (s_mww_ignore_windows < 0) {
                 s_mww_ignore_windows++;
-                continue;
             }
 
             // Calculate rolling window average
@@ -615,33 +836,66 @@ bool SpeechManager::detectWakeWord(float threshold) {
             float avg_prob = (float)sum / (float)(255 * MWW_SLIDING_WINDOW_SIZE);
             float current_prob = (float)raw_prob / 255.0f;
 
-            // Debug logging
-            if (settings.debugMode && Serial && Serial.availableForWrite() > 64) {
-                static uint32_t s_last_log_ms = 0;
-                if (millis() - s_last_log_ms > 250 || avg_prob > 0.35f) {
-                    Serial.printf("mWW ['%s']: Avg: %.2f | Instant: %.2f | Thresh: %.2f | Level: %d\n",
-                                  MWW_NAME, avg_prob, current_prob, threshold, max_audio_level);
-                    s_last_log_ms = millis();
+            // Track lifetime session peaks
+            if (raw_prob > s_max_raw_prob_session) s_max_raw_prob_session = raw_prob;
+            if (avg_prob > s_max_avg_prob_session) s_max_avg_prob_session = avg_prob;
+
+            // Immediate notification on any non-zero model confidence
+            if (raw_prob > 0) {
+                Serial.printf(">> MWW CONFIDENCE SPIKE: raw=%u (inst:%.2f, avg:%.2f)\n", raw_prob, current_prob, avg_prob);
+            }
+
+            // Extra visibility when speech is actively present in this frame or confidence is non-zero
+            if (raw_prob > 0 || burst_max_level > 2000) {
+                static uint32_t s_speech_log_ms = 0;
+                if (raw_prob > 0 || millis() - s_speech_log_ms > 100) {
+                    s_speech_log_ms = millis();
+                    int8_t f_min = 127, f_max = -128;
+                    for (int f = 0; f < MWW_FEATURE_SIZE; f++) {
+                        if (audio_features[f] < f_min) f_min = audio_features[f];
+                        if (audio_features[f] > f_max) f_max = audio_features[f];
+                    }
+                    Serial.printf(">> MWW [%s]: raw=%u (inst:%.2f, avg:%.2f) | ign=%d | feat[min:%d, max:%d, f0:%d, f20:%d]\n",
+                                  MWW_NAME, raw_prob, current_prob, avg_prob,
+                                  s_mww_ignore_windows, f_min, f_max, audio_features[0], audio_features[20]);
                 }
             }
 
-            // Detection check
-            if (!s_interrupt_mode) {
-                if (avg_prob >= threshold) {
-                    if (settings.debugMode) {
-                        Serial.printf(">>> WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
-                                      MWW_NAME, avg_prob, current_prob);
-                    }
-                    wake_word_detected = true;
+            // Debug periodic logging (every ~250ms)
+            if (settings.debugMode && Serial && Serial.availableForWrite() > 64) {
+                static uint32_t s_last_log_ms = 0;
+                if (millis() - s_last_log_ms > 250 || avg_prob > 0.35f) {
+                    Serial.printf("mWW ['%s']: Avg: %.2f (pk:%.2f) | Inst: %.2f (pk:%u) | Thresh: %.2f | Level: %d (L:%d R:%d Mic:%d Out:%d) [Mode:%d Shift:%d]\n",
+                                  MWW_NAME, avg_prob, s_max_avg_prob_session, current_prob, s_max_raw_prob_session,
+                                  threshold, max_audio_level,
+                                  s_peak_l, s_peak_r, s_peak_mic, s_peak_out,
+                                  local_mic_mode, s_i2s_shift);
+                    s_last_log_ms = millis();
+                    max_audio_level = 0;
+                    max_l_level = 0;
+                    max_r_level = 0;
                 }
-            } else {
-                // Voice Interrupt (Barge-in) during audio playback
-                if (avg_prob >= threshold && max_audio_level > s_aec_cutoff) {
-                    if (settings.debugMode) {
-                        Serial.printf(">>> INTERRUPT WAKE WORD DETECTED: '%s' (avg: %.2f) <<<\n",
-                                      MWW_NAME, avg_prob);
+            }
+
+            // Detection check (only trigger after initial warmup windows)
+            if (s_mww_ignore_windows >= 0) {
+                if (!s_interrupt_mode) {
+                    if (avg_prob >= threshold || current_prob >= 0.75f) {
+                        if (settings.debugMode) {
+                            Serial.printf(">>> WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
+                                          MWW_NAME, avg_prob, current_prob);
+                        }
+                        wake_word_detected = true;
                     }
-                    wake_word_detected = true;
+                } else {
+                    // Voice Interrupt (Barge-in) during audio playback
+                    if ((avg_prob >= threshold || current_prob >= 0.75f) && max_audio_level > s_aec_cutoff) {
+                        if (settings.debugMode) {
+                            Serial.printf(">>> INTERRUPT WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
+                                          MWW_NAME, avg_prob, current_prob);
+                        }
+                        wake_word_detected = true;
+                    }
                 }
             }
 
@@ -775,13 +1029,13 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
             if (i2s_channel_read(rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
                 int samplesInBatch = bytesRead / 8; // 8 bytes per stereo frame
                 for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i++) {
-                    int32_t l = sampleBuffer[i*2] >> 14;
-                    int32_t r = sampleBuffer[i*2+1] >> 14;
+                    int32_t l = sampleBuffer[i*2] >> s_i2s_shift;
+                    int32_t r = sampleBuffer[i*2+1] >> s_i2s_shift;
                     int32_t val = 0;
                     
                     if (local_mic_mode == 2) val = r;
                     else if (local_mic_mode == 1) val = l;
-                    else val = (l + r) >> 1;
+                    else val = (s_peak_r > s_peak_l) ? r : l;
 
                     if (val > 32767) val = 32767; else if (val < -32768) val = -32768;
                     
@@ -871,7 +1125,7 @@ void runEdgeImpulseForwarder() {
             for (int i = 0; i < samples; i++) {
                 int32_t l = sampleBuffer[i*2] >> 14;
                 int32_t r = sampleBuffer[i*2+1] >> 14;
-                int32_t val = (local_mic_mode == 2) ? r : (local_mic_mode == 1) ? l : ((l + r) >> 1);
+                int32_t val = (local_mic_mode == 2) ? r : (local_mic_mode == 1) ? l : ((s_peak_r > 600 && s_peak_l < 200) ? r : l);
                 Serial.println(val); // Data Forwarder requires one sample per line
             }
         }
