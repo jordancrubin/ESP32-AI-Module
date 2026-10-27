@@ -18,7 +18,7 @@ extern SpeechManager speech;
 using namespace libhelix;
 
 static File audioFile;
-static int32_t s_volume_int = 256;
+static int32_t s_volume_int = 192; // Default to safe maximum (leaves ~2.5dB analog headroom against MAX98357A clipping)
 static i2s_chan_handle_t s_tx_handle = NULL;
 static i2s_std_config_t s_i2s_std_cfg; // Store the I2S standard config
 static bool isWav = false;
@@ -44,24 +44,31 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
         len /= 2; // Update length to reflect mono samples
     }
 
-    // 1. Apply Volume & Fade-in
+    // 1. Apply Volume & Fade-in with Clamping
     if (s_fade_samples < FADE_LEN) {
         for (size_t i = 0; i < len; i++) {
+            int32_t val;
             if (s_fade_samples < FADE_LEN) {
                 int32_t fade = (s_fade_samples * 256) / FADE_LEN;
                 s_fade_samples++;
                 int32_t sample = pcm_buffer[i];
-                pcm_buffer[i] = (int16_t)((sample * s_volume_int * fade) >> 16);
+                val = (sample * s_volume_int * fade) >> 16;
             }
             else {
-                pcm_buffer[i] = (int16_t)((pcm_buffer[i] * s_volume_int) >> 8);
+                val = ((int32_t)pcm_buffer[i] * s_volume_int) >> 8;
             }
+            if (val > 32767) val = 32767;
+            else if (val < -32768) val = -32768;
+            pcm_buffer[i] = (int16_t)val;
         }
     }
     else {
-        // Fast path for 99% of playback (no fade branching)
+        // Fast path for 99% of playback with clamping
         for (size_t i = 0; i < len; i++) {
-            pcm_buffer[i] = (int16_t)((pcm_buffer[i] * s_volume_int) >> 8);
+            int32_t val = ((int32_t)pcm_buffer[i] * s_volume_int) >> 8;
+            if (val > 32767) val = 32767;
+            else if (val < -32768) val = -32768;
+            pcm_buffer[i] = (int16_t)val;
         }
     }
 
@@ -100,10 +107,20 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
         i2s_channel_enable(s_tx_handle);
         s_i2s_enabled = true;
     }
-    // 3. Write to I2S (Blocking if buffer full)
+    // 3. Write to I2S (Loop until all bytes are written to prevent buffer dropouts/crackle)
     if (s_tx_handle && s_i2s_enabled && !s_is_interrupted) {
-        size_t bytes_written;
-        i2s_channel_write(s_tx_handle, pcm_buffer, len * sizeof(int16_t), &bytes_written, pdMS_TO_TICKS(100));
+        size_t bytes_to_write = len * sizeof(int16_t);
+        const uint8_t *src = (const uint8_t *)pcm_buffer;
+        while (bytes_to_write > 0 && !s_is_interrupted) {
+            size_t bytes_written = 0;
+            esp_err_t err = i2s_channel_write(s_tx_handle, src, bytes_to_write, &bytes_written, portMAX_DELAY);
+            if (err == ESP_OK && bytes_written > 0) {
+                src += bytes_written;
+                bytes_to_write -= bytes_written;
+            } else {
+                break;
+            }
+        }
     }
 }
 
@@ -140,7 +157,8 @@ void SpeakerManager::begin() {
     };
 
     i2s_channel_init_std_mode(tx_handle, &s_i2s_std_cfg);
-    // Do NOT enable here. Enable only when playing.
+    i2s_channel_enable(tx_handle);
+    s_i2s_enabled = true;
     
     s_tx_handle = tx_handle; // Save to static for callback
     
@@ -160,8 +178,10 @@ void SpeakerManager::begin() {
 }
 
 void SpeakerManager::setVolume(int volume) {
-    // Map 0-21 (old range) to 0-256 (fixed point integer math)
-    s_volume_int = (volume * 256) / 21;
+    if (volume < 0) volume = 0;
+    if (volume > 21) volume = 21;
+    // Map 0-21 slider to safe integer scale 0-192 (~75% full scale, leaving ~2.5dB analog headroom against MAX98357A rail clipping)
+    s_volume_int = (volume * 192) / 21;
 }
 
 void SpeakerManager::playSpeechFromFile(const char* filename) {
@@ -195,6 +215,7 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
     }
 
     if (tx_handle) {
+        // Only reconfigure clock if sample rate actually changed
         if (s_i2s_std_cfg.clk_cfg.sample_rate_hz != sampleRate) {
             if (s_i2s_enabled) {
                 i2s_channel_disable(tx_handle);
@@ -207,16 +228,6 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
         if (!s_i2s_enabled) {
             i2s_channel_enable(tx_handle);
             s_i2s_enabled = true;
-            
-            // Prime with a tiny burst of silence (50ms) to wake up amp and clear artifacts
-            size_t bytes_written;
-            static const uint8_t silence_chunk[1024] = {0};
-            int silence_chunks = (sampleRate * 2 * 0.05) / sizeof(silence_chunk); // 50ms
-            if (silence_chunks < 1) silence_chunks = 1;
-            
-            for (int i = 0; i < silence_chunks; i++) {
-                i2s_channel_write(tx_handle, silence_chunk, sizeof(silence_chunk), &bytes_written, 10);
-            }
         }
     }
     
@@ -244,17 +255,9 @@ void SpeakerManager::stop() {
         mp3.end(); // Clear internal decoder buffers (flushes remainder) immediately on stop
         s_mp3_started = false;
     }
-    if (tx_handle && s_i2s_enabled) {
-            // Flush with silence before disabling so the buffer doesn't hold old garbage on next playback
-            size_t bytes_written;
-            static const uint8_t tail_silence[2048] = {0};
-            for (int i = 0; i < 4; i++) {
-                i2s_channel_write(tx_handle, tail_silence, sizeof(tail_silence), &bytes_written, 20);
-            }
-            
-        i2s_channel_disable(tx_handle); // Disable I2S output
-        s_i2s_enabled = false;
-    }
+    // Do NOT disable I2S here!
+    // With auto_clear_after_cb = true, I2S DMA automatically streams digital silence (zeros).
+    // Keeping BCLK and WS active prevents MAX98357A amplifier shutdown/wakeup pops.
     if (audioFile) audioFile.close();
     _isPlaying = false;
     s_is_interrupted = false; // Reset flag
@@ -273,24 +276,31 @@ void SpeakerManager::loop() {
                         int16_t* pcm = (int16_t*)buff;
                         size_t samples = bytesRead / 2;
                         
-                        // Apply Volume & Fade-in
+                        // Apply Volume & Fade-in with Clamping
                         if (s_fade_samples < FADE_LEN) {
                             for (size_t i = 0; i < samples; i++) {
+                                int32_t val;
                                 if (s_fade_samples < FADE_LEN) {
                                     int32_t fade = (s_fade_samples * 256) / FADE_LEN;
                                     s_fade_samples++;
                                     int32_t sample = pcm[i];
-                                    pcm[i] = (int16_t)((sample * s_volume_int * fade) >> 16);
+                                    val = (sample * s_volume_int * fade) >> 16;
                                 }
                                 else {
-                                    pcm[i] = (int16_t)((pcm[i] * s_volume_int) >> 8);
+                                    val = ((int32_t)pcm[i] * s_volume_int) >> 8;
                                 }
+                                if (val > 32767) val = 32767;
+                                else if (val < -32768) val = -32768;
+                                pcm[i] = (int16_t)val;
                             }
                         }
                         else {
-                            // Fast path for 99% of playback (no fade branching)
+                            // Fast path for 99% of playback with clamping
                             for (size_t i = 0; i < samples; i++) {
-                                pcm[i] = (int16_t)((pcm[i] * s_volume_int) >> 8);
+                                int32_t val = ((int32_t)pcm[i] * s_volume_int) >> 8;
+                                if (val > 32767) val = 32767;
+                                else if (val < -32768) val = -32768;
+                                pcm[i] = (int16_t)val;
                             }
                         }
                         
@@ -317,10 +327,20 @@ void SpeakerManager::loop() {
                             speech.feedReference(s_resample_buff, new_len);
                         }
 
-                        // Write to I2S
+                        // Write to I2S (Loop until all bytes are written to prevent buffer dropouts/crackle)
                         if (tx_handle && !s_is_interrupted) {
-                            size_t bytes_written;
-                            i2s_channel_write(tx_handle, pcm, bytesRead, &bytes_written, pdMS_TO_TICKS(100));
+                            size_t bytes_to_write = bytesRead;
+                            const uint8_t *src = (const uint8_t *)pcm;
+                            while (bytes_to_write > 0 && !s_is_interrupted) {
+                                size_t bytes_written = 0;
+                                esp_err_t err = i2s_channel_write(tx_handle, src, bytes_to_write, &bytes_written, portMAX_DELAY);
+                                if (err == ESP_OK && bytes_written > 0) {
+                                    src += bytes_written;
+                                    bytes_to_write -= bytes_written;
+                                } else {
+                                    break;
+                                }
+                            }
                         }
                     } else {
                         mp3.write(buff, bytesRead);
@@ -335,17 +355,7 @@ void SpeakerManager::loop() {
                     s_mp3_started = false;
                 }
 
-                // Flush tail with enough silence to clear the entire DMA ringbuffer
-                if (tx_handle && s_i2s_enabled) {
-                    size_t bytes_written;
-                    static const uint8_t tail_silence[2048] = {0};
-                    for (int i = 0; i < 4; i++) {
-                        i2s_channel_write(tx_handle, tail_silence, sizeof(tail_silence), &bytes_written, 20);
-                    }
-                    i2s_channel_disable(tx_handle); // Disable the channel to prevent DMA underrun looping in the background
-                    s_i2s_enabled = false;
-                }
-
+                // Do NOT disable I2S! With auto_clear_after_cb = true, DMA automatically outputs digital zeros.
                 if (audioFile) audioFile.close();
             }
         }

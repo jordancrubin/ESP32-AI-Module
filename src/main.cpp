@@ -1365,6 +1365,11 @@ void tuneAEC() {
             size_t wavSize = 0;
             uint8_t* wavData = speech.record(2000, &wavSize, 0);
             
+            // Allow remaining audio of the test phrase to finish cleanly before stopping
+            unsigned long waitStart = millis();
+            while (speaker.isRunning() && (millis() - waitStart < 2500)) {
+                delay(20);
+            }
             speaker.stop();
             
             long score = 99999999;
@@ -1463,6 +1468,11 @@ void tuneAEC() {
     size_t wavSize = 0;
     uint8_t* wavData = speech.record(4000, &wavSize, 0);
     
+    // Allow remaining audio of the test phrase to finish cleanly before stopping
+    unsigned long waitStart = millis();
+    while (speaker.isRunning() && (millis() - waitStart < 2500)) {
+        delay(20);
+    }
     speaker.stop();
     
     long max_raw_residual = 0;
