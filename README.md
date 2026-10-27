@@ -12,7 +12,7 @@ Created by **Jordan Rubin** ([Rubintech](https://www.youtube.com/@rubin-tech)).
 
 ## 🌟 Features
 
-- **Always-Listening Wake Word:** Powered by Edge Impulse machine learning (`hey_espy`).
+- **Always-Listening Wake Word:** Powered by microWakeWord machine learning (`Excuse me Hal`).
 - **Acoustic Echo Cancellation (AEC):** Uses SpeexDSP to cancel out the device's own speaker audio, allowing you to interrupt the AI while it is speaking (Voice Barge-in).
 - **LLM Integration:** Compatible with any OpenAI-format API endpoint (OpenWebUI, Local LLaMA, GPT-4, etc.).
 - **Text-to-Speech (TTS):** Streams high-quality audio responses directly to an I2S speaker using Kokoro/OpenWebUI or direct URL providers.

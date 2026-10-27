@@ -2079,7 +2079,7 @@ void setup() {
   
   display.showStatus("AI Interactor Version " FIRMWARE_VERSION);
   display.showStatus("Retrotech&Electronics");
-  display.showStatus("Powered by Edge Impulse");
+  display.showStatus("Powered by microWakeWord");
   display.showStatus("UI by LVGL");
 
     if (adminPrefs.getBool("ei_mode", false)) {
