@@ -885,9 +885,20 @@ bool SpeechManager::detectWakeWord(float threshold) {
                 } else {
                     // Voice Interrupt (Barge-in) during audio playback:
                     // Triggers either when microWakeWord hears "Excuse me Hal"
-                    // OR when a loud voice/yell exceeds s_aec_cutoff
-                    bool loud_voice = (s_aec_cutoff > 0 && burst_max_level > s_aec_cutoff);
+                    // OR when sustained loud voice/yell exceeds s_aec_cutoff (debounced to reject pops/crackles)
+                    static int s_loud_voice_frames = 0;
+                    bool loud_voice = false;
+                    if (s_aec_cutoff > 0 && burst_max_level > s_aec_cutoff) {
+                        s_loud_voice_frames++;
+                        if (s_loud_voice_frames >= 3) {
+                            loud_voice = true;
+                        }
+                    } else {
+                        s_loud_voice_frames = 0;
+                    }
+
                     if (mww_detected || loud_voice) {
+                        s_loud_voice_frames = 0;
                         if (settings.debugMode) {
                             if (mww_detected) {
                                 Serial.printf(">>> INTERRUPT WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",

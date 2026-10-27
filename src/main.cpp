@@ -1297,8 +1297,8 @@ void tuneAEC() {
     showAecTuningUI(); // Load graphical UI
     
     logPrintln("Downloading TTS for AEC Tuning...");
-    // Diagnostic phrase for AEC calibration
-    String testPhrase = "Testing AEC Please remain silent Pop Check One Two Three";
+    // Diagnostic phrase for AEC calibration (fits within 3.5s timing window)
+    String testPhrase = "Testing AEC Please remain silent Pop Check One Two";
     const char* ttsFile = "/aec_tune.mp3";
     
     if (!network.isConnected()) { 

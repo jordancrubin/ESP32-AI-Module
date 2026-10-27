@@ -117,6 +117,9 @@ void SpeakerManager::begin() {
     // Initialize I2S for Speaker (TX) using ESP-IDF 5.x driver
     // We use I2S_NUM_0 to avoid conflict with Mic on I2S_NUM_1
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan_cfg.dma_desc_num = 8;
+    chan_cfg.dma_frame_num = 512;
+    chan_cfg.auto_clear_after_cb = true;
     i2s_new_channel(&chan_cfg, &tx_handle, NULL);
 
     s_i2s_std_cfg = { // Initialize the static config struct
