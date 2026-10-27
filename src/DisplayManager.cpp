@@ -42,6 +42,7 @@ static String g_lastVoice = "alloy";
 static int g_lastVolume = 21;
 static String g_voiceOptions = "alloy";
 static String g_lastStatus = "Ready";
+static lv_obj_t * s_lbl_model = nullptr;
 static lv_timer_t * g_clockTimer = nullptr;
 static lv_timer_t * g_idleTimer = nullptr;
 static uint32_t g_idleTimeout = 10000; // Dynamic idle timeout variable
@@ -996,8 +997,21 @@ static void showVoiceModelConfig() {
     lv_obj_align(dd_model, LV_ALIGN_TOP_LEFT, 0, 95);
 
     // Select current model
-    // (Simple selection logic, assumes model ID is in the list)
-    // ... (omitted for brevity, user can select manually)
+    int m_index = 0;
+    int m_start = 0;
+    int m_end = mOpts.indexOf('\n');
+    while (m_end != -1 || m_start < mOpts.length()) {
+        String opt = (m_end == -1) ? mOpts.substring(m_start) : mOpts.substring(m_start, m_end);
+        opt.trim();
+        if (opt == settings.llmModel || opt.indexOf(settings.llmModel) != -1) {
+            lv_dropdown_set_selected(dd_model, m_index);
+            break;
+        }
+        m_index++;
+        if (m_end == -1) break;
+        m_start = m_end + 1;
+        m_end = mOpts.indexOf('\n', m_start);
+    }
     
     lv_obj_add_event_cb(dd_model, [](lv_event_t * e){
         if (g_voiceCb) {
@@ -1034,6 +1048,8 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     boot_cont = nullptr; // Clear boot container reference
     lv_obj_clean(lv_scr_act());
     audio_vu_l = nullptr; audio_vu_r = nullptr;
+    statusLabel = nullptr;
+    s_lbl_model = nullptr;
     // Dark Theme Background
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
 
@@ -1124,8 +1140,8 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
 
     // Status Container (Visual background for text, no interaction)
     lv_obj_t * statusCont = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(statusCont, 300, 140); // Shorter to make room for brightness slider
-    lv_obj_align(statusCont, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_size(statusCont, 300, 135); // Adjusted to leave room for bottom model label
+    lv_obj_align(statusCont, LV_ALIGN_BOTTOM_MID, 0, -22);
     lv_obj_set_style_bg_color(statusCont, lv_color_make(50, 50, 50), 0);
     lv_obj_set_style_radius(statusCont, 10, 0);
     lv_obj_set_style_border_width(statusCont, 0, 0);
@@ -1141,13 +1157,26 @@ void DisplayManager::showMainUI(String currentVoice, int currentVolume, String v
     lv_obj_set_style_text_color(statusLabel, lv_color_white(), 0);
     if (g_lastStatus.length() < 13) {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_48, 0);
-        }
-        else if (g_lastStatus.length() < 20) {
+    }
+    else if (g_lastStatus.length() < 20) {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_28, 0);
-        }
-        else {
+    }
+    else {
         lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
     }
+
+    // Model Label (Bottom Middle of Display when not on clock screen)
+    s_lbl_model = lv_label_create(lv_scr_act());
+    String modelText = String(settings.llmModel);
+    if (modelText.length() == 0) modelText = "No Model";
+    lv_label_set_text(s_lbl_model, modelText.c_str());
+    lv_obj_set_width(s_lbl_model, 280);
+    lv_obj_set_style_text_align(s_lbl_model, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_model, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(s_lbl_model, lv_color_make(180, 180, 180), 0);
+    lv_obj_set_style_text_font(s_lbl_model, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_lbl_model, LV_ALIGN_BOTTOM_MID, 0, -3);
+    lv_obj_clear_flag(s_lbl_model, LV_OBJ_FLAG_CLICKABLE);
     
     // Start/Restart Idle Timer
     if (!g_idleTimer) {
@@ -1162,6 +1191,15 @@ void DisplayManager::resetUIPointers() {
     statusLabel = nullptr;
     audio_vu_l = nullptr;
     audio_vu_r = nullptr;
+    s_lbl_model = nullptr;
+}
+
+void DisplayManager::updateModelLabel(const char* model) {
+    if (s_lbl_model && model) {
+        String mStr = String(model);
+        if (mStr.length() == 0) mStr = "No Model";
+        lv_label_set_text(s_lbl_model, mStr.c_str());
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////

@@ -50,6 +50,7 @@ public:
     void showAudioConfig();
     void updateAudioVUMeter(int l, int r);
     void setBalanceCallback(BalanceCallback cb);
+    void updateModelLabel(const char* model);
     lv_obj_t *audio_vu_l;
     lv_obj_t *audio_vu_r;
 

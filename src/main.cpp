@@ -93,6 +93,7 @@ void testHarmonic();
 void tuneAEC();
 void onSetupMode(bool enabled);
 void performFactoryReset();
+void updateVoiceList();
 
 // Timer Variables
 extern uint32_t g_pendingTimerSeconds;
@@ -195,6 +196,7 @@ void onVoiceChange(String voice) {
         strlcpy(settings.llmModel, newModel.c_str(), sizeof(settings.llmModel));
         settings.save();
         llm.setConfig(settings.apiUrl, settings.apiKey, settings.llmModel);
+        display.updateModelLabel(settings.llmModel);
         if (settings.debugMode) Serial.println("Model changed to: " + String(settings.llmModel));
     } else if (voice == "TALK_ACTION") {
         if (isProcessing) {
@@ -572,7 +574,7 @@ void handleWebRoot() {
     }
 
     String html;
-    html.reserve(8192);
+    html.reserve(16384);
     html += "<!DOCTYPE html><html><head><title>ESP32 AI Assistant</title>";
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<style>";
@@ -619,6 +621,14 @@ void handleWebRoot() {
     html += "  document.getElementById(tabName).classList.add('active');";
     html += "  evt.currentTarget.classList.add('active');";
     html += "  document.getElementById('saveBtnContainer').style.display = (tabName === 'Diagnostics') ? 'none' : 'block';";
+    html += "}";
+    html += "function toggleCustomModel(val) {";
+    html += "  var el = document.getElementById('customModelDiv');";
+    html += "  if (el) el.style.display = (val === '__custom__') ? 'block' : 'none';";
+    html += "}";
+    html += "function toggleCustomVoice(val) {";
+    html += "  var el = document.getElementById('customVoiceDiv');";
+    html += "  if (el) el.style.display = (val === '__custom__') ? 'block' : 'none';";
     html += "}";
     html += "document.addEventListener('DOMContentLoaded', function() {";
     html += "  document.getElementById('configForm').addEventListener('submit', function(e) {";
@@ -672,11 +682,102 @@ void handleWebRoot() {
     html += "<div class='card'>";
     html += "<label>API URL</label><input type='text' name='apiUrl' value='" + String(settings.apiUrl) + "'>";
     html += "<label>API Key</label><input type='text' name='apiKey' value='" + String(settings.apiKey) + "'>";
+
+    // LLM Model Dropdown
+    html += "<label>LLM Model</label>";
+    html += "<select name='llmModel' id='llmModel' onchange='toggleCustomModel(this.value)'>";
+    String mOpts = modelOptions;
+    if (mOpts.length() == 0) {
+        int sep = voiceOptions.indexOf("||");
+        if (sep != -1) mOpts = voiceOptions.substring(sep + 2);
+    }
+    bool modelMatched = false;
+    if (mOpts.length() > 0) {
+        int mStart = 0;
+        int mEnd = mOpts.indexOf('\n');
+        while (mEnd != -1 || mStart < mOpts.length()) {
+            String opt = (mEnd == -1) ? mOpts.substring(mStart) : mOpts.substring(mStart, mEnd);
+            opt.trim();
+            if (opt.length() > 0 && opt.indexOf("Error:") == -1) {
+                String optId = opt;
+                int op = opt.lastIndexOf('(');
+                int cp = opt.lastIndexOf(')');
+                if (op != -1 && cp != -1 && cp > op) {
+                    optId = opt.substring(op + 1, cp);
+                    optId.trim();
+                }
+                bool isSel = (!modelMatched && (optId == settings.llmModel || opt == settings.llmModel));
+                if (isSel) modelMatched = true;
+                html += "<option value='" + optId + "'" + (isSel ? " selected" : "") + ">" + opt + "</option>";
+            }
+            if (mEnd == -1) break;
+            mStart = mEnd + 1;
+            mEnd = mOpts.indexOf('\n', mStart);
+        }
+    }
+    if (!modelMatched && strlen(settings.llmModel) > 0) {
+        html += "<option value='" + String(settings.llmModel) + "' selected>" + String(settings.llmModel) + "</option>";
+    }
+    html += "<option value='__custom__'>Custom Model...</option>";
+    html += "</select>";
+    html += "<div id='customModelDiv' style='display:none;'><label>Custom Model Name/ID</label><input type='text' id='customModel' name='customModel' placeholder='e.g., gpt-4o-mini or mistral:latest'></div>";
+
     html += "<label>TTS Provider</label><select name='ttsProvider'>";
     html += "<option value='0'" + String(settings.ttsProvider == 0 ? " selected" : "") + ">OpenWebUI (Kokoro)</option>";
     html += "<option value='1'" + String(settings.ttsProvider == 1 ? " selected" : "") + ">Direct</option></select>";
     html += "<label>Direct TTS URL</label><input type='text' name='ttsUrl' value='" + String(settings.ttsUrl) + "' placeholder='e.g., http://host:port'>";
     html += "<small>Used when TTS Provider is 'Direct'. Must be full base URL.</small>";
+
+    // TTS Voice Dropdown
+    html += "<label>TTS Voice</label>";
+    html += "<select name='ttsVoice' id='ttsVoice' onchange='toggleCustomVoice(this.value)'>";
+    String vOpts = voiceOptions;
+    int vSep = vOpts.indexOf("||");
+    if (vSep != -1) vOpts = vOpts.substring(0, vSep);
+
+    const char* stdVoices[] = {
+        "alloy", "echo", "fable", "onyx", "nova", "shimmer",
+        "af_bella", "af_sarah", "af_nicole", "af_sky",
+        "am_adam", "am_michael", "bf_emma", "bf_isabella", "bm_george", "bm_lewis"
+    };
+
+    bool voiceMatched = false;
+    String addedVoices = "\n";
+    if (vOpts.length() > 0 && vOpts != "alloy") {
+        int vStart = 0;
+        int vEnd = vOpts.indexOf('\n');
+        while (vEnd != -1 || vStart < vOpts.length()) {
+            String opt = (vEnd == -1) ? vOpts.substring(vStart) : vOpts.substring(vStart, vEnd);
+            opt.trim();
+            if (opt.length() > 0 && opt.indexOf("Error:") == -1) {
+                if (addedVoices.indexOf("\n" + opt + "\n") == -1) {
+                    addedVoices += opt + "\n";
+                    bool isSel = (!voiceMatched && opt == ttsVoice);
+                    if (isSel) voiceMatched = true;
+                    html += "<option value='" + opt + "'" + (isSel ? " selected" : "") + ">" + opt + "</option>";
+                }
+            }
+            if (vEnd == -1) break;
+            vStart = vEnd + 1;
+            vEnd = vOpts.indexOf('\n', vStart);
+        }
+    }
+    for (size_t i = 0; i < sizeof(stdVoices) / sizeof(stdVoices[0]); i++) {
+        String sv = stdVoices[i];
+        if (addedVoices.indexOf("\n" + sv + "\n") == -1) {
+            addedVoices += sv + "\n";
+            bool isSel = (!voiceMatched && sv == ttsVoice);
+            if (isSel) voiceMatched = true;
+            html += "<option value='" + sv + "'" + (isSel ? " selected" : "") + ">" + sv + "</option>";
+        }
+    }
+    if (!voiceMatched && ttsVoice.length() > 0) {
+        html += "<option value='" + ttsVoice + "' selected>" + ttsVoice + "</option>";
+    }
+    html += "<option value='__custom__'>Custom Voice...</option>";
+    html += "</select>";
+    html += "<div id='customVoiceDiv' style='display:none;'><label>Custom Voice Name</label><input type='text' id='customVoice' name='customVoice' placeholder='e.g., af_bella or custom voice ID'></div>";
+
     html += "<label>TTS Speed (0.5 - 2.0)</label><input type='number' name='ttsSpeed' value='" + String(ttsSpeed) + "' step='0.05' min='0.5' max='2.0'>";
     html += "<label>System Prompt</label><textarea name='systemPrompt' rows='4'>" + String(settings.systemPrompt) + "</textarea>";
     html += "</div>";
@@ -825,6 +926,39 @@ void handleWebSave() {
     }
     settings.ttsProvider = newTtsProvider;
 
+    // Model Selection
+    if (server.hasArg("llmModel")) {
+        String chosenModel = server.arg("llmModel");
+        if (chosenModel == "__custom__" && server.hasArg("customModel") && server.arg("customModel").length() > 0) {
+            chosenModel = server.arg("customModel");
+        }
+        chosenModel.trim();
+        int openParen = chosenModel.lastIndexOf('(');
+        int closeParen = chosenModel.lastIndexOf(')');
+        if (openParen != -1 && closeParen != -1 && closeParen > openParen) {
+            chosenModel = chosenModel.substring(openParen + 1, closeParen);
+        }
+        chosenModel.trim();
+        if (chosenModel.length() > 0 && chosenModel != "__custom__") {
+            strlcpy(settings.llmModel, chosenModel.c_str(), sizeof(settings.llmModel));
+            if (settings.debugMode) Serial.println("Web: Model updated to: " + String(settings.llmModel));
+        }
+    }
+
+    // Voice Selection
+    if (server.hasArg("ttsVoice")) {
+        String chosenVoice = server.arg("ttsVoice");
+        if (chosenVoice == "__custom__" && server.hasArg("customVoice") && server.arg("customVoice").length() > 0) {
+            chosenVoice = server.arg("customVoice");
+        }
+        chosenVoice.trim();
+        if (chosenVoice.length() > 0 && chosenVoice != "__custom__") {
+            ttsVoice = chosenVoice;
+            adminPrefs.putString("voice", ttsVoice);
+            if (settings.debugMode) Serial.println("Web: Voice updated to: " + ttsVoice);
+        }
+    }
+
     if (server.hasArg("wakeThreshold")) {
         float val = server.arg("wakeThreshold").toFloat();
         if (val >= 0.1 && val <= 1.0) {
@@ -962,6 +1096,7 @@ void handleWebSave() {
     setenv("TZ", settings.timeZone, 1);
     tzset();
     llm.setSystemPrompt(settings.systemPrompt);
+    display.updateModelLabel(settings.llmModel);
 
     // Refresh weather immediately if configured
     if (newOwKey.length() > 0) getWeather();
@@ -971,6 +1106,9 @@ void handleWebSave() {
     if (models.startsWith("Error")) {
         server.send(200, "text/plain", models);
     } else {
+        modelOptions = models;
+        updateVoiceList();
+        display.updateModelLabel(settings.llmModel);
         server.send(200, "text/plain", "SUCCESS");
         if (settings.debugMode) Serial.println("Settings updated and verified via Web Interface");
     }
