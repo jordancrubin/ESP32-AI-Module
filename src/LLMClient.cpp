@@ -11,6 +11,7 @@
 #include "SettingsManager.h"
 #include "DisplayManager.h"
 #include <lvgl.h>
+#include <time.h>
 
 extern SettingsManager settings;
 extern DisplayManager display;
@@ -108,7 +109,7 @@ String LLMClient::getModels(WiFiManager& netMgr) {
             DeserializationError error = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
 
             if (!error) {
-                if (doc.containsKey("data")) {
+                if (doc["data"].is<JsonArray>()) {
                     JsonArray data = doc["data"];
                     for (JsonObject v : data) {
                         const char* id = v["id"] ? v["id"] : v["name"];
@@ -117,7 +118,7 @@ String LLMClient::getModels(WiFiManager& netMgr) {
                             result += id;
                         }
                     }
-                } else if (doc.containsKey("models")) {
+                } else if (doc["models"].is<JsonArray>()) {
                     JsonArray data = doc["models"];
                     for (JsonObject v : data) {
                         const char* id = v["name"];
@@ -142,6 +143,130 @@ String LLMClient::getModels(WiFiManager& netMgr) {
         return result;
     }
     return "Error: Connection failed";
+}
+
+static String extractOpenWebUIBaseUrl(const String& apiUrl) {
+    String url = apiUrl;
+    int chatIdx = url.indexOf("/chat/completions");
+    if (chatIdx != -1) url = url.substring(0, chatIdx);
+    if (url.endsWith("/api")) url = url.substring(0, url.length() - 4);
+    if (url.endsWith("/v1")) url = url.substring(0, url.length() - 3);
+    if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+    return url;
+}
+
+static String fetchCalendarContext(const String& baseUrl, const String& apiKey, WiFiManager& netMgr) {
+    String eventsUrl = baseUrl + "/api/v1/calendars/events/search?limit=10";
+    String resolved = netMgr.resolveHost(eventsUrl);
+    if (resolved == "") return "";
+
+    WiFiClient client;
+    HTTPClient http;
+    client.setTimeout(4000);
+    http.setTimeout(4000);
+
+    if (!http.begin(client, resolved)) return "";
+    http.addHeader("Authorization", "Bearer " + apiKey);
+    int code = http.GET();
+    if (code != 200) {
+        http.end();
+        return "";
+    }
+
+    JsonDocument filter;
+    filter["items"][0]["title"] = true;
+    filter["items"][0]["start_at"] = true;
+    filter["items"][0]["all_day"] = true;
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+    http.end();
+    if (err || !doc["items"].is<JsonArray>()) return "";
+
+    JsonArray items = doc["items"];
+    if (items.size() == 0) return "";
+
+    String result = "[UPCOMING CALENDAR EVENTS:\n";
+    for (JsonObject ev : items) {
+        const char* title = ev["title"] | "";
+        if (strlen(title) == 0) continue;
+        uint64_t start_ns = ev["start_at"] | 0ULL;
+        time_t sec = (time_t)(start_ns / 1000000000ULL);
+        char dateBuf[64] = "";
+        if (sec > 0) {
+            struct tm timeinfo;
+            gmtime_r(&sec, &timeinfo);
+            strftime(dateBuf, sizeof(dateBuf), "%B %d, %Y", &timeinfo);
+        }
+        result += "- ";
+        result += title;
+        if (strlen(dateBuf) > 0) {
+            result += " (";
+            result += dateBuf;
+            result += ")";
+        }
+        result += "\n";
+    }
+    result += "]\nUse the above calendar events to directly and conversationally answer questions about schedule, upcoming events, or plans.";
+    return result;
+}
+
+static String fetchWebSearchContext(const String& baseUrl, const String& apiKey, const String& query, WiFiManager& netMgr) {
+    String searchUrl = baseUrl + "/api/v1/retrieval/process/web/search";
+    String resolved = netMgr.resolveHost(searchUrl);
+    if (resolved == "") return "";
+
+    WiFiClient client;
+    HTTPClient http;
+    client.setTimeout(6000);
+    http.setTimeout(6000);
+
+    if (!http.begin(client, resolved)) return "";
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", "Bearer " + apiKey);
+
+    JsonDocument reqDoc;
+    reqDoc["queries"][0] = query;
+    String reqBody;
+    serializeJson(reqDoc, reqBody);
+
+    int code = http.POST(reqBody);
+    if (code != 200) {
+        http.end();
+        return "";
+    }
+
+    JsonDocument filter;
+    filter["items"][0]["title"] = true;
+    filter["items"][0]["snippet"] = true;
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+    http.end();
+    if (err || !doc["items"].is<JsonArray>()) return "";
+
+    JsonArray items = doc["items"];
+    if (items.size() == 0) return "";
+
+    String result = "[LIVE WEB SEARCH RESULTS:\n";
+    int count = 0;
+    for (JsonObject item : items) {
+        const char* title = item["title"] | "";
+        const char* snippet = item["snippet"] | "";
+        if (strlen(snippet) > 0) {
+            result += "- ";
+            if (strlen(title) > 0) {
+                result += title;
+                result += ": ";
+            }
+            result += snippet;
+            result += "\n";
+            count++;
+            if (count >= 3) break;
+        }
+    }
+    result += "]\nUse the above real-time web search results to answer conversationally. Do not cite URLs or use [1] brackets.";
+    return (count > 0) ? result : "";
 }
 
 String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
@@ -181,6 +306,73 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     userMsg["role"] = "user";
     userMsg["content"] = prompt;
 
+    String lowerPrompt = prompt;
+    lowerPrompt.toLowerCase();
+    String contextInjection = "";
+    String owBaseUrl = extractOpenWebUIBaseUrl(_apiUrl);
+
+    // 1. Calendar Events Pre-injection
+    if (settings.enableCalendar && owBaseUrl.length() > 0) {
+        bool isCalendarQuery = (lowerPrompt.indexOf("schedule") != -1) ||
+                               (lowerPrompt.indexOf("calendar") != -1) ||
+                               (lowerPrompt.indexOf("events") != -1) ||
+                               (lowerPrompt.indexOf("upcoming") != -1) ||
+                               (lowerPrompt.indexOf("agenda") != -1) ||
+                               (lowerPrompt.indexOf("appointment") != -1) ||
+                               (lowerPrompt.indexOf("meeting") != -1) ||
+                               (lowerPrompt.indexOf("plans") != -1) ||
+                               (lowerPrompt.indexOf("what am i doing") != -1) ||
+                               (lowerPrompt.indexOf("what do i have") != -1);
+
+        if (isCalendarQuery) {
+            if (settings.debugMode) Serial.println("Fetching calendar events from OpenWebUI...");
+            String calContext = fetchCalendarContext(owBaseUrl, _apiKey, netMgr);
+            if (calContext.length() > 0) {
+                contextInjection += "\n\n" + calContext;
+                if (settings.debugMode) Serial.println("Injected calendar context.");
+            }
+        }
+    }
+
+    // 2. Web Search Pre-injection
+    if (settings.enableWebSearch && owBaseUrl.length() > 0) {
+        bool useWebSearch = (lowerPrompt.indexOf("search the web") != -1) ||
+                            (lowerPrompt.indexOf("do a search") != -1) ||
+                            (lowerPrompt.indexOf("check online") != -1) ||
+                            (lowerPrompt.indexOf("search online") != -1) ||
+                            (lowerPrompt.indexOf("look up online") != -1) ||
+                            (lowerPrompt.indexOf("search the internet") != -1) ||
+                            (lowerPrompt.indexOf("current weather") != -1) ||
+                            (lowerPrompt.indexOf("what is the weather") != -1) ||
+                            (lowerPrompt.indexOf("latest news") != -1);
+
+        if (useWebSearch) {
+            String searchQuery = prompt;
+            String cleanQuery = lowerPrompt;
+            cleanQuery.replace("search the web for", "");
+            cleanQuery.replace("search the web", "");
+            cleanQuery.replace("do a search for", "");
+            cleanQuery.replace("do a search on", "");
+            cleanQuery.replace("check online for", "");
+            cleanQuery.replace("search online for", "");
+            cleanQuery.replace("look up online", "");
+            cleanQuery.trim();
+            if (cleanQuery.length() > 0) searchQuery = cleanQuery;
+
+            if (settings.debugMode) Serial.println("Fetching web search for: " + searchQuery);
+            String webContext = fetchWebSearchContext(owBaseUrl, _apiKey, searchQuery, netMgr);
+            if (webContext.length() > 0) {
+                contextInjection += "\n\n" + webContext;
+                if (settings.debugMode) Serial.println("Injected web search context.");
+            }
+        }
+    }
+
+    // Attach pre-injected context to user message for this request
+    if (contextInjection.length() > 0) {
+        userMsg["content"] = prompt + contextInjection;
+    }
+
     JsonDocument doc;
     doc["model"] = _model;
     doc["stream"] = true;
@@ -190,25 +382,15 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     doc["metadata"]["chat_id"] = "";
     doc["chat_id"] = "";
     doc["session_id"] = "";
-    
-    // Check for web search trigger phrases in the prompt
-    String lowerPrompt = prompt;
-    lowerPrompt.toLowerCase();
-    bool useWebSearch = (lowerPrompt.indexOf("search the web") != -1) ||
-                        (lowerPrompt.indexOf("do a search") != -1) ||
-                        (lowerPrompt.indexOf("check online") != -1) ||
-                        (lowerPrompt.indexOf("search online") != -1) ||
-                        (lowerPrompt.indexOf("look up online") != -1) ||
-                        (lowerPrompt.indexOf("search the internet") != -1);
 
-    if (useWebSearch) {
-        
-        // Dynamically append web search rules to the system prompt for this request
-        if (doc["messages"].size() > 0 && doc["messages"][0]["role"] == "system") {
-            String sysText = doc["messages"][0]["content"].as<String>();
-            sysText += " Use web search ONLY for real-time info. For basic facts or math, answer immediately. IMPORTANT: Provide direct answers only. Never mention 'searching the web,' 'according to the website,' or 'my search results.' Do not use phrases like 'I'll do a web search' or 'Searching online.' If you find information via tools, integrate it naturally into your speech as if you already knew it. No citations or [1] brackets. Short, conversational responses only.";
-            doc["messages"][0]["content"] = sysText;
-        }
+    // 3. Attach OpenWebUI Knowledge Collection (RAG) if configured
+    if (strlen(settings.knowledgeId) > 0) {
+        JsonArray filesArr = doc["files"].to<JsonArray>();
+        JsonObject fObj = filesArr.add<JsonObject>();
+        fObj["type"] = "collection";
+        fObj["id"] = settings.knowledgeId;
+        doc["metadata"]["files"] = doc["files"];
+        if (settings.debugMode) Serial.printf("Attached Knowledge Collection ID: %s\n", settings.knowledgeId);
     }
 
     // Serialize to PSRAM to save Internal RAM
@@ -294,6 +476,8 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
             
             if (full_response.length() > 0) {
                 result = full_response;
+                // Restore clean prompt in history without injected context to save context window
+                userMsg["content"] = prompt;
                 JsonObject assistantMsg = _history.add<JsonObject>();
                 assistantMsg["role"] = "assistant";
                 assistantMsg["content"] = result;
@@ -360,7 +544,12 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
         doc["model"] = "tts-1";
         doc["input"] = text;
         doc["voice"] = voice; // Options: alloy, echo, fable, onyx, nova, shimmer
-        doc["response_format"] = "mp3"; // Options: mp3, opus, aac, flac, wav, pcm
+        String fn = String(filename);
+        if (fn.endsWith(".wav") || strcmp(settings.ttsFormat, "wav") == 0) {
+            doc["response_format"] = "wav";
+        } else {
+            doc["response_format"] = "mp3";
+        }
         doc["speed"] = ttsSpeed;
 
         String requestBody;
@@ -373,20 +562,26 @@ bool LLMClient::downloadTTS(String text, WiFiManager& netMgr, const char* filena
 
         int httpCode = http.POST(requestBody);
         if (httpCode == 200) {
+            if (LittleFS.exists(filename)) LittleFS.remove(filename);
             File file = LittleFS.open(filename, "w");
             if (!file) {
-                if (settings.debugMode) Serial.println("TTS Error: Failed to open file for writing");
+                Serial.printf("TTS Error: Failed to open %s for writing (LittleFS Full?)\n", filename);
                 http.end();
                 return false;
             }
 
-            http.writeToStream(&file);
+            int bytesWritten = http.writeToStream(&file);
             file.close();
             http.end();
             
             flushAecBuffer(); // Clear any microphone ringbuffer overflows that occurred while blocked by the network
             
-            if (settings.debugMode) Serial.println("TTS Download Complete");
+            if (bytesWritten <= 0) {
+                Serial.printf("TTS Error: Wrote 0 bytes to %s (Out of space?)\n", filename);
+                return false;
+            }
+
+            if (settings.debugMode) Serial.printf("TTS Download Complete: %d bytes\n", bytesWritten);
             return true;
         }
         else {

@@ -30,6 +30,54 @@ static bool s_mp3_started = false;
 
 static int16_t s_resample_buff[4096]; // Shared buffer to save 8KB of RAM
 
+// 2nd-order Butterworth High-Pass Filter for speaker resonance & overdrive suppression
+struct BiquadHPF {
+    int cutoffHz = 0;
+    uint32_t currentSampleRate = 0;
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f;
+    float a1 = 0.0f, a2 = 0.0f;
+    float z1 = 0.0f, z2 = 0.0f;
+
+    void update(int cutoff, uint32_t sRate) {
+        cutoffHz = cutoff;
+        currentSampleRate = sRate;
+        z1 = 0.0f;
+        z2 = 0.0f;
+        if (cutoff <= 0 || sRate == 0 || (float)cutoff >= (float)sRate * 0.45f) {
+            b0 = 1.0f; b1 = 0.0f; b2 = 0.0f;
+            a1 = 0.0f; a2 = 0.0f;
+            return;
+        }
+        float w0 = 2.0f * (float)M_PI * (float)cutoff / (float)sRate;
+        float cosw0 = cosf(w0);
+        float sinw0 = sinf(w0);
+        float alpha = sinw0 / (2.0f * 0.70710678f); // Q = 1/sqrt(2) Butterworth
+
+        float a0 = 1.0f + alpha;
+        b0 = ((1.0f + cosw0) * 0.5f) / a0;
+        b1 = (-(1.0f + cosw0)) / a0;
+        b2 = ((1.0f + cosw0) * 0.5f) / a0;
+        a1 = (-2.0f * cosw0) / a0;
+        a2 = (1.0f - alpha) / a0;
+    }
+
+    void processBuffer(int16_t* buffer, size_t numSamples) {
+        if (cutoffHz <= 0) return;
+        for (size_t i = 0; i < numSamples; i++) {
+            float in = (float)buffer[i];
+            float w = in - a1 * z1 - a2 * z2;
+            float out = b0 * w + b1 * z1 + b2 * z2;
+            z2 = z1;
+            z1 = w;
+            if (out > 32767.0f) out = 32767.0f;
+            else if (out < -32768.0f) out = -32768.0f;
+            buffer[i] = (int16_t)out;
+        }
+    }
+};
+
+static BiquadHPF s_hpf;
+
 // Helix Decoder Callback
 void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
     if (s_is_interrupted) return; // Drop audio instantly to bypass I2S blocking during interrupt
@@ -43,6 +91,12 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
         }
         len /= 2; // Update length to reflect mono samples
     }
+
+    // Apply High-Pass Filter (removes sub-bass resonance/overdrive before volume & AEC)
+    if (s_hpf.currentSampleRate != (uint32_t)info.samprate) {
+        s_hpf.update(s_hpf.cutoffHz, (uint32_t)info.samprate);
+    }
+    s_hpf.processBuffer(pcm_buffer, len);
 
     // 1. Apply Volume & Fade-in with Clamping
     if (s_fade_samples < FADE_LEN) {
@@ -134,8 +188,8 @@ void SpeakerManager::begin() {
     // Initialize I2S for Speaker (TX) using ESP-IDF 5.x driver
     // We use I2S_NUM_0 to avoid conflict with Mic on I2S_NUM_1
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    chan_cfg.dma_desc_num = 8;
-    chan_cfg.dma_frame_num = 512;
+    chan_cfg.dma_desc_num = 4;
+    chan_cfg.dma_frame_num = 256; // 4 * 256 = 1024 frames (64ms at 16kHz) to eliminate queue latency
     chan_cfg.auto_clear_after_cb = true;
     i2s_new_channel(&chan_cfg, &tx_handle, NULL);
 
@@ -175,6 +229,10 @@ void SpeakerManager::begin() {
         1               // Core 1
     );
     if (settings.debugMode) Serial.println("SpeakerManager: Helix Decoder Initialized (AEC Enabled)");
+    s_hpf.update(settings.speakerHpfCutoff, s_i2s_std_cfg.clk_cfg.sample_rate_hz);
+    if (settings.speakerHpfCutoff > 0 && settings.debugMode) {
+        Serial.printf("SpeakerManager: High-Pass Filter initialized at %d Hz\n", settings.speakerHpfCutoff);
+    }
 }
 
 void SpeakerManager::setVolume(int volume) {
@@ -184,34 +242,90 @@ void SpeakerManager::setVolume(int volume) {
     s_volume_int = (volume * 192) / 21;
 }
 
+void SpeakerManager::setHpfCutoff(int cutoffHz) {
+    s_hpf.update(cutoffHz, s_i2s_std_cfg.clk_cfg.sample_rate_hz);
+    if (settings.debugMode) Serial.printf("SpeakerManager: High-Pass Cutoff set to %d Hz\n", cutoffHz);
+}
+
+int SpeakerManager::getHpfCutoff() {
+    return s_hpf.cutoffHz;
+}
+
 void SpeakerManager::playSpeechFromFile(const char* filename) {
     s_is_interrupted = false;
     xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    speech.resetAec(); // Clear reference ringbuffer and reset Speex adaptive filter weights
     
     if (settings.debugMode) Serial.printf("Playing TTS from file: %s\n", filename);
     
-    // Flush I2S buffer to remove stale data
+    // Open file first to check parameters
+    if (audioFile) audioFile.close();
+    audioFile = LittleFS.open(filename, "r");
+    if (!audioFile || audioFile.size() < 44) {
+        if (settings.debugMode) {
+            if (!audioFile) Serial.printf("SpeakerManager: Failed to open audio file: %s\n", filename);
+            else Serial.printf("SpeakerManager: File too small (%u bytes), skipping: %s\n", (unsigned int)audioFile.size(), filename);
+        }
+        if (audioFile) audioFile.close();
+        _isPlaying = false;
+        xSemaphoreGiveRecursive(_mutex);
+        return;
+    }
+
     String fn = String(filename);
     isWav = fn.endsWith(".wav");
     s_fade_samples = 0; // Reset fade-in counter
 
-    // Open file first to check parameters if WAV
-    if (audioFile) audioFile.close();
-    audioFile = LittleFS.open(filename, "r");
-    
+    // Auto-detect WAV format by inspecting RIFF header if filename doesn't end with .wav
+    if (!isWav && audioFile.size() >= 12) {
+        uint8_t magic[12];
+        if (audioFile.read(magic, 12) == 12) {
+            if (memcmp(magic, "RIFF", 4) == 0 && memcmp(&magic[8], "WAVE", 4) == 0) {
+                isWav = true;
+                if (settings.debugMode) Serial.println("SpeakerManager: Auto-detected WAV format via RIFF header");
+            }
+        }
+        audioFile.seek(0);
+    }
+
     uint32_t sampleRate = 24000; // Default
+    uint32_t dataOffset = 44;
 
     if (isWav && audioFile) {
-        // Read WAV header to get sample rate
-        if (audioFile.size() >= 44) {
-            uint8_t header[44];
-            audioFile.read(header, 44);
-            // Sample rate is at offset 24 (4 bytes)
-            memcpy(&sampleRate, &header[24], 4);
-            if (settings.debugMode) Serial.printf("WAV Sample Rate: %d\n", sampleRate);
+        // Parse RIFF WAV header and chunks dynamically
+        audioFile.seek(0);
+        uint8_t riffHdr[12];
+        if (audioFile.read(riffHdr, 12) == 12 && memcmp(riffHdr, "RIFF", 4) == 0 && memcmp(&riffHdr[8], "WAVE", 4) == 0) {
+            while (audioFile.available() >= 8) {
+                uint8_t chunkHdr[8];
+                if (audioFile.read(chunkHdr, 8) != 8) break;
+                uint32_t chunkSize = (uint32_t)chunkHdr[4] | ((uint32_t)chunkHdr[5] << 8) | 
+                                     ((uint32_t)chunkHdr[6] << 16) | ((uint32_t)chunkHdr[7] << 24);
+                
+                if (memcmp(chunkHdr, "fmt ", 4) == 0) {
+                    uint8_t fmtBuf[16];
+                    size_t toRead = (chunkSize < 16) ? chunkSize : 16;
+                    if (audioFile.read(fmtBuf, toRead) == toRead) {
+                        uint32_t sRate = (uint32_t)fmtBuf[4] | ((uint32_t)fmtBuf[5] << 8) | 
+                                         ((uint32_t)fmtBuf[6] << 16) | ((uint32_t)fmtBuf[7] << 24);
+                        if (sRate >= 8000 && sRate <= 96000) {
+                            sampleRate = sRate;
+                        }
+                        if (settings.debugMode) Serial.printf("WAV Header: Sample Rate = %u Hz\n", sampleRate);
+                    }
+                    if (chunkSize > toRead) audioFile.seek(audioFile.position() + (chunkSize - toRead));
+                } else if (memcmp(chunkHdr, "data", 4) == 0) {
+                    dataOffset = audioFile.position();
+                    break;
+                } else {
+                    // Skip other metadata chunks (e.g., LIST, INFO, JUNK)
+                    // If chunkSize is odd, RIFF pads chunks to even byte boundaries
+                    uint32_t skipSize = (chunkSize + 1) & ~1;
+                    audioFile.seek(audioFile.position() + skipSize);
+                }
+            }
         }
-        // Seek back to data start (assuming standard 44 byte header)
-        audioFile.seek(44);
+        audioFile.seek(dataOffset);
     }
 
     if (tx_handle) {
@@ -238,10 +352,7 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
         }
         mp3.begin();
         s_mp3_started = true;
-    }
-    
-    if (audioFile && !isWav) {
-        audioFile.seek(0); // Reset to beginning for MP3s (WAV is already at byte 44)
+        audioFile.seek(0); // Reset to beginning for MP3s
     }
     
     _isPlaying = true;
@@ -261,20 +372,29 @@ void SpeakerManager::stop() {
     if (audioFile) audioFile.close();
     _isPlaying = false;
     s_is_interrupted = false; // Reset flag
+    speech.resetAec(); // Clear reference buffer when playback stops
     xSemaphoreGiveRecursive(_mutex);
 }
 
 void SpeakerManager::loop() {
     if (xSemaphoreTakeRecursive(_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (_isPlaying && !s_is_interrupted) {
+            bool done = false;
             if (audioFile && audioFile.available()) {
                 static uint8_t buff[4096]; // 4096 is required for fast LittleFS reads and Helix decoding
                 int bytesRead = audioFile.read(buff, sizeof(buff));
                 if (bytesRead > 0) {
                     if (isWav) {
+                        if (bytesRead & 1) bytesRead--;
                         // Handle WAV (16-bit PCM)
                         int16_t* pcm = (int16_t*)buff;
                         size_t samples = bytesRead / 2;
+
+                        // Apply High-Pass Filter (removes sub-bass resonance/overdrive before volume & AEC)
+                        if (s_hpf.currentSampleRate != s_i2s_std_cfg.clk_cfg.sample_rate_hz) {
+                            s_hpf.update(s_hpf.cutoffHz, s_i2s_std_cfg.clk_cfg.sample_rate_hz);
+                        }
+                        s_hpf.processBuffer(pcm, samples);
                         
                         // Apply Volume & Fade-in with Clamping
                         if (s_fade_samples < FADE_LEN) {
@@ -345,8 +465,15 @@ void SpeakerManager::loop() {
                     } else {
                         mp3.write(buff, bytesRead);
                     }
+                } else {
+                    // Read returned 0 or error: EOF reached
+                    done = true;
                 }
             } else {
+                done = true;
+            }
+
+            if (done) {
                 // End of file
                 _isPlaying = false;
                 
@@ -357,6 +484,7 @@ void SpeakerManager::loop() {
 
                 // Do NOT disable I2S! With auto_clear_after_cb = true, DMA automatically outputs digital zeros.
                 if (audioFile) audioFile.close();
+                speech.resetAec(); // Clear reference buffer on natural finish
             }
         }
         xSemaphoreGiveRecursive(_mutex);

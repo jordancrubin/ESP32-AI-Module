@@ -17,9 +17,11 @@
 #include "hal_test_audio.h"
 #include "hal_test_features.h"
 #include "SettingsManager.h"
+#include "SpeakerManager.h"
 #include <freertos/ringbuf.h>
 
 extern SettingsManager settings;
+extern SpeakerManager speaker;
 
 // Speex Handles
 static SpeexEchoState *st = NULL;
@@ -34,8 +36,8 @@ static SemaphoreHandle_t s_ref_mutex = NULL;
 
 // AEC Debug & Tuning
 static volatile bool s_debug_aec = false;
-static volatile int s_aec_target_delay = 640; // Default ~40ms (Aligned with user suggestion)
-static volatile int s_aec_gain = 2; // Default Gain 2x to match Mic levels
+static volatile int s_aec_target_delay = 640; // Default ~40ms (proven working baseline)
+static volatile int s_aec_gain = 2; // Default 2x gain matching old proven calibration
 static volatile bool s_aec_invert = false; // Phase inversion flag
 static volatile int s_input_balance = 0; // -100 to 100
 static volatile int32_t s_gain_l = 256;
@@ -62,7 +64,10 @@ void setAecDebug(bool enable) {
     s_aec_debug_log_count = 0; // Reset log on toggle
     Serial.printf("AEC Debug: %s\n", enable ? "ON" : "OFF"); 
 }
-void setAecDelay(int delay) { s_aec_target_delay = delay; Serial.printf("AEC Target Delay: %d samples\n", delay); }
+void setAecDelay(int delay) { 
+    s_aec_target_delay = delay; 
+    Serial.printf("AEC Target Delay: %d samples\n", delay); 
+}
 void setAecAttenuation(int atten) { s_aec_attenuation = (atten >= 0 && atten <= 100) ? atten : 75; }
 void setAecCutoff(int cutoff) { s_aec_cutoff = cutoff >= 0 ? cutoff : 0; }
 void setAecGain(int gain) { s_aec_gain = gain; Serial.printf("AEC Ref Gain: %d\n", gain); }
@@ -84,6 +89,11 @@ void setInputBalance(int balance) {
 }
 void getAudioLevels(int* l, int* r) { *l = s_peak_l; *r = s_peak_r; }
 
+static volatile int32_t s_last_burst_max_level = 0;
+static volatile int32_t s_last_eval_level = 0;
+int32_t getLastAecBurstLevel() { return s_last_burst_max_level; }
+int32_t getLastAecEvalLevel() { return s_last_eval_level; }
+
 static volatile bool s_interrupt_mode = false;
 static volatile bool s_aec_bypass = false; // Flag to force raw recording
 
@@ -95,6 +105,11 @@ static i2s_chan_handle_t s_rx_handle = NULL;
 static volatile bool s_is_recording = false; // Flag to pause AEC task
 static void resetMicroWakeWord();
 
+// Audio accumulator for microWakeWord
+static const size_t MWW_AUDIO_ACCUM_MAX = 4096;
+static int16_t s_mww_audio_accum[MWW_AUDIO_ACCUM_MAX];
+static size_t s_mww_audio_accum_len = 0;
+
 void flushAecBuffer() {
     if (s_processed_ringbuf) {
         size_t bytesFetched;
@@ -104,7 +119,7 @@ void flushAecBuffer() {
             vRingbufferReturnItem(s_processed_ringbuf, data);
         }
     }
-    resetMicroWakeWord();
+    s_mww_audio_accum_len = 0; // Clear accumulator without expensive TFLM tensor resets
 }
 
 // Buffer Health Stats
@@ -145,7 +160,7 @@ static uint8_t s_boot_test_val = 0;
 static size_t s_mww_arena_used = 0;
 static uint8_t s_max_raw_prob_session = 0;
 static float s_max_avg_prob_session = 0.0f;
-static volatile int s_i2s_shift = 12; // Configurable bitshift (11=+30dB, 12=+24dB, 13=+18dB, 14=+12dB)
+static volatile int s_i2s_shift = 14; // Default 14 (+12dB) for pristine AEC linear range and cancellation
 
 void SpeechManager::setBitShift(int shift) {
     if (shift >= 8 && shift <= 16) s_i2s_shift = shift;
@@ -159,11 +174,6 @@ void SpeechManager::resetStats() {
     s_max_raw_prob_session = 0;
     s_max_avg_prob_session = 0.0f;
 }
-
-// Audio accumulator for microWakeWord
-static const size_t MWW_AUDIO_ACCUM_MAX = 4096;
-static int16_t s_mww_audio_accum[MWW_AUDIO_ACCUM_MAX];
-static size_t s_mww_audio_accum_len = 0;
 
 static bool register_mww_ops(tflite::MicroMutableOpResolver<20> &resolver) {
     if (resolver.AddCallOnce() != kTfLiteOk) return false;
@@ -486,8 +496,8 @@ void feed_Task(void *arg) {
                     if (raw_l > frame_max_raw_l) frame_max_raw_l = raw_l;
                     if (raw_r > frame_max_raw_r) frame_max_raw_r = raw_r;
 
-                    int32_t l = abs(i2s_raw_buff[i*2] >> s_i2s_shift);
-                    int32_t r = abs(i2s_raw_buff[i*2+1] >> s_i2s_shift);
+                    int32_t l = abs(i2s_raw_buff[i*2] >> 14);
+                    int32_t r = abs(i2s_raw_buff[i*2+1] >> 14);
                     if (l > frame_max_l) frame_max_l = l;
                     if (r > frame_max_r) frame_max_r = r;
                 }
@@ -507,8 +517,7 @@ void feed_Task(void *arg) {
                     if (available >= (FRAME_SIZE + s_aec_target_delay)) {
                         int local_gain = s_aec_gain; // Cache volatile
                         for (int i = 0; i < FRAME_SIZE; i++) {
-                            // Apply Gain to Reference
-                            int32_t ref_val = s_ref_buffer[s_ref_read_index] * local_gain;
+                            int32_t ref_val = (int32_t)s_ref_buffer[s_ref_read_index] * local_gain;
                             if (ref_val > 32767) ref_val = 32767;
                             else if (ref_val < -32768) ref_val = -32768;
                             ref_frame[i] = (int16_t)ref_val;
@@ -528,27 +537,14 @@ void feed_Task(void *arg) {
                 bool local_invert = s_aec_invert;      // Cache volatile
 
                 // 3. Prepare Mic Frame (Convert 32-bit Stereo to 16-bit Mono)
-                static int32_t s_dc_offset = 0;
                 for (int i = 0; i < FRAME_SIZE; i++) {
-                    int32_t l = i2s_raw_buff[i*2] >> s_i2s_shift;
-                    int32_t r = i2s_raw_buff[i*2+1] >> s_i2s_shift;
+                    int32_t l = i2s_raw_buff[i*2] >> 14;
+                    int32_t r = i2s_raw_buff[i*2+1] >> 14;
                     int32_t val = 0;
 
-                    if (local_mic_mode == 2) {
-                        val = r; // Strict Right Channel
-                    } else if (local_mic_mode == 1) {
-                        val = l; // Strict Left Channel
-                    } else {
-                        // Mode 0: Auto - pick the stronger channel with hysteresis
-                        static bool s_use_right = false;
-                        if (frame_max_r > (frame_max_l * 5) / 4 && frame_max_r > 500) s_use_right = true;
-                        else if (frame_max_l > (frame_max_r * 5) / 4 && frame_max_l > 500) s_use_right = false;
-                        val = s_use_right ? r : l;
-                    }
-
-                    // High-pass DC offset filter to keep waveform centered at 0
-                    s_dc_offset += val - (s_dc_offset >> 8);
-                    val -= (s_dc_offset >> 8);
+                    if (local_mic_mode == 2) val = r;      // Right
+                    else if (local_mic_mode == 1) val = l; // Left
+                    else val = (l + r) >> 1;               // Stereo Mix (Fixed, stationary transfer function)
 
                     if (val > 32767) val = 32767; else if (val < -32768) val = -32768;
                     if (local_invert) val = -val;
@@ -562,9 +558,9 @@ void feed_Task(void *arg) {
                 s_peak_mic = frame_max_mic;
 
                 // 4. Run Echo Cancellation & Noise Suppression
-                // During standby wake word listening, bypass Speex to preserve
-                // clean, unattenuated high frequencies for microWakeWord
-                if (s_aec_bypass || !s_interrupt_mode) {
+                // During standby wake word listening (no audio playing & not in interrupt mode),
+                // bypass Speex to preserve clean, unattenuated high frequencies for microWakeWord
+                if (s_aec_bypass || (!has_ref && !s_interrupt_mode)) {
                     memcpy(out_frame, mic_frame, sizeof(out_frame));
                 } else {
                     speex_echo_cancellation(st, mic_frame, ref_frame, out_frame);
@@ -588,7 +584,7 @@ void feed_Task(void *arg) {
                     if (++debug_skip >= 10) { // Store every ~200ms
                         debug_skip = 0;
                         if (s_aec_debug_log_count < MAX_AEC_DEBUG_LOGS) {
-                            s_aec_debug_log[s_aec_debug_log_count].refBuf = (uint16_t)((s_ref_write_index >= s_ref_read_index) ? (s_ref_write_index - s_ref_read_index) : (REF_BUFFER_SIZE - (s_ref_read_index - s_ref_write_index)));
+                            s_aec_debug_log[s_aec_debug_log_count].refBuf = (uint16_t)s_aec_target_delay;
                             s_aec_debug_log[s_aec_debug_log_count].micL = s_peak_l;
                             s_aec_debug_log[s_aec_debug_log_count].micR = s_peak_r;
                             s_aec_debug_log[s_aec_debug_log_count].refPk = max_ref;
@@ -651,7 +647,7 @@ void SpeechManager::begin() {
     
     int sampleRate = 16000;
     int frameSize = 256;
-    int filterLen = 1024; // ~64ms tail length
+    int filterLen = 1024; // ~64ms tail length (proven working setting)
 
     st = speex_echo_state_init(frameSize, filterLen);
     den = speex_preprocess_state_init(frameSize, sampleRate);
@@ -665,12 +661,14 @@ void SpeechManager::begin() {
     
     // Pin to Core 0 to prevent starving the UI/Main Loop on Core 1
     xTaskCreatePinnedToCore(feed_Task, "Speex_Feed", 10240, NULL, 5, NULL, 0);
-    if (settings.debugMode) Serial.println("SpeechManager: Speex AEC Task Started");
+    if (settings.debugMode) Serial.println("SpeechManager: Speex AEC Task Started (1024-sample filter)");
 }
 
 void SpeechManager::setupI2S() {
     // New I2S Driver (ESP-IDF 5.x / Arduino 3.x) configuration
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+    chan_cfg.dma_desc_num = 4;
+    chan_cfg.dma_frame_num = 256; // 4 * 256 = 1024 frames (64ms) tight low-latency buffering
     i2s_new_channel(&chan_cfg, NULL, &rx_handle);
 
     i2s_std_config_t std_cfg = {
@@ -696,6 +694,46 @@ void SpeechManager::setupI2S() {
 
 bool SpeechManager::detectWakeWord(float threshold) {
     if (!s_mww_initialized) return false;
+
+    // Check if voice playback or interrupt mode is currently active
+    bool isAudioPlaying = speaker.isRunning() || s_interrupt_mode;
+
+    if (isAudioPlaying) {
+        // Fast path during playback: ONLY drain ringbuffer to check amplitude for barge-in.
+        // Completely bypass accumulator math, FFT filterbank, and neural network inference!
+        int32_t burst_max_level = 0;
+        if (s_processed_ringbuf) {
+            size_t bytes_fetched = 0;
+            int16_t* processed_buff = nullptr;
+            while ((processed_buff = (int16_t*)xRingbufferReceive(s_processed_ringbuf, &bytes_fetched, 0)) != nullptr) {
+                int samplesRead = bytes_fetched / sizeof(int16_t);
+                for (int i = 0; i < samplesRead; i++) {
+                    int32_t abs_raw = abs(processed_buff[i]);
+                    if (abs_raw > burst_max_level) burst_max_level = abs_raw;
+                }
+                vRingbufferReturnItem(s_processed_ringbuf, processed_buff);
+            }
+        }
+        s_mww_audio_accum_len = 0; // Drop all accumulated audio so neural net NEVER runs on playback residue!
+
+        // If interrupt mode is enabled, evaluate barge-in cutoff with attenuation applied
+        int32_t eval_level = (burst_max_level * (100 - s_aec_attenuation)) / 100;
+        s_last_burst_max_level = burst_max_level;
+        s_last_eval_level = eval_level;
+        static int s_loud_voice_frames = 0;
+        if (settings.enableInterrupt && s_aec_cutoff > 0 && eval_level > s_aec_cutoff) {
+            s_loud_voice_frames++;
+            if (s_loud_voice_frames >= 4) { // 4 consecutive frames (~80ms) above cutoff to reject pops and short transient plosives
+                s_loud_voice_frames = 0;
+                Serial.printf("\n>>> VOICE BARGE-IN DETECTED: raw=%d, eval=%d (atten:%d%%) > cutoff=%d <<<\n",
+                              burst_max_level, eval_level, s_aec_attenuation, s_aec_cutoff);
+                return true;
+            }
+        } else {
+            s_loud_voice_frames = 0;
+        }
+        return false; // Return immediately! Core 1 stays at ~0% load while audio plays!
+    }
 
     static int32_t max_audio_level = 0;
     static int32_t max_l_level = 0;
@@ -727,7 +765,13 @@ bool SpeechManager::detectWakeWord(float threshold) {
                 if (abs_raw > max_audio_level) max_audio_level = abs_raw;
 
                 if (s_mww_audio_accum_len < MWW_AUDIO_ACCUM_MAX) {
-                    s_mww_audio_accum[s_mww_audio_accum_len++] = (int16_t)raw;
+                    // With mic set to >> 14 (proven pristine AEC level),
+                    // boost audio into microWakeWord by 4x (+12dB) so wake word detection
+                    // retains maximum sensitivity without distorting AEC!
+                    int32_t mww_sample = raw * 4;
+                    if (mww_sample > 32767) mww_sample = 32767;
+                    else if (mww_sample < -32768) mww_sample = -32768;
+                    s_mww_audio_accum[s_mww_audio_accum_len++] = (int16_t)mww_sample;
                 }
             }
 
@@ -742,19 +786,22 @@ bool SpeechManager::detectWakeWord(float threshold) {
                 int samplesRead = bytes_read / 8; // 8 bytes per stereo frame
                 total_samples_read += samplesRead;
                 for (int i = 0; i < samplesRead; i++) {
-                    int32_t l = raw_i2s_buffer[i*2] >> s_i2s_shift;
-                    int32_t r = raw_i2s_buffer[i*2+1] >> s_i2s_shift;
+                    int32_t l = raw_i2s_buffer[i*2] >> 14;
+                    int32_t r = raw_i2s_buffer[i*2+1] >> 14;
                     int32_t raw;
                     if (local_mic_mode == 2) raw = r;
                     else if (local_mic_mode == 1) raw = l;
-                    else raw = (s_peak_r > s_peak_l) ? r : l;
+                    else raw = (l + r) >> 1;
 
                     if (raw > 32767) raw = 32767; else if (raw < -32768) raw = -32768;
                     int32_t abs_raw = abs(raw);
                     if (abs_raw > burst_max_level) burst_max_level = abs_raw;
                     if (abs_raw > max_audio_level) max_audio_level = abs_raw;
                     if (s_mww_audio_accum_len < MWW_AUDIO_ACCUM_MAX) {
-                        s_mww_audio_accum[s_mww_audio_accum_len++] = (int16_t)raw;
+                        int32_t mww_sample = raw * 4;
+                        if (mww_sample > 32767) mww_sample = 32767;
+                        else if (mww_sample < -32768) mww_sample = -32768;
+                        s_mww_audio_accum[s_mww_audio_accum_len++] = (int16_t)mww_sample;
                     }
                 }
             }
@@ -874,42 +921,12 @@ bool SpeechManager::detectWakeWord(float threshold) {
             // Detection check (only trigger after initial warmup windows)
             if (s_mww_ignore_windows >= 0) {
                 bool mww_detected = (avg_prob >= threshold || current_prob >= 0.75f);
-                if (!s_interrupt_mode) {
-                    if (mww_detected) {
-                        if (settings.debugMode) {
-                            Serial.printf(">>> WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
-                                          MWW_NAME, avg_prob, current_prob);
-                        }
-                        wake_word_detected = true;
+                if (mww_detected) {
+                    if (settings.debugMode) {
+                        Serial.printf(">>> WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
+                                      MWW_NAME, avg_prob, current_prob);
                     }
-                } else {
-                    // Voice Interrupt (Barge-in) during audio playback:
-                    // Triggers either when microWakeWord hears "Excuse me Hal"
-                    // OR when sustained loud voice/yell exceeds s_aec_cutoff (debounced to reject pops/crackles)
-                    static int s_loud_voice_frames = 0;
-                    bool loud_voice = false;
-                    if (s_aec_cutoff > 0 && burst_max_level > s_aec_cutoff) {
-                        s_loud_voice_frames++;
-                        if (s_loud_voice_frames >= 3) {
-                            loud_voice = true;
-                        }
-                    } else {
-                        s_loud_voice_frames = 0;
-                    }
-
-                    if (mww_detected || loud_voice) {
-                        s_loud_voice_frames = 0;
-                        if (settings.debugMode) {
-                            if (mww_detected) {
-                                Serial.printf(">>> INTERRUPT WAKE WORD DETECTED: '%s' (avg: %.2f, instant: %.2f) <<<\n",
-                                              MWW_NAME, avg_prob, current_prob);
-                            } else {
-                                Serial.printf(">>> INTERRUPT (LOUD VOICE) DETECTED (level: %d > cutoff: %d) <<<\n",
-                                              burst_max_level, s_aec_cutoff);
-                            }
-                        }
-                        wake_word_detected = true;
-                    }
+                    wake_word_detected = true;
                 }
             }
 
@@ -929,18 +946,32 @@ bool SpeechManager::detectWakeWord(float threshold) {
 
 
 void SpeechManager::feedReference(const int16_t *data, size_t samples) {
-    // Feed reference data to the Ring Buffer
+    // Feed reference data to the Ring Buffer with non-blocking timeout
+    if (s_ref_mutex) {
+        if (xSemaphoreTake(s_ref_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+            for (size_t i = 0; i < samples; i++) {
+                s_ref_buffer[s_ref_write_index] = data[i];
+                s_ref_write_index = (s_ref_write_index + 1) & (REF_BUFFER_SIZE - 1); // Fast Modulo
+                // If write catches read, bump read (overwrite oldest)
+                if (s_ref_write_index == s_ref_read_index) {
+                    s_ref_read_index = (s_ref_read_index + 1) & (REF_BUFFER_SIZE - 1);
+                }
+            }
+            xSemaphoreGive(s_ref_mutex);
+        }
+    }
+}
+
+void SpeechManager::resetAec() {
     if (s_ref_mutex) {
         xSemaphoreTake(s_ref_mutex, portMAX_DELAY);
-        for (size_t i = 0; i < samples; i++) {
-            s_ref_buffer[s_ref_write_index] = data[i];
-            s_ref_write_index = (s_ref_write_index + 1) & (REF_BUFFER_SIZE - 1); // Fast Modulo
-            // If write catches read, bump read (overwrite oldest)
-            if (s_ref_write_index == s_ref_read_index) {
-                s_ref_read_index = (s_ref_read_index + 1) & (REF_BUFFER_SIZE - 1);
-            }
-        }
+        memset(s_ref_buffer, 0, sizeof(s_ref_buffer));
+        s_ref_write_index = 0;
+        s_ref_read_index = 0;
         xSemaphoreGive(s_ref_mutex);
+    }
+    if (st) {
+        speex_echo_state_reset(st);
     }
 }
 
@@ -1043,13 +1074,13 @@ uint8_t* SpeechManager::record(int durationMs, size_t* outSize, int silenceThres
             if (i2s_channel_read(rx_handle, sampleBuffer, sizeof(sampleBuffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
                 int samplesInBatch = bytesRead / 8; // 8 bytes per stereo frame
                 for (int i = 0; i < samplesInBatch && samplesRead < numSamples; i++) {
-                    int32_t l = sampleBuffer[i*2] >> s_i2s_shift;
-                    int32_t r = sampleBuffer[i*2+1] >> s_i2s_shift;
+                    int32_t l = sampleBuffer[i*2] >> 14;
+                    int32_t r = sampleBuffer[i*2+1] >> 14;
                     int32_t val = 0;
                     
                     if (local_mic_mode == 2) val = r;
                     else if (local_mic_mode == 1) val = l;
-                    else val = (s_peak_r > s_peak_l) ? r : l;
+                    else val = (l + r) >> 1;
 
                     if (val > 32767) val = 32767; else if (val < -32768) val = -32768;
                     

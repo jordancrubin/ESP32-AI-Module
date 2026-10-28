@@ -12,6 +12,7 @@ public:
     bool detectWakeWord(float threshold);
     uint8_t* record(int durationMs, size_t* outSize, int silenceThreshold);
     void feedReference(const int16_t *data, size_t samples);
+    void resetAec();
     void runSelfTest();
     void setBitShift(int shift);
     int getBitShift();
@@ -21,6 +22,9 @@ private:
     void setupI2S();
     i2s_chan_handle_t rx_handle = NULL; // Handle for the new I2S driver
 };
+
+int32_t getLastAecBurstLevel();
+int32_t getLastAecEvalLevel();
 
 struct WavHeader {
     char riff[4];           // "RIFF"

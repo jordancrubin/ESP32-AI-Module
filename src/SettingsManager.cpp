@@ -28,16 +28,20 @@ SettingsManager::SettingsManager() {
     strlcpy(systemPrompt, "You are a helpful AI assistant running on an ESP32-S3.", sizeof(systemPrompt));
     ttsProvider = 0; // Default to OpenWebUI
     ttsUrl[0] = '\0';
+    strlcpy(ttsFormat, "mp3", sizeof(ttsFormat)); // Default to mp3
     enableMemory = false;
+    enableCalendar = true;
+    enableWebSearch = false;
     enableInterrupt = false;
-    aecDelay = 640; // Default ~40ms
-    aecAttenuation = 0; // Default 0% (natural volume, band-aid removed)
-    aecCutoff = 1000; // Default 1000 raw amplitude
-    aecIgnore = 800; // Default 800ms ignore window
+    aecDelay = 640; // Default ~40ms (proven working setting)
+    aecAttenuation = 70; // Default 70% attenuation during voice playback (squashes speaker feedback)
+    aecCutoff = 4500; // Default 4500 raw amplitude (massive margin above steady-state harmonics, easily triggered by voice)
+    aecIgnore = 2000; // Default 2000ms ignore window (allows AEC filter plenty of time to converge)
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
     alarmEnabled = false;
     alarmHour = 7;
     alarmMinute = 0;
+    speakerHpfCutoff = 0; // Default to Disabled (0 Hz) until tuned
 }
 
 void SettingsManager::begin() {
@@ -65,7 +69,10 @@ void SettingsManager::load() {
     if (prefs.isKey("sys_prompt")) prefs.getString("sys_prompt", systemPrompt, sizeof(systemPrompt));
     ttsProvider = prefs.getInt("tts_prov", ttsProvider);
     if (prefs.isKey("tts_url")) prefs.getString("tts_url", ttsUrl, sizeof(ttsUrl));
+    if (prefs.isKey("tts_fmt")) prefs.getString("tts_fmt", ttsFormat, sizeof(ttsFormat));
     enableMemory = prefs.getBool("mem_en", enableMemory);
+    enableCalendar = prefs.getBool("cal_en", enableCalendar);
+    enableWebSearch = prefs.getBool("ws_en", enableWebSearch);
     enableInterrupt = prefs.getBool("int_en", enableInterrupt);
     aecDelay = prefs.getInt("aec_dly", aecDelay);
     aecAttenuation = prefs.getInt("aec_att", aecAttenuation);
@@ -75,6 +82,7 @@ void SettingsManager::load() {
     alarmEnabled = prefs.getBool("alrm_en", alarmEnabled);
     alarmHour = prefs.getInt("alrm_hr", alarmHour);
     alarmMinute = prefs.getInt("alrm_min", alarmMinute);
+    speakerHpfCutoff = prefs.getInt("spk_hpf", speakerHpfCutoff);
     
     if (prefs.getBytesLength("cal") == sizeof(TouchCalibration)) {
         prefs.getBytes("cal", &calibration, sizeof(TouchCalibration));
@@ -101,7 +109,10 @@ void SettingsManager::save() {
     prefs.putString("sys_prompt", systemPrompt);
     prefs.putInt("tts_prov", ttsProvider);
     prefs.putString("tts_url", ttsUrl);
+    prefs.putString("tts_fmt", ttsFormat);
     prefs.putBool("mem_en", enableMemory);
+    prefs.putBool("cal_en", enableCalendar);
+    prefs.putBool("ws_en", enableWebSearch);
     prefs.putBool("int_en", enableInterrupt);
     prefs.putInt("aec_dly", aecDelay);
     prefs.putInt("aec_att", aecAttenuation);
@@ -111,4 +122,5 @@ void SettingsManager::save() {
     prefs.putBool("alrm_en", alarmEnabled);
     prefs.putInt("alrm_hr", alarmHour);
     prefs.putInt("alrm_min", alarmMinute);
+    prefs.putInt("spk_hpf", speakerHpfCutoff);
 }

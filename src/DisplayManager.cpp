@@ -31,6 +31,8 @@ extern bool timerRinging;
 extern bool g_runAecTuneUI;
 extern bool g_runAecTestUI;
 extern bool g_runHarmonicTestUI;
+extern bool g_runResonanceTuneUI;
+extern bool g_runTuneAllUI;
 extern unsigned long timerStartTime;
 extern uint32_t timerDurationMs;
 extern void getAudioLevels(int* l, int* r);
@@ -2396,6 +2398,28 @@ static void showDiagnostics() {
     lv_obj_center(lblHarmonic);
     lv_obj_add_event_cb(btnHarmonic, [](lv_event_t * e){
         g_runHarmonicTestUI = true;
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Auto-Tune Resonance (HPF) Button
+    lv_obj_t * btnRes = lv_btn_create(cont);
+    lv_obj_set_size(btnRes, 270, 40);
+    lv_obj_set_style_bg_color(btnRes, lv_palette_main(LV_PALETTE_TEAL), 0);
+    lv_obj_t * lblRes = lv_label_create(btnRes);
+    lv_label_set_text(lblRes, "Auto-Tune Resonance (HPF)");
+    lv_obj_center(lblRes);
+    lv_obj_add_event_cb(btnRes, [](lv_event_t * e){
+        g_runResonanceTuneUI = true;
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Full Auto-Tune (Resonance + AEC) Button
+    lv_obj_t * btnTuneAll = lv_btn_create(cont);
+    lv_obj_set_size(btnTuneAll, 270, 40);
+    lv_obj_set_style_bg_color(btnTuneAll, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_t * lblTuneAll = lv_label_create(btnTuneAll);
+    lv_label_set_text(lblTuneAll, "Full Auto-Tune (Res + AEC)");
+    lv_obj_center(lblTuneAll);
+    lv_obj_add_event_cb(btnTuneAll, [](lv_event_t * e){
+        g_runTuneAllUI = true;
     }, LV_EVENT_CLICKED, NULL);
 }
 

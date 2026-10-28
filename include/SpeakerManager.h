@@ -9,6 +9,8 @@ public:
     void begin();
     void playSpeechFromFile(const char* filename);
     void setVolume(int volume);
+    void setHpfCutoff(int cutoffHz);
+    int getHpfCutoff();
     void stop();
     void loop();
     bool isRunning();

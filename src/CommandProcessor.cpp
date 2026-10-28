@@ -308,6 +308,13 @@ CommandResult CommandProcessor::processCommand(const String& text) {
         result.handled = true;
         result.tuneAEC = true;
     }
+    else if (lowerText.indexOf("tune resonance") != -1 || lowerText.indexOf("test resonance") != -1 || 
+               lowerText.indexOf("tune speaker") != -1 || lowerText.indexOf("calibrate speaker") != -1 ||
+               lowerText.indexOf("speaker resonance") != -1) {
+        result.response = "Starting automatic speaker resonance calibration. Please remain silent while test tones are analyzed.";
+        result.handled = true;
+        result.tuneResonance = true;
+    }
     else if (lowerText.indexOf("system reboot") != -1 || lowerText.indexOf("reboot the system") != -1 || lowerText.indexOf("reboot system") != -1) {
         result.response = "Rebooting the system now.";
         result.handled = true;

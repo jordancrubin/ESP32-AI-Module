@@ -15,6 +15,7 @@ struct CommandResult {
     bool calibrateTouch = false;
     bool enterConfigMode = false;
     bool tuneAEC = false;
+    bool tuneResonance = false;
     bool showHelp = false;
 };
 

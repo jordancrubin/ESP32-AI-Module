@@ -44,7 +44,9 @@ public:
     char systemPrompt[512];
     int ttsProvider;
     char ttsUrl[256];
+    char ttsFormat[8]; // "mp3" or "wav"
     bool enableWebSearch;
+    bool enableCalendar;
     bool enableMemory;
     bool enableInterrupt;
     int aecDelay;
@@ -55,6 +57,7 @@ public:
     bool alarmEnabled;
     int alarmHour;
     int alarmMinute;
+    int speakerHpfCutoff; // High-pass filter cutoff in Hz (0 = Disabled)
 
 private:
     Preferences prefs;
