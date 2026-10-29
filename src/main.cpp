@@ -42,7 +42,7 @@ float wakeThreshold = 0.5;
 float ttsSpeed = 0.8;
 
 float g_currentVocKOhms = 0.0;
-int vocAlarmThreshold = 50;
+int vocAlarmThreshold = 25;
 unsigned long lastVocAlarmTime = 0;
 
 bool enableBME680 = false;
@@ -2937,7 +2937,7 @@ void setup() {
   }
   ttsSpeed = adminPrefs.getFloat("tts_speed", 0.8);
   setInputBalance(settings.inputBalance);
-  vocAlarmThreshold = adminPrefs.getInt("voc_thresh", 50);
+  vocAlarmThreshold = adminPrefs.getInt("voc_thresh", 25);
   clockFormat12h = adminPrefs.getBool("clk_12h", false);
   
   enableTTSChunking = adminPrefs.getBool("tts_chunk", false);

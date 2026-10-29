@@ -634,8 +634,21 @@ static void clock_update_cb(lv_timer_t * t) {
 
     // Update VOC Bar if it exists
     if (enableBME680 && g_clockWidgets.vocBar) {
-        lv_bar_set_value(g_clockWidgets.vocBar, (int)g_currentVocKOhms, LV_ANIM_ON);
-        int voc_state = (g_currentVocKOhms < vocAlarmThreshold) ? 0 : (g_currentVocKOhms < (vocAlarmThreshold * 2) ? 1 : 2);
+        int clamped_val = (int)g_currentVocKOhms;
+        if (clamped_val < 0) clamped_val = 0;
+        if (clamped_val > 100) clamped_val = 100;
+        lv_bar_set_value(g_clockWidgets.vocBar, clamped_val, LV_ANIM_ON);
+
+        // Realistic indoor air quality thresholds:
+        // Red: below alarm threshold (polluted air/fumes)
+        // Orange: moderate air
+        // Green: clean indoor air (achieved in well-ventilated / purified rooms)
+        float green_thresh = vocAlarmThreshold * 1.4f;
+        if (green_thresh < (vocAlarmThreshold + 15.0f)) green_thresh = vocAlarmThreshold + 15.0f;
+        if (green_thresh > 65.0f) green_thresh = 65.0f; // Ensure clean indoor air (>= 65 kOhm) reliably reaches Green
+
+        int voc_state = (g_currentVocKOhms < vocAlarmThreshold) ? 0 : 
+                        (g_currentVocKOhms < green_thresh ? 1 : 2);
         
         if (voc_state != g_clockWidgets.cached_voc_state) {
             g_clockWidgets.cached_voc_state = voc_state;
@@ -873,7 +886,7 @@ static void showClockScreen() {
     // VOC / Air Quality Indicator (Bottom Center)
     if (enableBME680) {
         g_clockWidgets.vocCont = lv_obj_create(lv_scr_act());
-        lv_obj_set_size(g_clockWidgets.vocCont, 100, 30);
+        lv_obj_set_size(g_clockWidgets.vocCont, 115, 30);
         lv_obj_align(g_clockWidgets.vocCont, LV_ALIGN_BOTTOM_MID, 0, -10);
         lv_obj_set_style_bg_opa(g_clockWidgets.vocCont, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(g_clockWidgets.vocCont, 0, 0);
@@ -883,15 +896,19 @@ static void showClockScreen() {
         
         g_clockWidgets.vocLabel = lv_label_create(g_clockWidgets.vocCont);
         lv_label_set_text(g_clockWidgets.vocLabel, "AIR");
-        lv_obj_set_style_text_color(g_clockWidgets.vocLabel, lv_color_make(150, 150, 150), 0);
+        lv_obj_set_style_text_color(g_clockWidgets.vocLabel, lv_color_make(180, 180, 180), 0);
         lv_obj_set_style_text_font(g_clockWidgets.vocLabel, &lv_font_montserrat_14, 0);
         lv_obj_align(g_clockWidgets.vocLabel, LV_ALIGN_LEFT_MID, 0, 0);
         
         g_clockWidgets.vocBar = lv_bar_create(g_clockWidgets.vocCont);
-        lv_obj_set_size(g_clockWidgets.vocBar, 60, 10);
+        lv_obj_set_size(g_clockWidgets.vocBar, 75, 12);
         lv_obj_align(g_clockWidgets.vocBar, LV_ALIGN_RIGHT_MID, 0, 0);
-        lv_bar_set_range(g_clockWidgets.vocBar, 0, 300); // Typical 0-300 kOhm
-        lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_color_make(40, 40, 40), LV_PART_MAIN);
+        lv_bar_set_range(g_clockWidgets.vocBar, 0, 100); // 0-100 kOhm realistic indoor scale
+        lv_obj_set_style_bg_color(g_clockWidgets.vocBar, lv_color_make(45, 45, 45), LV_PART_MAIN);
+        lv_obj_set_style_border_color(g_clockWidgets.vocBar, lv_color_make(80, 80, 80), LV_PART_MAIN);
+        lv_obj_set_style_border_width(g_clockWidgets.vocBar, 1, LV_PART_MAIN);
+        lv_obj_set_style_radius(g_clockWidgets.vocBar, 4, LV_PART_MAIN);
+        lv_obj_set_style_radius(g_clockWidgets.vocBar, 4, LV_PART_INDICATOR);
     } else {
         g_clockWidgets.vocCont = nullptr;
         g_clockWidgets.vocBar = nullptr;
