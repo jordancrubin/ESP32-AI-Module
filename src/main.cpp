@@ -617,7 +617,7 @@ void handleWebRoot() {
     }
 
     String html;
-    html.reserve(16384);
+    html.reserve(32768);
     html += "<!DOCTYPE html><html><head><title>ESP32 AI Assistant</title>";
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<style>";
@@ -649,6 +649,12 @@ void handleWebRoot() {
     html += "ul.diag-list li span{font-weight:500;color:#495057;}";
     html += "ul.diag-list li a{color:#008CBA;text-decoration:none;font-weight:600;padding:4px 8px;border-radius:4px;background:#e9ecef;transition:background 0.2s;}";
     html += "ul.diag-list li a:hover{background:#dee2e6;}";
+    html += ".cmd-table{width:100%;border-collapse:collapse;margin:10px 0 15px 0;background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.03);}";
+    html += ".cmd-table th{background:#f1f3f5;color:#495057;text-align:left;padding:10px 12px;font-size:0.85em;border-bottom:2px solid #dee2e6;text-transform:uppercase;letter-spacing:0.5px;}";
+    html += ".cmd-table td{padding:10px 12px;border-bottom:1px solid #e9ecef;font-size:0.9em;vertical-align:middle;}";
+    html += ".cmd-table tr:last-child td{border-bottom:none;}";
+    html += ".cmd-badge{background:#e8f4fd;color:#0277bd;padding:3px 8px;border-radius:4px;font-family:monospace;font-size:0.92em;font-weight:600;display:inline-block;}";
+    html += ".cmd-alt{color:#6c757d;font-size:0.82em;margin-top:3px;}";
     html += ".modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);}";
     html += ".modal-content{background-color:#fff;margin:15% auto;padding:25px;border-radius:8px;width:80%;max-width:400px;text-align:center;box-shadow:0 4px 15px rgba(0,0,0,0.2);}";
     html += ".modal-content h3{margin-top:0;}";
@@ -663,7 +669,7 @@ void handleWebRoot() {
     html += "  for (i = 0; i < x.length; i++) { tablinks[i].classList.remove('active'); }";
     html += "  document.getElementById(tabName).classList.add('active');";
     html += "  evt.currentTarget.classList.add('active');";
-    html += "  document.getElementById('saveBtnContainer').style.display = (tabName === 'Diagnostics') ? 'none' : 'block';";
+    html += "  document.getElementById('saveBtnContainer').style.display = (tabName === 'Diagnostics' || tabName === 'Help') ? 'none' : 'block';";
     html += "}";
     html += "function toggleCustomModel(val) {";
     html += "  var el = document.getElementById('customModelDiv');";
@@ -715,6 +721,7 @@ void handleWebRoot() {
     html += "<div class='tab' onclick=\"openTab(event, 'Audio')\">Audio & AEC</div>";
     html += "<div class='tab' onclick=\"openTab(event, 'System')\">System & Display</div>";
     html += "<div class='tab' onclick=\"openTab(event, 'Diagnostics')\">Diagnostics & Tools</div>";
+    html += "<div class='tab' onclick=\"openTab(event, 'Help')\">Voice Commands & Help</div>";
     html += "</div>";
 
     // Open Form
@@ -984,7 +991,82 @@ void handleWebRoot() {
 
     html += "</div>";
 
+    // TAB: Help & Commands (Outside form)
+    html += "<div id='Help' class='tab-content'>";
+
+    html += "<div class='card'><h3>How to Talk to HAL</h3>";
+    html += "<p style='margin:0 0 10px 0;line-height:1.5;'>Wake the device by speaking the wake word (e.g., <strong>&quot;Excuse me Hal&quot;</strong>) or tapping the screen / push-to-talk button. Wait for the status indicator to show <em>&quot;Listening...&quot;</em>, then speak your command or ask any question for AI conversation.</p>";
     html += "</div>";
+
+    html += "<div class='card'><h3>Device &amp; System Commands</h3>";
+    html += "<table class='cmd-table'>";
+    html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
+    html += "<tr><td><span class='cmd-badge'>Enter configuration mode</span><div class='cmd-alt'>Also: &quot;config mode&quot;, &quot;setup mode&quot;, &quot;web config&quot;</div></td><td>Launches this web configuration server and displays IP &amp; hostname on screen.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Calibrate the touchscreen</span><div class='cmd-alt'>Also: &quot;recalibrate touchscreen&quot;</div></td><td>Starts 4-point on-screen touch alignment calibration.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>System reboot</span><div class='cmd-alt'>Also: &quot;reboot system&quot;, &quot;reboot the system&quot;</div></td><td>Restarts the ESP32 module.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>What are your commands</span><div class='cmd-alt'>Also: &quot;list your commands&quot;, &quot;help&quot;</div></td><td>Speaks a voice summary and displays the on-screen command cheat sheet.</td></tr>";
+    html += "</tbody></table></div>";
+
+    html += "<div class='card'><h3>Volume &amp; Display Brightness</h3>";
+    html += "<table class='cmd-table'>";
+    html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
+    html += "<tr><td><span class='cmd-badge'>Raise the volume</span> / <span class='cmd-badge'>Lower the volume</span><div class='cmd-alt'>Also: &quot;volume up&quot;, &quot;volume down&quot;</div></td><td>Increases or decreases volume by 1 level on the 0&ndash;10 scale.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Set volume to [0-10]</span><div class='cmd-alt'>e.g., &quot;set volume to 7&quot;, &quot;set volume to five&quot;</div></td><td>Sets speaker volume level directly (0 to 10).</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Raise the brightness</span> / <span class='cmd-badge'>Lower the brightness</span><div class='cmd-alt'>Also: &quot;brightness up&quot;, &quot;brightness down&quot;</div></td><td>Increases or decreases backlight by 1 level on the 0&ndash;10 scale.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Set brightness to [0-10]</span><div class='cmd-alt'>e.g., &quot;set brightness to 8&quot;</div></td><td>Sets screen backlight brightness directly (0 to 10).</td></tr>";
+    html += "</tbody></table></div>";
+
+    html += "<div class='card'><h3>Clock Customization</h3>";
+    html += "<table class='cmd-table'>";
+    html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
+    html += "<tr><td><span class='cmd-badge'>Set clock color to red</span></td><td>Sets idle clock digit numbers to Red.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Set clock color to green</span></td><td>Sets idle clock digit numbers to Green.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Set clock color to white</span></td><td>Sets idle clock digit numbers to White.</td></tr>";
+    html += "</tbody></table></div>";
+
+    html += "<div class='card'><h3>Timers &amp; Alarms</h3>";
+    html += "<table class='cmd-table'>";
+    html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
+    html += "<tr><td><span class='cmd-badge'>Set a timer for [duration]</span><div class='cmd-alt'>e.g., &quot;set a timer for 5 minutes&quot;, &quot;timer for 1 hour 30 seconds&quot;</div></td><td>Starts a countdown timer displayed on the clock screen.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Cancel timer</span> / <span class='cmd-badge'>Stop timer</span></td><td>Cancels and clears any active countdown timer.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Set alarm for [time] [AM/PM]</span><div class='cmd-alt'>e.g., &quot;set alarm for 7:30 AM&quot;, &quot;set alarm for eight thirty pm&quot;</div></td><td>Schedules the daily alarm.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Turn off alarm</span> / <span class='cmd-badge'>Stop alarm</span></td><td>Silences or disables the alarm.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Turn on alarm</span> / <span class='cmd-badge'>Enable alarm</span></td><td>Re-enables the previously set alarm time.</td></tr>";
+    html += "</tbody></table></div>";
+
+    html += "<div class='card'><h3>Audio Diagnostics &amp; Self-Tuning</h3>";
+    html += "<table class='cmd-table'>";
+    html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
+    html += "<tr><td><span class='cmd-badge'>Test AEC</span><div class='cmd-alt'>Also: &quot;test echo cancellation&quot;, &quot;test the aec&quot;</div></td><td>Records sample mic audio and plays it back with and without AEC to test cancellation.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Tune AEC</span><div class='cmd-alt'>Also: &quot;auto tune&quot;, &quot;auto-tune&quot;</div></td><td>Runs a 15-second delay alignment self-calibration routine.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Tune resonance</span><div class='cmd-alt'>Also: &quot;tune speaker&quot;, &quot;calibrate speaker&quot;</div></td><td>Plays audio sweeps to analyze speaker THD and calibrate high-pass filter cutoff.</td></tr>";
+    html += "</tbody></table></div>";
+
+    html += "<div class='card'><h3>Easter Eggs</h3>";
+    html += "<table class='cmd-table'>";
+    html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
+    html += "<tr><td><span class='cmd-badge'>Show me your blue screen of death</span></td><td>Simulates a Windows BSOD screen for 5 seconds.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Show me your guru meditation</span></td><td>Simulates an Amiga Guru Meditation screen for 5 seconds.</td></tr>";
+    html += "</tbody></table></div>";
+
+    html += "<div class='card'><h3>USB Serial Console Commands</h3>";
+    html += "<p style='color:#6c757d;font-size:0.85em;margin:0 0 10px 0;'>When connected to USB, send these via serial monitor (115200 baud):</p>";
+    html += "<table class='cmd-table'>";
+    html += "<thead><tr><th style='width:35%;'>Serial Command</th><th>Description</th></tr></thead><tbody>";
+    html += "<tr><td><span class='cmd-badge'>/help</span></td><td>Print all available terminal commands.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/settings</span></td><td>Display current configuration values and IP address.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/config</span> / <span class='cmd-badge'>/setup</span></td><td>Enter Web Configuration mode (start web server).</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/exit_config</span></td><td>Exit Web Configuration mode.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/tune_all</span></td><td>Full calibration: Speaker resonance, AEC delay, and barge-in.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/wake_thresh &lt;n&gt;</span></td><td>Adjust wake word sensitivity (0.05 to 1.00).</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/calibrate</span></td><td>Start touch calibration.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/fs</span></td><td>Show LittleFS storage usage and files.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/reboot</span></td><td>Restart the ESP32 module.</td></tr>";
+    html += "</tbody></table></div>";
+
+    html += "</div>"; // End Help tab
+
+    html += "</div>"; // End container
     html += "</body></html>";
     server.send(200, "text/html", html);
 }
