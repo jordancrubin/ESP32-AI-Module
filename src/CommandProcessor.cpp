@@ -9,11 +9,19 @@
 #include "SettingsManager.h"
 #include "DisplayManager.h"
 
+#include <Adafruit_BME680.h>
+
 extern SettingsManager settings;
 extern DisplayManager display;
 extern String ttsVoice;
 extern String voiceOptions;
 extern void onVolumeChange(int value);
+
+extern bool enableBME680;
+extern bool bmeReady;
+extern float g_currentVocKOhms;
+extern int vocAlarmThreshold;
+extern Adafruit_BME680 bme;
 
 uint32_t g_pendingTimerSeconds  = 0;
 bool g_cancelTimer  = false;
@@ -366,8 +374,62 @@ CommandResult CommandProcessor::processCommand(const String& text) {
         result.handled = true;
         result.enterConfigMode = true;
     }
+    else if (lowerText.indexOf("report the air quality") != -1 || lowerText.indexOf("report air quality") != -1 ||
+             lowerText.indexOf("what is the air quality") != -1 || lowerText.indexOf("what's the air quality") != -1 ||
+             lowerText.indexOf("whats the air quality") != -1 || lowerText.indexOf("how is the air quality") != -1 ||
+             lowerText.indexOf("how's the air quality") != -1 || lowerText.indexOf("hows the air quality") != -1 ||
+             lowerText.indexOf("check the air quality") != -1 || lowerText.indexOf("check air quality") != -1 ||
+             lowerText.indexOf("air quality report") != -1 || lowerText.indexOf("air quality status") != -1 ||
+             trimmedClean == "air quality" || trimmedClean == "indoor air quality") {
+        if (!enableBME680 || !bmeReady) {
+            result.response = "The air quality sensor is not enabled or not detected.";
+        } else {
+            float voc = g_currentVocKOhms;
+            float hum = 0.0f;
+            if (bme.performReading()) {
+                voc = bme.gas_resistance / 1000.0f;
+                g_currentVocKOhms = voc;
+                hum = bme.humidity;
+            } else {
+                hum = bme.humidity;
+            }
+
+            if (voc <= 0.0f) {
+                result.response = "The air quality sensor is currently warming up. Please try again in a few moments.";
+            } else {
+                float green_thresh = vocAlarmThreshold * 1.4f;
+                if (green_thresh < (vocAlarmThreshold + 15.0f)) green_thresh = vocAlarmThreshold + 15.0f;
+                if (green_thresh > 65.0f) green_thresh = 65.0f;
+
+                String quality;
+                if (voc < vocAlarmThreshold) {
+                    quality = "poor";
+                } else if (voc < green_thresh) {
+                    quality = "moderate";
+                } else {
+                    quality = "good";
+                }
+
+                int vocInt = (int)(voc + 0.5f);
+                int humInt = (int)(hum + 0.5f);
+
+                String msg = "The indoor air quality is " + quality + 
+                             ", with a gas resistance of " + String(vocInt) + " kilohms";
+                if (humInt > 0) {
+                    msg += " and " + String(humInt) + " percent relative humidity.";
+                } else {
+                    msg += ".";
+                }
+                if (quality == "poor") {
+                    msg += " Contaminant or VOC levels are elevated.";
+                }
+                result.response = msg;
+            }
+        }
+        result.handled = true;
+    }
     else if (lowerText.indexOf("what are your commands") != -1 || lowerText.indexOf("list your commands") != -1 || lowerText == "help" || lowerText == "help." || lowerText == "help!") {
-        result.response = "Here are the local commands I understand. You can tell me to raise, lower, or set the volume or brightness to a number between zero and ten. You can ask me to change the clock color to red, green, or white. You can ask me to calibrate the touchscreen, or go into configuration mode. You can say, 'test A E C', to test the acoustic echo cancellation. You can also say, 'system reboot', to restart the device.";
+        result.response = "Here are the local commands I understand. You can tell me to raise, lower, or set the volume or brightness to a number between zero and ten. You can ask me to change the clock color to red, green, or white. You can say 'end conversation' to return to standby, or ask me to report the air quality. You can ask me to calibrate the touchscreen, or go into configuration mode. You can say, 'test A E C', to test the acoustic echo cancellation. You can also say, 'system reboot', to restart the device.";
         result.handled = true;
         result.showHelp = true;
     }

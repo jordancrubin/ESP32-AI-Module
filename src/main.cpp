@@ -1008,6 +1008,7 @@ void handleWebRoot() {
     html += "<table class='cmd-table'>";
     html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
     html += "<tr><td><span class='cmd-badge'>Enter configuration mode</span><div class='cmd-alt'>Also: &quot;config mode&quot;, &quot;setup mode&quot;, &quot;web config&quot;</div></td><td>Launches this web configuration server and displays IP &amp; hostname on screen.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Report the air quality</span><div class='cmd-alt'>Also: &quot;what is the air quality&quot;, &quot;check air quality&quot;, &quot;air quality&quot;</div></td><td>Reads the BME680 sensor and reports indoor air status (Good, Moderate, or Poor), gas resistance, and humidity.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>End conversation</span><div class='cmd-alt'>Also: &quot;end the conversation&quot;</div></td><td>Immediately ends the conversation session, clears history, and returns to standby.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>Calibrate the touchscreen</span><div class='cmd-alt'>Also: &quot;recalibrate touchscreen&quot;</div></td><td>Starts 4-point on-screen touch alignment calibration.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>System reboot</span><div class='cmd-alt'>Also: &quot;reboot system&quot;, &quot;reboot the system&quot;</div></td><td>Restarts the ESP32 module.</td></tr>";
@@ -1062,6 +1063,7 @@ void handleWebRoot() {
     html += "<thead><tr><th style='width:35%;'>Serial Command</th><th>Description</th></tr></thead><tbody>";
     html += "<tr><td><span class='cmd-badge'>/help</span></td><td>Print all available terminal commands.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>/settings</span></td><td>Display current configuration values and IP address.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/air</span> / <span class='cmd-badge'>/voc</span></td><td>Read and print BME680 air quality, gas resistance, temp, and humidity.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>/config</span> / <span class='cmd-badge'>/setup</span></td><td>Enter Web Configuration mode (start web server).</td></tr>";
     html += "<tr><td><span class='cmd-badge'>/exit_config</span></td><td>Exit Web Configuration mode.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>/tune_all</span></td><td>Full calibration: Speaker resonance, AEC delay, and barge-in.</td></tr>";
@@ -2424,6 +2426,7 @@ void handleSerialCommands() {
         if (inputBuffer == "/help") {
           Serial.println("\n--- Available Commands ---");
           Serial.println("/settings       - Show current configuration");
+          Serial.println("/air            - Show BME680 air quality and environmental stats");
           Serial.println("/config         - Enter Web Configuration mode (start web server)");
           Serial.println("/calibrate      - Start touch calibration");
           Serial.println("/reset_cal      - Reset touch calibration");
@@ -2513,6 +2516,21 @@ void handleSerialCommands() {
           onSetupMode(false);
           display.showMainUI(ttsVoice, settings.volume, voiceOptions);
           Serial.println("Exited Configuration Mode.");
+        } else if (inputBuffer == "/air" || inputBuffer == "/voc") {
+          if (!enableBME680 || !bmeReady) {
+              Serial.println("[BME680] Sensor not enabled or not detected.");
+          } else {
+              if (bme.performReading()) {
+                  g_currentVocKOhms = bme.gas_resistance / 1000.0f;
+              }
+              float green_thresh = vocAlarmThreshold * 1.4f;
+              if (green_thresh < (vocAlarmThreshold + 15.0f)) green_thresh = vocAlarmThreshold + 15.0f;
+              if (green_thresh > 65.0f) green_thresh = 65.0f;
+              const char* q = (g_currentVocKOhms < vocAlarmThreshold) ? "POOR" : 
+                              (g_currentVocKOhms < green_thresh ? "MODERATE" : "GOOD");
+              Serial.printf("[BME680] Status: %s | Gas: %.1f kOhms | Temp: %.1f C | Hum: %.1f%% | Pres: %.1f hPa\n",
+                            q, g_currentVocKOhms, bme.temperature, bme.humidity, bme.pressure / 100.0f);
+          }
         } else if (inputBuffer == "/calibrate") {
           Serial.println("Starting manual touch calibration...");
           display.calibrateTouch(settings.calibration);
