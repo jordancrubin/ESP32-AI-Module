@@ -2745,6 +2745,7 @@ void showHelpScreen() {
         "- Volume [0-10]: Adjust audio level\n"
         "- Brightness [0-10]: Adjust screen backlight\n"
         "- Clock Color: Set to Red, Green, or White\n"
+        "- End Conversation: Return to standby\n"
         "- Config Mode: Open Web UI\n"
         "- Calibrate Touchscreen: Fix touch alignment\n"
         "- Auto Tune: Calibrate Echo Cancellation\n"

@@ -290,6 +290,12 @@ void onVoiceChange(String voice) {
                     
                     // Process local commands
                     CommandResult cmd = CommandProcessor::processCommand(text);
+                    if (cmd.endConversation) {
+                        if (settings.debugMode) Serial.println("Conversation ended by user command.");
+                        llm.clearHistory();
+                        display.showStatus("Ready");
+                        break;
+                    }
                     bool handledLocally = cmd.handled;
                     String localResponse = cmd.response;
                     bool runAecTest = cmd.runAecTest;
@@ -1002,6 +1008,7 @@ void handleWebRoot() {
     html += "<table class='cmd-table'>";
     html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
     html += "<tr><td><span class='cmd-badge'>Enter configuration mode</span><div class='cmd-alt'>Also: &quot;config mode&quot;, &quot;setup mode&quot;, &quot;web config&quot;</div></td><td>Launches this web configuration server and displays IP &amp; hostname on screen.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>End conversation</span><div class='cmd-alt'>Also: &quot;end the conversation&quot;</div></td><td>Immediately ends the conversation session, clears history, and returns to standby.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>Calibrate the touchscreen</span><div class='cmd-alt'>Also: &quot;recalibrate touchscreen&quot;</div></td><td>Starts 4-point on-screen touch alignment calibration.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>System reboot</span><div class='cmd-alt'>Also: &quot;reboot system&quot;, &quot;reboot the system&quot;</div></td><td>Restarts the ESP32 module.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>What are your commands</span><div class='cmd-alt'>Also: &quot;list your commands&quot;, &quot;help&quot;</div></td><td>Speaks a voice summary and displays the on-screen command cheat sheet.</td></tr>";

@@ -17,6 +17,7 @@ struct CommandResult {
     bool tuneAEC = false;
     bool tuneResonance = false;
     bool showHelp = false;
+    bool endConversation = false;
 };
 
 class CommandProcessor {

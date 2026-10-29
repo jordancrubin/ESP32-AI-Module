@@ -59,6 +59,28 @@ CommandResult CommandProcessor::processCommand(const String& text) {
     CommandResult result; // Values default safely to false/"" automatically
     String lowerText = text;
     lowerText.toLowerCase();
+
+    // Check for exact "end conversation" interaction (ignoring punctuation and surrounding whitespace)
+    String trimmedClean = "";
+    for (unsigned int i = 0; i < lowerText.length(); i++) {
+        char c = lowerText[i];
+        if (isalnum(c) || c == ' ') {
+            trimmedClean += c;
+        }
+    }
+    trimmedClean.trim();
+    while (trimmedClean.indexOf("  ") != -1) {
+        trimmedClean.replace("  ", " ");
+    }
+
+    if (trimmedClean == "end conversation" || trimmedClean == "end the conversation" || 
+        trimmedClean == "end conversation please" || trimmedClean == "please end conversation") {
+        result.handled = true;
+        result.endConversation = true;
+        result.response = "";
+        return result;
+    }
+
     // Local Cmd: Volume 0-10 Spoken -> 0-21 Internal
     if (lowerText.indexOf("lower the volume") != -1 || lowerText.indexOf("decrease the volume") != -1 || lowerText.indexOf("volume down") != -1) {
         int currentScale = (settings.volume * 10 + 10) / 21; 
