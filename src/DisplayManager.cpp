@@ -1197,10 +1197,12 @@ void DisplayManager::resetUIPointers() {
 }
 
 void DisplayManager::updateModelLabel(const char* model) {
-    if (s_lbl_model && model) {
+    if (s_lbl_model && lv_obj_is_valid(s_lbl_model) && model) {
         String mStr = String(model);
         if (mStr.length() == 0) mStr = "No Model";
         lv_label_set_text(s_lbl_model, mStr.c_str());
+    } else {
+        s_lbl_model = nullptr;
     }
 }
 
@@ -1410,6 +1412,7 @@ void DisplayManager::showWiFiConfig() {
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     boot_cont = nullptr;
     statusLabel = nullptr;
+    s_lbl_model = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "WiFi Configuration");
@@ -1474,6 +1477,7 @@ void DisplayManager::showAPIConfig(String currentKey) {
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
     boot_cont = nullptr;
+    s_lbl_model = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "API Key Configuration");
@@ -1600,6 +1604,7 @@ void DisplayManager::showAPIUrlConfig(String currentUrl) {
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
     boot_cont = nullptr;
+    s_lbl_model = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "API URL Configuration");
@@ -1656,6 +1661,7 @@ void DisplayManager::showAdminConfig() {
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
     boot_cont = nullptr;
+    s_lbl_model = nullptr;
     
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "Set Admin Password");
@@ -1695,6 +1701,7 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
     boot_cont = nullptr;
+    s_lbl_model = nullptr;
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(20, 20, 20), 0);
     
     // Check if configuration is incomplete (default values or empty)
@@ -1772,6 +1779,7 @@ void DisplayManager::showWiFiError(const char* message) {
     audio_vu_l = nullptr; audio_vu_r = nullptr;
     statusLabel = nullptr;
     boot_cont = nullptr;
+    s_lbl_model = nullptr;
     lv_obj_t * label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, message);
     lv_obj_align(label, LV_ALIGN_CENTER, 0, -40);
@@ -2043,6 +2051,7 @@ void DisplayManager::showAudioConfig() {
     audio_vu_r = nullptr;
     statusLabel = nullptr;
     boot_cont = nullptr;
+    s_lbl_model = nullptr;
 
     lv_obj_t * title = lv_label_create(lv_scr_act());
     lv_label_set_text(title, "Audio & Interrupt Settings");

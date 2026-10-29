@@ -84,6 +84,8 @@ extern void setInterruptMode(bool mode);
 extern void setAecBypass(bool bypass);
 extern int32_t getLastAecBurstLevel();
 extern int32_t getLastAecEvalLevel();
+extern int getEffectiveAecAttenuation();
+extern int32_t getEffectiveAecCutoff();
 extern void renderBSOD();
 extern void renderGuruMeditation();
 extern void forceClockScreen();
@@ -138,11 +140,40 @@ void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
     pixels.show();
 }
 
+unsigned long getEffectiveAecIgnore() {
+    float v_norm = constrain((float)settings.volume / 21.0f, 0.0f, 1.0f);
+    return (unsigned long)roundf(settings.aecIgnore * (0.8f + v_norm * 0.4f));
+}
+
+bool checkPlaybackBargeIn() {
+    if (!settings.enableInterrupt) return false;
+    bool triggered = speech.detectWakeWord(wakeThreshold);
+    if (!triggered) return false;
+
+    unsigned long elapsed = millis() - g_audioPlaybackStart;
+    unsigned long eff_ignore = getEffectiveAecIgnore();
+    if (elapsed > eff_ignore) {
+        Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %lu ms (base:%d ms), Eff Cutoff: %d (Vol: %d/21) <<<\n",
+                      elapsed, eff_ignore, settings.aecIgnore, getEffectiveAecCutoff(), settings.volume);
+        speaker.stop();
+        speaker.playSpeechFromFile(CHIME_FILENAME);
+        while(speaker.isRunning()) delay(30);
+        flushAecBuffer();
+        return true;
+    } else {
+        Serial.printf("[Barge-In] Interrupt ignored during initial ignore window (%lu ms <= %lu ms)\n",
+                      elapsed, eff_ignore);
+        return false;
+    }
+}
+
 void onVolumeChange(int value) {
     settings.volume = value;
     if (settings.debugMode) Serial.printf("Volume: %d (Tone disabled)\n", settings.volume);
     speaker.setVolume(settings.volume);
     settings.save();
+    Serial.printf("[Volume] Set to %d/21 -> Effective Barge-In: Atten=%d%%, Cutoff=%d, Ignore=%lums\n",
+                  settings.volume, getEffectiveAecAttenuation(), getEffectiveAecCutoff(), getEffectiveAecIgnore());
 }
 
 void onBalanceChange(int value) {
@@ -174,15 +205,8 @@ bool playChunkedTTS(String text) {
     
     while (speaker.isRunning()) {
         if (settings.enableInterrupt) {
-            bool triggered = speech.detectWakeWord(wakeThreshold);
-            if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %d ms, Cutoff: %d <<<\n",
-                              millis() - g_audioPlaybackStart, settings.aecIgnore, settings.aecCutoff);
-                speaker.stop();
-                speaker.playSpeechFromFile(CHIME_FILENAME);
-                while(speaker.isRunning()) delay(30);
+            if (checkPlaybackBargeIn()) {
                 interrupted = true;
-                flushAecBuffer();
                 break;
             }
             delay(20);
@@ -318,15 +342,8 @@ void onVoiceChange(String voice) {
                             // Wait for playback to finish, or poll for interruptions
                             while (speaker.isRunning()) {
                                 if (settings.enableInterrupt) {
-                                    bool triggered = speech.detectWakeWord(wakeThreshold);
-                                    if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                                        Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %d ms, Cutoff: %d <<<\n",
-                                                      millis() - g_audioPlaybackStart, settings.aecIgnore, settings.aecCutoff);
-                                        speaker.stop();
-                                        speaker.playSpeechFromFile(CHIME_FILENAME);
-                                        while(speaker.isRunning()) delay(30);
+                                    if (checkPlaybackBargeIn()) {
                                         interrupted = true;
-                                        flushAecBuffer();
                                         break;
                                     }
                                     delay(20); // Yield cleanly to audioTask
@@ -388,15 +405,8 @@ void onVoiceChange(String voice) {
                         if (settings.enableInterrupt) setInterruptMode(true);
                         while (speaker.isRunning()) {
                             if (settings.enableInterrupt) {
-                                bool triggered = speech.detectWakeWord(wakeThreshold);
-                            if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                                Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %d ms, Cutoff: %d <<<\n",
-                                              millis() - g_audioPlaybackStart, settings.aecIgnore, settings.aecCutoff);
-                                    speaker.stop();
-                                    speaker.playSpeechFromFile(CHIME_FILENAME);
-                                    while(speaker.isRunning()) delay(30);
+                                if (checkPlaybackBargeIn()) {
                                     interrupted = true;
-                                    flushAecBuffer();
                                     break;
                                 }
                                 delay(20);
@@ -511,13 +521,7 @@ void onVoiceChange(String voice) {
                 if (settings.enableInterrupt) setInterruptMode(true);
                 while(speaker.isRunning()) {
                     if (settings.enableInterrupt) {
-                        bool triggered = speech.detectWakeWord(wakeThreshold);
-                        if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                            Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %d ms, Cutoff: %d <<<\n",
-                                          millis() - g_audioPlaybackStart, settings.aecIgnore, settings.aecCutoff);
-                            speaker.playSpeechFromFile(CHIME_FILENAME);
-                            while(speaker.isRunning()) delay(30);
-                            flushAecBuffer();
+                        if (checkPlaybackBargeIn()) {
                             break;
                         }
                         delay(20);
@@ -872,12 +876,12 @@ void handleWebRoot() {
     html += "<small style='margin-top:-5px;'>Allows you to interrupt the AI by speaking over it.</small><br>";
     html += "<label>AEC Target Delay (Samples)</label><input type='number' name='aecDelay' value='" + String(settings.aecDelay) + "' step='10' min='0' max='3200'>";
     html += "<small>Echo alignment. Best tuned via /tune_aec command.</small>";
-    html += "<label>AEC Attenuation (%)</label><input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='0' max='100'>";
-    html += "<small>Reduces mic sensitivity during AI playback (e.g., 75%).</small>";
-    html += "<label>AEC Barge-in Cutoff</label><input type='number' name='aecCutoff' value='" + String(settings.aecCutoff) + "' min='0' max='32767'>";
-    html += "<small>Minimum volume required to interrupt the AI (Blocks residual echo).</small>";
-    html += "<label>AEC Interrupt Ignore (ms)</label><input type='number' name='aecIgnore' value='" + String(settings.aecIgnore) + "' min='0' max='10000' step='100'>";
-    html += "<small>Time to ignore voice interruptions when AI starts speaking (Adaptation window).</small>";
+    html += "<label>AEC Attenuation (%) [Base at 50% Vol]</label><input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='0' max='100'>";
+    html += "<small>Base attenuation at 50% vol (e.g. 55%). Automatically scales dynamically with volume slider.</small>";
+    html += "<label>AEC Barge-in Cutoff [Base at 50% Vol]</label><input type='number' name='aecCutoff' value='" + String(settings.aecCutoff) + "' min='0' max='32767'>";
+    html += "<small>Base cutoff threshold at 50% vol (e.g. 3000). Automatically scales dynamically with volume slider.</small>";
+    html += "<label>AEC Interrupt Ignore (ms) [Base at 50% Vol]</label><input type='number' name='aecIgnore' value='" + String(settings.aecIgnore) + "' min='0' max='10000' step='100'>";
+    html += "<small>Initial ignore window while Speex filter converges. Automatically scales dynamically with volume slider.</small>";
     html += "<div style='margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;'>";
     html += "<a href='/tune_aec' class='btn' style='background:#1976d2;display:inline-block;padding:8px 16px;color:#fff;text-decoration:none;border-radius:4px;'>Auto-Tune AEC Delay</a>";
     html += "<a href='/tune_bargein' class='btn' style='background:#e65100;display:inline-block;padding:8px 16px;color:#fff;text-decoration:none;border-radius:4px;'>Auto-Calibrate Barge-In</a>";
@@ -976,7 +980,6 @@ void handleWebRoot() {
 
     html += "<div class='card'><h3>System Tools</h3>";
     html += "<a href='/update' class='btn' style='display:block;text-align:center;text-decoration:none;box-sizing:border-box;'>OTA Firmware/Filesystem Update</a>";
-    html += "<form action='/ei_mode' method='POST' style='margin-top:15px;'><input type='submit' value='Reboot to Edge Impulse Data Collection' class='btn btn-orange'></form>";
     html += "</div>";
 
     html += "</div>";
@@ -2175,18 +2178,18 @@ void calibrateBargeIn(bool returnToMainUI) {
     Serial.printf("  Initial Peak Burst     : %d\n", overall_max_burst);
     Serial.printf("  Steady Harmonic Residue: %d\n", steady_max_burst);
 
-    // Compute candidate parameters with robust safety margins
-    int candidateIgnore = (int)converge_time_ms + 600; // +600ms safety buffer
-    if (candidateIgnore < 2000) candidateIgnore = 2000; // minimum floor 2.0s
-    if (candidateIgnore > 3000) candidateIgnore = 3000;
+    // Compute candidate parameters with realistic safety margins
+    int candidateIgnore = (int)converge_time_ms + 200; // +200ms safety buffer
+    if (candidateIgnore < 1000) candidateIgnore = 1000; // minimum floor 1000ms
+    if (candidateIgnore > 2000) candidateIgnore = 2000;
 
-    int candidateAtten = 70; // 70% attenuation during voice playback
-    if (steady_max_burst > 2000) candidateAtten = 75;
+    int candidateAtten = 55; // 55% attenuation during voice playback
+    if (steady_max_burst > 2500) candidateAtten = 60;
 
     int attenuated_peak = (steady_max_burst * (100 - candidateAtten)) / 100;
-    // Generous 2.0x multiplier + 2500 safety buffer with 4500 hard floor:
-    int candidateCutoff = (int)(attenuated_peak * 2.0f) + 2500;
-    if (candidateCutoff < 4500) candidateCutoff = 4500;
+    int candidateCutoff = (int)(attenuated_peak * 1.8f) + 800;
+    if (candidateCutoff < 2800) candidateCutoff = 2800;
+    if (candidateCutoff > 4000) candidateCutoff = 4000;
 
     Serial.printf("  Candidate Ignore : %d ms\n", candidateIgnore);
     Serial.printf("  Candidate Atten  : %d%%\n", candidateAtten);
@@ -2230,7 +2233,7 @@ void calibrateBargeIn(bool returnToMainUI) {
             int32_t cur_eval = getLastAecEvalLevel();
             if (cur_eval > max_eval_seen) max_eval_seen = cur_eval;
 
-            if (triggered && (elapsed > (unsigned long)settings.aecIgnore)) {
+            if (triggered && (elapsed > getEffectiveAecIgnore())) {
                 selfTriggered = true;
                 selfTriggerTime = elapsed;
                 triggerLevel = getLastAecBurstLevel();
@@ -2246,25 +2249,26 @@ void calibrateBargeIn(bool returnToMainUI) {
         flushAecBuffer();
 
         if (selfTriggered) {
-            Serial.printf(">>> SELF-TRIGGER DETECTED at %lu ms! (Raw: %d, Atten: %d, Cutoff: %d, Ignore: %d ms) <<<\n",
-                          selfTriggerTime, triggerLevel, triggerEval, settings.aecCutoff, settings.aecIgnore);
+            Serial.printf(">>> SELF-TRIGGER DETECTED at %lu ms! (Raw: %d, Atten: %d, Cutoff: %d, Ignore: %lu ms) <<<\n",
+                          selfTriggerTime, triggerLevel, triggerEval, settings.aecCutoff, getEffectiveAecIgnore());
 
             // Dynamically adjust parameters:
-            if (selfTriggerTime < (unsigned long)(settings.aecIgnore + 500)) {
-                settings.aecIgnore += 300;
-                Serial.printf(">>> Adjusting: Increased aecIgnore to %d ms (trigger occurred shortly after ignore window)\n", settings.aecIgnore);
+            if (selfTriggerTime < (getEffectiveAecIgnore() + 300)) {
+                settings.aecIgnore += 200;
+                Serial.printf(">>> Adjusting: Increased aecIgnore to %d ms\n", settings.aecIgnore);
             }
-            int boost = (triggerEval > settings.aecCutoff) ? (triggerEval - settings.aecCutoff + 1500) : 1500;
+            int boost = (triggerEval > settings.aecCutoff) ? (triggerEval - settings.aecCutoff + 500) : 500;
             settings.aecCutoff += boost;
-            settings.aecAttenuation = 75;
+            if (settings.aecAttenuation < 65) settings.aecAttenuation += 5;
             setAecCutoff(settings.aecCutoff);
             setAecAttenuation(settings.aecAttenuation);
             Serial.printf(">>> Adjusting: New Cutoff = %d, New Atten = %d%%. Re-running test...\n",
                           settings.aecCutoff, settings.aecAttenuation);
         } else {
-            // Apply generous safety margin above peak level seen during test
-            int safe_cutoff = (max_eval_seen * 2) + 2000;
-            if (safe_cutoff < 4500) safe_cutoff = 4500;
+            // Apply balanced safety margin above peak level seen during test
+            int safe_cutoff = (max_eval_seen * 2) + 600;
+            if (safe_cutoff < 2800) safe_cutoff = 2800;
+            if (safe_cutoff > 4000) safe_cutoff = 4000;
             if (settings.aecCutoff < safe_cutoff) {
                 settings.aecCutoff = safe_cutoff;
                 setAecCutoff(settings.aecCutoff);
@@ -2279,10 +2283,10 @@ void calibrateBargeIn(bool returnToMainUI) {
 
     if (!passSuccess) {
         Serial.println("\nWarning: Could not completely eliminate false interrupts in 4 passes.");
-        Serial.println("Applying robust conservative parameters.");
-        if (settings.aecIgnore < 2500) settings.aecIgnore = 2500;
-        if (settings.aecCutoff < 5500) settings.aecCutoff = 5500;
-        if (settings.aecAttenuation < 75) settings.aecAttenuation = 75;
+        Serial.println("Applying robust parameters.");
+        if (settings.aecIgnore < 1200) settings.aecIgnore = 1200;
+        if (settings.aecCutoff < 3200) settings.aecCutoff = 3200;
+        if (settings.aecAttenuation < 60) settings.aecAttenuation = 60;
         setAecCutoff(settings.aecCutoff);
         setAecAttenuation(settings.aecAttenuation);
     }
@@ -2538,13 +2542,7 @@ void handleSerialCommands() {
                     if (settings.enableInterrupt) setInterruptMode(true);
                     while(speaker.isRunning()) {
                         if (settings.enableInterrupt) {
-                            bool triggered = speech.detectWakeWord(wakeThreshold);
-                            if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                                Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %d ms, Cutoff: %d <<<\n",
-                                              millis() - g_audioPlaybackStart, settings.aecIgnore, settings.aecCutoff);
-                                speaker.stop();
-                                speaker.playSpeechFromFile(CHIME_FILENAME);
-                                while(speaker.isRunning()) delay(30);
+                            if (checkPlaybackBargeIn()) {
                                 break;
                             }
                             delay(20);
@@ -2597,12 +2595,7 @@ void handleSerialCommands() {
                 if (settings.enableInterrupt) setInterruptMode(true);
                 while(speaker.isRunning()) {
                     if (settings.enableInterrupt) {
-                        bool triggered = speech.detectWakeWord(wakeThreshold);
-                        if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                            Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %d ms, Cutoff: %d <<<\n",
-                                          millis() - g_audioPlaybackStart, settings.aecIgnore, settings.aecCutoff);
-                            speaker.playSpeechFromFile(CHIME_FILENAME);
-                            while(speaker.isRunning()) delay(30);
+                        if (checkPlaybackBargeIn()) {
                             break;
                         }
                         delay(20);
@@ -2696,14 +2689,7 @@ void handleSerialCommands() {
                   if (settings.enableInterrupt) setInterruptMode(true);
                   while(speaker.isRunning()) {
                       if (settings.enableInterrupt) {
-                          bool triggered = speech.detectWakeWord(wakeThreshold);
-                          if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                              Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %d ms, Cutoff: %d <<<\n",
-                                            millis() - g_audioPlaybackStart, settings.aecIgnore, settings.aecCutoff);
-                              speaker.stop();
-                              speaker.playSpeechFromFile(CHIME_FILENAME);
-                              while(speaker.isRunning()) delay(30);
-                              flushAecBuffer();
+                          if (checkPlaybackBargeIn()) {
                               break;
                           }
                           delay(20);
@@ -2756,14 +2742,7 @@ void handleSerialCommands() {
               if (settings.enableInterrupt) setInterruptMode(true);
               while(speaker.isRunning()) {
                   if (settings.enableInterrupt) {
-                      bool triggered = speech.detectWakeWord(wakeThreshold);
-                  if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                      Serial.printf("\n>>> Playback interrupted by user! Elapsed: %lu ms, Ignore: %d ms, Cutoff: %d <<<\n",
-                                    millis() - g_audioPlaybackStart, settings.aecIgnore, settings.aecCutoff);
-                          speaker.stop();
-                          speaker.playSpeechFromFile(CHIME_FILENAME);
-                          while(speaker.isRunning()) delay(30);
-                          flushAecBuffer();
+                      if (checkPlaybackBargeIn()) {
                           break;
                       }
                       delay(20);
@@ -2814,11 +2793,11 @@ void performFactoryReset() {
     settings.enableWebSearch = false;
     settings.enableCalendar = true;
     settings.enableMemory = false;
-    settings.enableInterrupt = false;
+    settings.enableInterrupt = true;
     settings.aecDelay = 640;
-    settings.aecAttenuation = 70;
-    settings.aecCutoff = 4500;
-    settings.aecIgnore = 2000;
+    settings.aecAttenuation = 55;
+    settings.aecCutoff = 3000;
+    settings.aecIgnore = 1000;
     settings.alarmEnabled = false;
     settings.alarmHour = 7;
     settings.alarmMinute = 0;
@@ -2931,24 +2910,6 @@ void setup() {
   display.showStatus("Powered by microWakeWord");
   display.showStatus("UI by LVGL");
 
-    if (adminPrefs.getBool("ei_mode", false)) {
-        adminPrefs.putBool("ei_mode", false); // Clear immediately for next boot
-        display.showStatus("Edge Impulse Mode\nReady for CLI\nReboot to Exit");
-        
-        Serial.println("\n==================================================");
-        Serial.println("Edge Impulse Data Forwarder Mode active.");
-        Serial.println("IMPORTANT: You must CLOSE this Serial Monitor now!");
-        Serial.println("Then, open a fresh terminal and run:");
-        Serial.println("  edge-impulse-data-forwarder");
-        Serial.println("==================================================\n");
-        delay(3000); // Give user a moment to read before blasting raw data
-        
-        speech.begin();
-        extern void runEdgeImpulseForwarder();
-        runEdgeImpulseForwarder(); 
-        // Never returns. User must physically reset the board to exit.
-    }
-
   // Admin Password Check
   adminPassword = adminPrefs.getString("pass", "");
   ttsVoice = adminPrefs.getString("voice", "alloy");
@@ -2957,16 +2918,21 @@ void setup() {
       wakeThreshold = 0.5f;
       adminPrefs.putFloat("wake_thresh", 0.5f);
   }
-  if (settings.aecIgnore < 1800) {
-      settings.aecIgnore = 2000;
+  // Auto-heal stale or out-of-bounds AEC NVRAM values from previous builds
+  if (settings.aecIgnore < 800 || settings.aecIgnore > 2500) {
+      settings.aecIgnore = 1000;
       settings.save();
   }
-  if (settings.aecCutoff < 3500) {
-      settings.aecCutoff = 4500;
+  if (settings.aecCutoff < 2600 || settings.aecCutoff > 4500) {
+      settings.aecCutoff = 3000;
       settings.save();
   }
-  if (settings.aecAttenuation < 60) {
-      settings.aecAttenuation = 70;
+  if (settings.aecAttenuation < 45 || settings.aecAttenuation > 70) {
+      settings.aecAttenuation = 55;
+      settings.save();
+  }
+  if (!settings.enableInterrupt) {
+      settings.enableInterrupt = true;
       settings.save();
   }
   ttsSpeed = adminPrefs.getFloat("tts_speed", 0.8);
@@ -2979,16 +2945,43 @@ void setup() {
   
   // Initialize I2C on pins 8 (SDA) and 3 (SCL)
   Wire.begin(8, 3);
+  Serial.println("[I2C] Scanning bus on SDA=GPIO8, SCL=GPIO3...");
+  byte count = 0;
+  for (byte i = 8; i < 120; i++) {
+      Wire.beginTransmission(i);
+      if (Wire.endTransmission() == 0) {
+          Serial.printf("[I2C] Found device at address 0x%02X\n", i);
+          count++;
+      }
+  }
+  if (count == 0) {
+      Serial.println("[I2C] No I2C devices found! Check wiring, 3.3V power, and CS pin.");
+  }
 
   if (enableBME680) {
-      if (bme.begin(0x77) || bme.begin(0x76)) {
+      Serial.println("[BME680] Initializing sensor...");
+      if (bme.begin(0x77)) {
+          Serial.println("[BME680] Connected successfully at address 0x77!");
           bme.setTemperatureOversampling(BME680_OS_8X);
           bme.setHumidityOversampling(BME680_OS_2X);
           bme.setPressureOversampling(BME680_OS_4X);
           bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
           bme.setGasHeater(320, 150);
           bmeReady = true;
+      } else if (bme.begin(0x76)) {
+          Serial.println("[BME680] Connected successfully at address 0x76!");
+          bme.setTemperatureOversampling(BME680_OS_8X);
+          bme.setHumidityOversampling(BME680_OS_2X);
+          bme.setPressureOversampling(BME680_OS_4X);
+          bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
+          bme.setGasHeater(320, 150);
+          bmeReady = true;
+      } else {
+          Serial.println("[BME680] ERROR: Sensor failed to respond at 0x77 or 0x76!");
+          bmeReady = false;
       }
+  } else {
+      Serial.println("[BME680] Sensor disabled in web settings.");
   }
   
   if (adminPassword == "") {
@@ -3117,15 +3110,6 @@ void setup() {
 
   // Serve the static logo image directly from LittleFS
   server.serveStatic("/logo.png", LittleFS, "/logo.png");
-
-  server.on("/ei_mode", HTTP_POST, []() {
-      if (!server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
-      adminPrefs.putBool("ei_mode", true);
-      server.sendHeader("Connection", "close");
-      server.send(200, "text/plain", "Rebooting to Edge Impulse Mode... The next reboot will return to normal operation.");
-      delay(1000);
-      ESP.restart();
-  });
 
   // OTA Update Endpoints
   server.on("/update", HTTP_GET, []() {
@@ -3322,6 +3306,10 @@ void setup() {
   setAecDelay(settings.aecDelay); // Apply the saved tuning
   setAecAttenuation(settings.aecAttenuation);
   setAecCutoff(settings.aecCutoff);
+  Serial.printf("[Barge-in] Status: %s | Base Cutoff: %d | Base Atten: %d%% | Base Ignore: %dms (Volume: %d/21 -> Eff Cutoff: %d, Eff Atten: %d%%, Eff Ignore: %lums)\n",
+                settings.enableInterrupt ? "ENABLED" : "DISABLED",
+                settings.aecCutoff, settings.aecAttenuation, settings.aecIgnore,
+                settings.volume, getEffectiveAecCutoff(), getEffectiveAecAttenuation(), getEffectiveAecIgnore());
   display.showStatus("Speech Init|OK");
 
   // API Configuration Loop (Web Based)
@@ -3447,7 +3435,7 @@ void loop() {
   }
 
   // Hourly Weather Update
-  if (strlen(settings.openWeatherKey) > 0 && network.isConnected()) {
+  if (!isSpeaking && strlen(settings.openWeatherKey) > 0 && network.isConnected()) {
       if (millis() - lastWeatherUpdate > 3600000) { // 1 hour
           getWeather();
           lastWeatherUpdate = millis();
@@ -3455,14 +3443,12 @@ void loop() {
   }
 
   static unsigned long lastBmeRead = 0;
-  if (bmeReady && (millis() - lastBmeRead > 60000)) {
+  if (!isSpeaking && bmeReady && (millis() - lastBmeRead > 60000 || (lastBmeRead == 0 && millis() > 3000))) {
       lastBmeRead = millis();
       if (bme.performReading()) {
           g_currentVocKOhms = bme.gas_resistance / 1000.0;
-          if (settings.debugMode) {
-              Serial.printf("BME680 -> Temp: %.1fC | Hum: %.1f%% | Pres: %.1fhPa | Gas: %.1fKOhms\n", 
-                            bme.temperature, bme.humidity, bme.pressure / 100.0, g_currentVocKOhms);
-          }
+          Serial.printf("[BME680] Gas: %.1f kOhms | Temp: %.1f C | Hum: %.1f%% | Pres: %.1f hPa\n", 
+                        g_currentVocKOhms, bme.temperature, bme.humidity, bme.pressure / 100.0);
           
           // Voice Alarm Logic
           if (g_currentVocKOhms > 0 && g_currentVocKOhms < vocAlarmThreshold) {
@@ -3480,10 +3466,12 @@ void loop() {
                       isSpeaking = true;
                       if (settings.enableInterrupt) setInterruptMode(true);
                       while(speaker.isRunning()) {
-                          if (settings.enableInterrupt && speech.detectWakeWord(wakeThreshold) && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) { 
-                              if (settings.debugMode) Serial.println("VOC Alarm interrupted!");
-                              speaker.stop(); speaker.playSpeechFromFile(CHIME_FILENAME); while(speaker.isRunning()) delay(30); flushAecBuffer(); break; }
-                          if (!settings.enableInterrupt) {
+                          if (settings.enableInterrupt) {
+                              if (checkPlaybackBargeIn()) {
+                                  if (settings.debugMode) Serial.println("VOC Alarm interrupted!");
+                                  break;
+                              }
+                          } else {
                               flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
                           }
                           delay(20);
@@ -3493,6 +3481,8 @@ void loop() {
                   }
               }
           }
+      } else {
+          Serial.println("[BME680] performReading() failed!");
       }
   }
   
@@ -3539,21 +3529,16 @@ void loop() {
           
           while(speaker.isRunning()) {
               if (settings.enableInterrupt) {
-                  bool triggered = speech.detectWakeWord(wakeThreshold);
-                  if (triggered && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
+                  if (checkPlaybackBargeIn()) {
                       if (settings.debugMode) Serial.println("Timer playback interrupted!");
-                      speaker.stop();
-                      speaker.playSpeechFromFile(CHIME_FILENAME);
-                      while(speaker.isRunning()) delay(30);
                       interrupted = true;
                       timerRinging = false; // Cancel timer via interrupt
-                            lastInterruptTime = millis();
-                            flushAecBuffer();
+                      lastInterruptTime = millis();
                       break;
                   }
                   delay(20);
               } else {
-                      flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
+                  flushAecBuffer(); // Prevent AEC ringbuffer from overflowing
                   delay(50);
               }
           }
@@ -3594,15 +3579,14 @@ void loop() {
             if (settings.enableInterrupt) setInterruptMode(true);
             
             while(speaker.isRunning()) {
-                if (settings.enableInterrupt && speech.detectWakeWord(wakeThreshold) && (millis() - g_audioPlaybackStart > (unsigned long)settings.aecIgnore)) {
-                    speaker.stop();
-                    speaker.playSpeechFromFile(CHIME_FILENAME);
-                    while(speaker.isRunning()) delay(30);
-                    alarmRinging = false; // Turn off ringing when user interrupts
+                if (settings.enableInterrupt) {
+                    if (checkPlaybackBargeIn()) {
+                        alarmRinging = false; // Turn off ringing when user interrupts
+                        break;
+                    }
+                } else {
                     flushAecBuffer();
-                    break;
                 }
-                if (!settings.enableInterrupt) flushAecBuffer();
                 delay(20);
             }
             if (settings.enableInterrupt) setInterruptMode(false);

@@ -25,6 +25,8 @@ private:
 
 int32_t getLastAecBurstLevel();
 int32_t getLastAecEvalLevel();
+int getEffectiveAecAttenuation();
+int32_t getEffectiveAecCutoff();
 
 struct WavHeader {
     char riff[4];           // "RIFF"

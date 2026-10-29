@@ -61,6 +61,11 @@ struct BiquadHPF {
         a2 = (1.0f - alpha) / a0;
     }
 
+    void reset() {
+        z1 = 0.0f;
+        z2 = 0.0f;
+    }
+
     void processBuffer(int16_t* buffer, size_t numSamples) {
         if (cutoffHz <= 0) return;
         for (size_t i = 0; i < numSamples; i++) {
@@ -127,12 +132,12 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
     }
 
     // 4. Feed AEC Reference (BEFORE I2S Write to prevent starvation)
-    // Handle 24kHz -> 16kHz resampling for AEC
+    // Handle 24kHz / arbitrary -> 16kHz resampling for AEC
     if (info.samprate == 16000) {
         speech.feedReference(pcm_buffer, len);
     }
     else if (info.samprate == 24000) {
-        // Simple 24kHz -> 16kHz downsampling (3 input -> 2 output)
+        // Fast 24kHz -> 16kHz downsampling (3 input -> 2 output)
         size_t new_len = 0;
         
         for (size_t i = 0; i < len; i += 3) {
@@ -147,6 +152,17 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
                 int32_t val = ((int32_t)pcm_buffer[i+1] + (int32_t)pcm_buffer[i+2]) >> 1;
                 s_resample_buff[new_len++] = (int16_t)val;
             }
+        }
+        speech.feedReference(s_resample_buff, new_len);
+    }
+    else if (info.samprate > 0) {
+        // Universal fixed-point phase accumulator for any other sample rate (e.g. 22050, 44100, 48000)
+        uint32_t step = ((uint64_t)info.samprate << 16) / 16000;
+        uint32_t phase = 0;
+        size_t new_len = 0;
+        while ((phase >> 16) < len && new_len < 4094) {
+            s_resample_buff[new_len++] = pcm_buffer[phase >> 16];
+            phase += step;
         }
         speech.feedReference(s_resample_buff, new_len);
     }
@@ -188,8 +204,8 @@ void SpeakerManager::begin() {
     // Initialize I2S for Speaker (TX) using ESP-IDF 5.x driver
     // We use I2S_NUM_0 to avoid conflict with Mic on I2S_NUM_1
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    chan_cfg.dma_desc_num = 4;
-    chan_cfg.dma_frame_num = 256; // 4 * 256 = 1024 frames (64ms at 16kHz) to eliminate queue latency
+    chan_cfg.dma_desc_num = 8;
+    chan_cfg.dma_frame_num = 512; // 8 * 512 = 4096 frames (170ms at 24kHz) ensures zero buffer underruns from LittleFS reads
     chan_cfg.auto_clear_after_cb = true;
     i2s_new_channel(&chan_cfg, &tx_handle, NULL);
 
@@ -254,6 +270,7 @@ int SpeakerManager::getHpfCutoff() {
 void SpeakerManager::playSpeechFromFile(const char* filename) {
     s_is_interrupted = false;
     xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    s_hpf.reset();     // Clear filter delay states to prevent transient clicks
     speech.resetAec(); // Clear reference ringbuffer and reset Speex adaptive filter weights
     
     if (settings.debugMode) Serial.printf("Playing TTS from file: %s\n", filename);
@@ -372,7 +389,8 @@ void SpeakerManager::stop() {
     if (audioFile) audioFile.close();
     _isPlaying = false;
     s_is_interrupted = false; // Reset flag
-    speech.resetAec(); // Clear reference buffer when playback stops
+    s_hpf.reset();            // Clear filter states
+    speech.resetAec();        // Clear reference buffer when playback stops
     xSemaphoreGiveRecursive(_mutex);
 }
 
@@ -425,7 +443,7 @@ void SpeakerManager::loop() {
                         }
                         
                         // Feed AEC (BEFORE I2S Write)
-                        // Handle 24kHz -> 16kHz resampling
+                        // Handle 24kHz / arbitrary -> 16kHz resampling
                         if (s_i2s_std_cfg.clk_cfg.sample_rate_hz == 16000) {
                             speech.feedReference(pcm, samples);
                         }
@@ -443,6 +461,17 @@ void SpeakerManager::loop() {
                                     int32_t val = ((int32_t)pcm[i+1] + (int32_t)pcm[i+2]) >> 1;
                                     s_resample_buff[new_len++] = (int16_t)val;
                                 }
+                            }
+                            speech.feedReference(s_resample_buff, new_len);
+                        }
+                        else if (s_i2s_std_cfg.clk_cfg.sample_rate_hz > 0) {
+                            // Universal fixed-point phase accumulator for any other sample rate
+                            uint32_t step = ((uint64_t)s_i2s_std_cfg.clk_cfg.sample_rate_hz << 16) / 16000;
+                            uint32_t phase = 0;
+                            size_t new_len = 0;
+                            while ((phase >> 16) < samples && new_len < 4094) {
+                                s_resample_buff[new_len++] = pcm[phase >> 16];
+                                phase += step;
                             }
                             speech.feedReference(s_resample_buff, new_len);
                         }

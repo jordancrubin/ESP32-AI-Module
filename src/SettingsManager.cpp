@@ -32,11 +32,11 @@ SettingsManager::SettingsManager() {
     enableMemory = false;
     enableCalendar = true;
     enableWebSearch = false;
-    enableInterrupt = false;
+    enableInterrupt = true; // Default to true so Voice Barge-In is ready to use
     aecDelay = 640; // Default ~40ms (proven working setting)
-    aecAttenuation = 70; // Default 70% attenuation during voice playback (squashes speaker feedback)
-    aecCutoff = 4500; // Default 4500 raw amplitude (massive margin above steady-state harmonics, easily triggered by voice)
-    aecIgnore = 2000; // Default 2000ms ignore window (allows AEC filter plenty of time to converge)
+    aecAttenuation = 55; // Default 55% attenuation during voice playback
+    aecCutoff = 3000; // Default 3000 cutoff (comfortably above residual speaker bleed, easily triggered by loud voice/tap)
+    aecIgnore = 1000; // Default 1000ms ignore window (allows Speex AEC filter to fully converge)
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
     alarmEnabled = false;
     alarmHour = 7;

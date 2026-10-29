@@ -104,17 +104,6 @@ The firmware includes a robust serial CLI for debugging and diagnostics. Send th
 
 ---
 
-## 🧠 Edge Impulse (Custom Wake Words)
-
-This project supports training your own wake words using Edge Impulse. 
-If you want to gather audio samples directly from the device's specific microphone:
-1. Go to the Web UI -> Diagnostics Tab.
-2. Click **Reboot to Edge Impulse Data Collection**.
-3. Open your PC terminal and run `edge-impulse-data-forwarder`.
-4. The ESP32 will stream raw I2S audio over serial directly to your Edge Impulse project.
-
----
-
 ## 📄 License
 
 This project is licensed under the **GNU General Public License v3.0** (GPLv3) — see the [LICENSE](LICENSE) file for the full text.
