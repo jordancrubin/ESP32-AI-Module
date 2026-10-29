@@ -38,6 +38,8 @@ extern uint32_t timerDurationMs;
 extern void getAudioLevels(int* l, int* r);
 extern bool enableBME680;
 extern float g_currentVocKOhms;
+extern float g_currentIndoorTemp;
+extern float g_currentIndoorHum;
 extern int vocAlarmThreshold;
 extern bool clockFormat12h;
 static String g_lastVoice = "alloy";
@@ -288,7 +290,7 @@ struct ClockWidgets {
     int cached_alarm_h = -1;
     int cached_alarm_m = -1;
     bool cached_alarm_en = false;
-    char cached_weather[64] = "";
+    char cached_weather[96] = "";
 };
 
 static ClockWidgets g_clockWidgets;
@@ -620,15 +622,27 @@ static void clock_update_cb(lv_timer_t * t) {
         }
     }
 
-    // Update Weather Label if it exists
-    if (g_clockWidgets.weatherLabel && static_dm) {
-        if (strlen(static_dm->_weatherTemp) > 0) {
-            char w_buf[64];
-            snprintf(w_buf, sizeof(w_buf), "%s %s", static_dm->_weatherTemp, static_dm->_weatherDesc);
-            if (strcmp(w_buf, g_clockWidgets.cached_weather) != 0) {
-                strlcpy(g_clockWidgets.cached_weather, w_buf, sizeof(g_clockWidgets.cached_weather));
-                lv_label_set_text(g_clockWidgets.weatherLabel, w_buf);
-            }
+    // Update Environmental & Weather Label (Bottom Left)
+    if (g_clockWidgets.weatherLabel) {
+        char env_buf[96] = "";
+        bool hasIndoor = (enableBME680 && g_currentIndoorTemp > 0.0f);
+        bool hasOutdoor = (static_dm && strlen(static_dm->_weatherTemp) > 0);
+
+        if (hasIndoor && hasOutdoor) {
+            snprintf(env_buf, sizeof(env_buf), "In: %.0fC %.0f%%\n%s %s", 
+                     g_currentIndoorTemp, g_currentIndoorHum, 
+                     static_dm->_weatherTemp, static_dm->_weatherDesc);
+        } else if (hasIndoor) {
+            snprintf(env_buf, sizeof(env_buf), "In: %.0fC %.0f%%", 
+                     g_currentIndoorTemp, g_currentIndoorHum);
+        } else if (hasOutdoor) {
+            snprintf(env_buf, sizeof(env_buf), "%s %s", 
+                     static_dm->_weatherTemp, static_dm->_weatherDesc);
+        }
+
+        if (strcmp(env_buf, g_clockWidgets.cached_weather) != 0) {
+            strlcpy(g_clockWidgets.cached_weather, env_buf, sizeof(g_clockWidgets.cached_weather));
+            lv_label_set_text(g_clockWidgets.weatherLabel, env_buf);
         }
     }
 
@@ -872,16 +886,13 @@ static void showClockScreen() {
     lv_obj_center(g_clockWidgets.alarmLabel);
     lv_obj_add_flag(g_clockWidgets.alarmCont, LV_OBJ_FLAG_HIDDEN);
 
-    // Weather Label (Bottom Left)
-    if (static_dm && strlen(static_dm->_weatherTemp) > 0) {
-        g_clockWidgets.weatherLabel = lv_label_create(lv_scr_act());
-        lv_label_set_text_fmt(g_clockWidgets.weatherLabel, "%s %s", static_dm->_weatherTemp, static_dm->_weatherDesc);
-        lv_obj_set_style_text_font(g_clockWidgets.weatherLabel, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(g_clockWidgets.weatherLabel, lv_color_make(200, 200, 200), 0);
-        lv_obj_align(g_clockWidgets.weatherLabel, LV_ALIGN_BOTTOM_LEFT, 10, -10);
-    } else {
-        g_clockWidgets.weatherLabel = nullptr;
-    }
+    // Environmental & Weather Label (Bottom Left)
+    g_clockWidgets.weatherLabel = lv_label_create(lv_scr_act());
+    lv_label_set_text(g_clockWidgets.weatherLabel, "");
+    lv_obj_set_style_text_font(g_clockWidgets.weatherLabel, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_clockWidgets.weatherLabel, lv_color_make(180, 180, 180), 0);
+    lv_obj_align(g_clockWidgets.weatherLabel, LV_ALIGN_BOTTOM_LEFT, 10, -6);
+    lv_obj_add_flag(g_clockWidgets.weatherLabel, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     // VOC / Air Quality Indicator (Bottom Center)
     if (enableBME680) {
@@ -2745,7 +2756,7 @@ void showHelpScreen() {
         "- Volume [0-10]: Adjust audio level\n"
         "- Brightness [0-10]: Adjust screen backlight\n"
         "- Clock Color: Set to Red, Green, or White\n"
-        "- Air Quality: Report VOC air quality\n"
+        "- Air Quality: Report VOC, temp & humidity\n"
         "- End Conversation: Return to standby\n"
         "- Config Mode: Open Web UI\n"
         "- Calibrate Touchscreen: Fix touch alignment\n"

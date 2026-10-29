@@ -20,6 +20,8 @@ extern void onVolumeChange(int value);
 extern bool enableBME680;
 extern bool bmeReady;
 extern float g_currentVocKOhms;
+extern float g_currentIndoorTemp;
+extern float g_currentIndoorHum;
 extern int vocAlarmThreshold;
 extern Adafruit_BME680 bme;
 
@@ -385,13 +387,15 @@ CommandResult CommandProcessor::processCommand(const String& text) {
             result.response = "The air quality sensor is not enabled or not detected.";
         } else {
             float voc = g_currentVocKOhms;
-            float hum = 0.0f;
+            float hum = g_currentIndoorHum;
+            float temp = g_currentIndoorTemp;
             if (bme.performReading()) {
                 voc = bme.gas_resistance / 1000.0f;
                 g_currentVocKOhms = voc;
                 hum = bme.humidity;
-            } else {
-                hum = bme.humidity;
+                g_currentIndoorHum = hum;
+                temp = bme.temperature;
+                g_currentIndoorTemp = temp;
             }
 
             if (voc <= 0.0f) {
@@ -412,13 +416,13 @@ CommandResult CommandProcessor::processCommand(const String& text) {
 
                 int vocInt = (int)(voc + 0.5f);
                 int humInt = (int)(hum + 0.5f);
+                int tempC = (int)(temp + 0.5f);
+                int tempF = (int)((temp * 1.8f) + 32.5f);
 
                 String msg = "The indoor air quality is " + quality + 
-                             ", with a gas resistance of " + String(vocInt) + " kilohms";
-                if (humInt > 0) {
-                    msg += " and " + String(humInt) + " percent relative humidity.";
-                } else {
-                    msg += ".";
+                             ", with a gas resistance of " + String(vocInt) + " kilohms.";
+                if (tempC > 0) {
+                    msg += " The indoor temperature is " + String(tempF) + " degrees Fahrenheit, or " + String(tempC) + " degrees Celsius, with " + String(humInt) + " percent humidity.";
                 }
                 if (quality == "poor") {
                     msg += " Contaminant or VOC levels are elevated.";
@@ -428,8 +432,38 @@ CommandResult CommandProcessor::processCommand(const String& text) {
         }
         result.handled = true;
     }
+    else if (lowerText.indexOf("indoor temperature") != -1 || lowerText.indexOf("temperature inside") != -1 ||
+             lowerText.indexOf("indoor humidity") != -1 || lowerText.indexOf("humidity inside") != -1 ||
+             lowerText.indexOf("what's the indoor") != -1 || lowerText.indexOf("what is the indoor") != -1 ||
+             ((lowerText.indexOf("humidity") != -1 || lowerText.indexOf("temperature") != -1) && 
+              (lowerText.indexOf("inside") != -1 || lowerText.indexOf("indoor") != -1 || lowerText.indexOf("room") != -1)) ||
+             trimmedClean == "indoor temp" || trimmedClean == "indoor humidity") {
+        if (!enableBME680 || !bmeReady) {
+            result.response = "The indoor environmental sensor is not enabled or not detected.";
+        } else {
+            float hum = g_currentIndoorHum;
+            float temp = g_currentIndoorTemp;
+            if (bme.performReading()) {
+                g_currentVocKOhms = bme.gas_resistance / 1000.0f;
+                hum = bme.humidity;
+                g_currentIndoorHum = hum;
+                temp = bme.temperature;
+                g_currentIndoorTemp = temp;
+            }
+            if (temp <= 0.0f && hum <= 0.0f) {
+                result.response = "The sensor is currently warming up. Please try again in a moment.";
+            } else {
+                int tempC = (int)(temp + 0.5f);
+                int tempF = (int)((temp * 1.8f) + 32.5f);
+                int humInt = (int)(hum + 0.5f);
+                result.response = "The indoor temperature is " + String(tempF) + " degrees Fahrenheit, or " + 
+                                  String(tempC) + " degrees Celsius, with " + String(humInt) + " percent humidity.";
+            }
+        }
+        result.handled = true;
+    }
     else if (lowerText.indexOf("what are your commands") != -1 || lowerText.indexOf("list your commands") != -1 || lowerText == "help" || lowerText == "help." || lowerText == "help!") {
-        result.response = "Here are the local commands I understand. You can tell me to raise, lower, or set the volume or brightness to a number between zero and ten. You can ask me to change the clock color to red, green, or white. You can say 'end conversation' to return to standby, or ask me to report the air quality. You can ask me to calibrate the touchscreen, or go into configuration mode. You can say, 'test A E C', to test the acoustic echo cancellation. You can also say, 'system reboot', to restart the device.";
+        result.response = "Here are the local commands I understand. You can tell me to raise, lower, or set the volume or brightness to a number between zero and ten. You can ask me to change the clock color to red, green, or white. You can say 'end conversation' to return to standby, or ask me to report the air quality or indoor temperature. You can ask me to calibrate the touchscreen, or go into configuration mode. You can say, 'test A E C', to test the acoustic echo cancellation. You can also say, 'system reboot', to restart the device.";
         result.handled = true;
         result.showHelp = true;
     }

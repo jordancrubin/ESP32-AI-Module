@@ -42,6 +42,8 @@ float wakeThreshold = 0.5;
 float ttsSpeed = 0.8;
 
 float g_currentVocKOhms = 0.0;
+float g_currentIndoorTemp = 0.0;
+float g_currentIndoorHum = 0.0;
 int vocAlarmThreshold = 25;
 unsigned long lastVocAlarmTime = 0;
 
@@ -1008,7 +1010,8 @@ void handleWebRoot() {
     html += "<table class='cmd-table'>";
     html += "<thead><tr><th style='width:45%;'>Voice Command</th><th>Description</th></tr></thead><tbody>";
     html += "<tr><td><span class='cmd-badge'>Enter configuration mode</span><div class='cmd-alt'>Also: &quot;config mode&quot;, &quot;setup mode&quot;, &quot;web config&quot;</div></td><td>Launches this web configuration server and displays IP &amp; hostname on screen.</td></tr>";
-    html += "<tr><td><span class='cmd-badge'>Report the air quality</span><div class='cmd-alt'>Also: &quot;what is the air quality&quot;, &quot;check air quality&quot;, &quot;air quality&quot;</div></td><td>Reads the BME680 sensor and reports indoor air status (Good, Moderate, or Poor), gas resistance, and humidity.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Report the air quality</span><div class='cmd-alt'>Also: &quot;what is the air quality&quot;, &quot;check air quality&quot;, &quot;air quality&quot;</div></td><td>Reads the BME680 sensor and reports indoor air status (Good, Moderate, or Poor), gas resistance, temperature, and humidity.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>Indoor temperature</span><div class='cmd-alt'>Also: &quot;what is the indoor temperature&quot;, &quot;temperature inside&quot;, &quot;indoor humidity&quot;</div></td><td>Reports current indoor temperature (&deg;F / &deg;C) and relative humidity.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>End conversation</span><div class='cmd-alt'>Also: &quot;end the conversation&quot;</div></td><td>Immediately ends the conversation session, clears history, and returns to standby.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>Calibrate the touchscreen</span><div class='cmd-alt'>Also: &quot;recalibrate touchscreen&quot;</div></td><td>Starts 4-point on-screen touch alignment calibration.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>System reboot</span><div class='cmd-alt'>Also: &quot;reboot system&quot;, &quot;reboot the system&quot;</div></td><td>Restarts the ESP32 module.</td></tr>";
@@ -3092,6 +3095,11 @@ void setup() {
           bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
           bme.setGasHeater(320, 150);
           bmeReady = true;
+          if (bme.performReading()) {
+              g_currentVocKOhms = bme.gas_resistance / 1000.0f;
+              g_currentIndoorTemp = bme.temperature;
+              g_currentIndoorHum = bme.humidity;
+          }
       } else {
           Serial.println("[BME680] ERROR: Sensor failed to respond at 0x77 or 0x76!");
           bmeReady = false;
@@ -3563,8 +3571,10 @@ void loop() {
       lastBmeRead = millis();
       if (bme.performReading()) {
           g_currentVocKOhms = bme.gas_resistance / 1000.0;
+          g_currentIndoorTemp = bme.temperature;
+          g_currentIndoorHum = bme.humidity;
           Serial.printf("[BME680] Gas: %.1f kOhms | Temp: %.1f C | Hum: %.1f%% | Pres: %.1f hPa\n", 
-                        g_currentVocKOhms, bme.temperature, bme.humidity, bme.pressure / 100.0);
+                        g_currentVocKOhms, g_currentIndoorTemp, g_currentIndoorHum, bme.pressure / 100.0);
           
           // Voice Alarm Logic
           if (g_currentVocKOhms > 0 && g_currentVocKOhms < vocAlarmThreshold) {
