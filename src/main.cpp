@@ -2335,6 +2335,7 @@ void handleSerialCommands() {
         if (inputBuffer == "/help") {
           Serial.println("\n--- Available Commands ---");
           Serial.println("/settings       - Show current configuration");
+          Serial.println("/config         - Enter Web Configuration mode (start web server)");
           Serial.println("/calibrate      - Start touch calibration");
           Serial.println("/reset_cal      - Reset touch calibration");
           Serial.println("/say <text>     - Speak text immediately");
@@ -2415,6 +2416,14 @@ void handleSerialCommands() {
           static bool inv = false;
           inv = !inv;
           setAecPhase(inv);
+        } else if (inputBuffer == "/config" || inputBuffer == "/setup") {
+          onSetupMode(true);
+          display.showWebConfig(WiFi.localIP().toString(), "aiesp.local");
+          Serial.printf("Entered Configuration Mode. Web UI: http://%s or http://aiesp.local\n", WiFi.localIP().toString().c_str());
+        } else if (inputBuffer == "/exit_config") {
+          onSetupMode(false);
+          display.showMainUI(ttsVoice, settings.volume, voiceOptions);
+          Serial.println("Exited Configuration Mode.");
         } else if (inputBuffer == "/calibrate") {
           Serial.println("Starting manual touch calibration...");
           display.calibrateTouch(settings.calibration);

@@ -335,7 +335,11 @@ CommandResult CommandProcessor::processCommand(const String& text) {
         result.handled = true;
         result.calibrateTouch = true;
     }
-    else if (lowerText.indexOf("go into configuration mode") != -1 || lowerText.indexOf("configuration mode") != -1) {
+    else if (lowerText.indexOf("enter configuration mode") != -1 || lowerText.indexOf("go into configuration mode") != -1 || 
+             lowerText.indexOf("configuration mode") != -1 || lowerText.indexOf("enter config mode") != -1 || 
+             lowerText.indexOf("go into config mode") != -1 || lowerText.indexOf("config mode") != -1 || 
+             lowerText.indexOf("enter setup mode") != -1 || lowerText.indexOf("setup mode") != -1 || 
+             lowerText.indexOf("web config") != -1) {
         result.response = "Entering configuration mode, you must manually exit.";
         result.handled = true;
         result.enterConfigMode = true;
