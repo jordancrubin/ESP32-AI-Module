@@ -826,82 +826,102 @@ bool SpeechManager::detectWakeWord(float threshold) {
   bool isAudioPlaying = speaker.isRunning() || s_interrupt_mode;
 
   static bool s_was_audio_playing = false;
+  static uint32_t s_barge_window = 0;
+  static int s_active_density = 0;
+
   if (!isAudioPlaying) {
     s_was_audio_playing = false;
+    s_barge_window = 0;
+    s_active_density = 0;
   }
 
   if (isAudioPlaying) {
     // Fast path during playback: ONLY drain ringbuffer to check amplitude for
     // barge-in. Completely bypass accumulator math, FFT filterbank, and neural
     // network inference!
+    if (!s_was_audio_playing) {
+      s_barge_window = 0;
+      s_active_density = 0;
+      s_was_audio_playing = true;
+    }
+
+    int effective_atten = getEffectiveAecAttenuation();
+    int32_t effective_cutoff = getEffectiveAecCutoff();
+    int32_t tap_eval_thresh = (effective_cutoff * 3) / 2;
+    if (tap_eval_thresh < 4500) tap_eval_thresh = 4500;
+
+    bool barge_triggered = false;
     int32_t burst_max_level = 0;
+    int32_t max_eval_level = 0;
+
     if (s_processed_ringbuf) {
       size_t bytes_fetched = 0;
       int16_t *processed_buff = nullptr;
       while ((processed_buff = (int16_t *)xRingbufferReceive(
                   s_processed_ringbuf, &bytes_fetched, 0)) != nullptr) {
         int samplesRead = bytes_fetched / sizeof(int16_t);
+        int32_t frame_max = 0;
         for (int i = 0; i < samplesRead; i++) {
           int32_t abs_raw = abs(processed_buff[i]);
-          if (abs_raw > burst_max_level)
-            burst_max_level = abs_raw;
+          if (abs_raw > frame_max)
+            frame_max = abs_raw;
         }
         vRingbufferReturnItem(s_processed_ringbuf, processed_buff);
+
+        int32_t frame_eval = (frame_max * (100 - effective_atten)) / 100;
+        if (frame_max > burst_max_level) burst_max_level = frame_max;
+        if (frame_eval > max_eval_level) max_eval_level = frame_eval;
+
+        if (settings.enableInterrupt && effective_cutoff > 0 && !barge_triggered) {
+          // 1. Physical microphone tap fast-path (requires true hardware clipping/saturation: raw >= 18000)
+          if (frame_max >= 18000 && frame_eval >= tap_eval_thresh) {
+            s_barge_window = 0;
+            s_active_density = 0;
+            Serial.printf("\n>>> TAP BARGE-IN DETECTED: raw=%d, eval=%d (eff_att:%d%%) > thresh=%d (eff_cut=%d, vol=%d/21) <<<\n",
+                          frame_max, frame_eval, effective_atten, tap_eval_thresh, effective_cutoff, settings.volume);
+            barge_triggered = true;
+          }
+
+          // 2. Rolling Density Voice Barge-In Filter
+          // 32-frame sliding window (~512 ms at 16 ms/frame).
+          // Requires ~65% active speech density (>= 20 active frames out of 32) to trigger,
+          // filtering out short transient spikes like coughs (3-6 frames), throat clears, or door clicks.
+          bool frame_active = (frame_eval > effective_cutoff);
+          s_barge_window = (s_barge_window << 1) | (frame_active ? 1 : 0);
+          int active_count = __builtin_popcount(s_barge_window);
+          s_active_density = active_count;
+
+          if (active_count >= 20) {
+            s_barge_window = 0;
+            s_active_density = 0;
+            Serial.printf("\n>>> VOICE BARGE-IN DETECTED (Density Filter): %d/32 active frames (~65%% over 512ms) | raw=%d, eval=%d > eff_cut=%d (vol=%d/21) <<<\n",
+                          active_count, frame_max, frame_eval, effective_cutoff, settings.volume);
+            barge_triggered = true;
+          }
+        }
       }
     }
+
     s_mww_audio_accum_len = 0; // Drop all accumulated audio so neural net NEVER
                                // runs on playback residue!
 
-    // If interrupt mode is enabled, evaluate barge-in with volume-scaled dynamic parameters
-    int effective_atten = getEffectiveAecAttenuation();
-    int32_t effective_cutoff = getEffectiveAecCutoff();
-
-    int32_t eval_level = (burst_max_level * (100 - effective_atten)) / 100;
     s_last_burst_max_level = burst_max_level;
-    s_last_eval_level = eval_level;
-    static int s_loud_voice_frames = 0;
-    if (!s_was_audio_playing) {
-      s_loud_voice_frames = 0;
-      s_was_audio_playing = true;
-    }
+    s_last_eval_level = max_eval_level;
 
     // Live monitor during playback when elevated audio or speech is detected
     static unsigned long s_last_barge_log = 0;
     if (burst_max_level > 800 && (millis() - s_last_barge_log > 300)) {
       s_last_barge_log = millis();
-      Serial.printf("[Barge-In Mon] raw=%d, eval=%d | eff_cut=%d (base:%d), eff_att=%d%% (base:%d%%), vol=%d/21, int_en=%s, streak=%d\n",
-                    burst_max_level, eval_level, effective_cutoff, s_aec_cutoff,
+      Serial.printf("[Barge-In Mon] raw=%d, eval=%d | eff_cut=%d (base:%d), eff_att=%d%% (base:%d%%), vol=%d/21, int_en=%s, density=%d/32\n",
+                    burst_max_level, max_eval_level, effective_cutoff, s_aec_cutoff,
                     effective_atten, s_aec_attenuation, settings.volume,
-                    settings.enableInterrupt ? "ON" : "OFF", s_loud_voice_frames);
+                    settings.enableInterrupt ? "ON" : "OFF", s_active_density);
     }
 
-    if (settings.enableInterrupt && effective_cutoff > 0) {
-      // 1. Physical microphone tap fast-path (requires true hardware clipping/saturation: raw >= 18000)
-      // Tap evaluation threshold scales with volume/cutoff to remain immune to loud speaker bursts
-      int32_t tap_eval_thresh = (effective_cutoff * 3) / 2;
-      if (tap_eval_thresh < 4500) tap_eval_thresh = 4500;
-      if (burst_max_level >= 18000 && eval_level >= tap_eval_thresh) {
-        s_loud_voice_frames = 0;
-        Serial.printf("\n>>> TAP BARGE-IN DETECTED: raw=%d, eval=%d (eff_att:%d%%) > thresh=%d (eff_cut=%d, vol=%d/21) <<<\n",
-                      burst_max_level, eval_level, effective_atten, tap_eval_thresh, effective_cutoff, settings.volume);
-        return true;
-      }
-
-      // 2. Sustained voice barge-in (requires 3 consecutive frames ~50ms above effective cutoff to reject speaker transient bursts)
-      if (eval_level > effective_cutoff) {
-        s_loud_voice_frames++;
-        if (s_loud_voice_frames >= 3) {
-          s_loud_voice_frames = 0;
-          Serial.printf("\n>>> VOICE BARGE-IN DETECTED: raw=%d, eval=%d (eff_att:%d%%) > eff_cut=%d (vol=%d/21) <<<\n",
-                        burst_max_level, eval_level, effective_atten, effective_cutoff, settings.volume);
-          return true;
-        }
-      } else {
-        if (s_loud_voice_frames > 0) s_loud_voice_frames--;
-      }
-    } else {
-      s_loud_voice_frames = 0;
+    if (barge_triggered) {
+      return true;
     }
+
     return false; // Return immediately! Core 1 stays at ~0% load while audio plays!
   }
 
