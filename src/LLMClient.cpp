@@ -333,32 +333,44 @@ static bool postAddMemory(const String& baseUrl, const String& apiKey, const Str
     if (memoryContent.length() == 0) return false;
     String addUrl = baseUrl + "/api/v1/memories/add";
     String resolved = netMgr.resolveHost(addUrl);
-    if (resolved == "") return false;
+    if (resolved == "") {
+        Serial.println("[Memory] Error: Could not resolve URL: " + addUrl);
+        return false;
+    }
 
     WiFiClient client;
     HTTPClient http;
-    client.setTimeout(6000);
-    http.setTimeout(6000);
+    client.setTimeout(8000);
+    http.setTimeout(8000);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-    if (!http.begin(client, resolved)) return false;
+    if (!http.begin(client, resolved)) {
+        Serial.println("[Memory] Error: http.begin failed for: " + resolved);
+        return false;
+    }
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Authorization", "Bearer " + apiKey);
 
     JsonDocument doc;
     doc["content"] = memoryContent;
+    doc["type"] = "user";
     String reqBody;
     serializeJson(doc, reqBody);
 
+    Serial.println("[Memory] Sending memory to Open-WebUI: " + reqBody);
     int code = http.POST(reqBody);
+    String resp = "";
+    if (code > 0) {
+        resp = http.getString();
+    }
     http.end();
 
     if (code == 200 || code == 201) {
-        Serial.println("[Memory] Successfully saved memory to Open-WebUI: " + memoryContent);
+        Serial.println("[Memory] Successfully saved memory to Open-WebUI. Response: " + resp);
         s_lastMemoryFetch = 0; // Invalidate cache so next retrieval includes this new memory
         return true;
     } else {
-        Serial.printf("[Memory] Failed to add memory. HTTP code: %d\n", code);
+        Serial.printf("[Memory] Failed to add memory. HTTP code: %d, Response: %s\n", code, resp.c_str());
         return false;
     }
 }
@@ -368,40 +380,142 @@ static String extractMemoryFact(const String& prompt) {
     lower.toLowerCase();
     lower.trim();
 
+    // 1. Check for suffix: "... to memory", "... to my memory", "... in memory", "... in your memory"
+    const char* suffixes[] = {
+        " to my memory",
+        " to your memory",
+        " to memory",
+        " in my memory",
+        " in your memory",
+        " in memory",
+        " into my memory",
+        " into your memory",
+        " into memory"
+    };
+
+    for (const char* sfx : suffixes) {
+        if (lower.endsWith(sfx)) {
+            String sub = prompt.substring(0, prompt.length() - strlen(sfx));
+            String subLower = sub;
+            subLower.toLowerCase();
+            subLower.trim();
+
+            const char* startPfxs[] = {
+                "can you please add that ",
+                "can you please add ",
+                "can you add that ",
+                "can you add ",
+                "could you please add that ",
+                "could you please add ",
+                "could you add that ",
+                "could you add ",
+                "please add that ",
+                "please add ",
+                "i want you to add that ",
+                "i want you to add ",
+                "add that ",
+                "add ",
+                "save that ",
+                "save ",
+                "store that ",
+                "store ",
+                "put that ",
+                "put ",
+                "keep that ",
+                "keep "
+            };
+
+            for (const char* spfx : startPfxs) {
+                if (subLower.startsWith(spfx)) {
+                    String fact = sub.substring(strlen(spfx));
+                    fact.trim();
+                    while (fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
+                        fact.remove(fact.length() - 1);
+                        fact.trim();
+                    }
+                    if (fact.length() > 0) return fact;
+                }
+            }
+
+            // Fallback for suffix: if user said "<fact> to memory" without leading "add"
+            String fact = sub;
+            fact.trim();
+            while (fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
+                fact.remove(fact.length() - 1);
+                fact.trim();
+            }
+            if (fact.length() > 0) return fact;
+        }
+    }
+
+    // 2. Check for prefixes: "remember ...", "add to memory ...", "save to memory ..."
     const char* prefixes[] = {
+        "can you please remember that ",
+        "can you please remember this: ",
+        "can you please remember this ",
+        "can you please remember to ",
+        "can you please remember ",
+        "can you remember that ",
+        "can you remember this: ",
+        "can you remember this ",
+        "can you remember to ",
+        "can you remember ",
+        "could you remember that ",
+        "could you remember ",
+        "i want you to remember that ",
+        "i want you to remember ",
         "please remember that ",
         "please remember this: ",
         "please remember this ",
         "please remember to ",
         "please remember ",
-        "can you please remember that ",
-        "can you remember that ",
         "remember that ",
         "remember this: ",
         "remember this ",
         "remember to ",
+        "remember, ",
         "remember ",
-        "add to memory that ",
         "add to my memory that ",
-        "add to memory: ",
         "add to my memory: ",
-        "add to memory ",
         "add to my memory ",
+        "add to your memory that ",
+        "add to your memory: ",
+        "add to your memory ",
+        "add to memory that ",
+        "add to memory: ",
+        "add to memory ",
         "add this to memory: ",
         "add this to your memory: ",
+        "add this to my memory: ",
         "add this to memory ",
         "add this to your memory ",
-        "save to memory that ",
+        "add this to my memory ",
         "save to my memory that ",
-        "save to memory: ",
         "save to my memory: ",
-        "save to memory ",
         "save to my memory ",
+        "save to your memory that ",
+        "save to your memory: ",
+        "save to your memory ",
+        "save to memory that ",
+        "save to memory: ",
+        "save to memory ",
         "save this to memory: ",
         "save this to your memory: ",
         "save this to memory ",
         "save this to your memory ",
-        "note that "
+        "add a memory that ",
+        "add a memory: ",
+        "add a memory ",
+        "commit to memory that ",
+        "commit to memory ",
+        "note that ",
+        "take note that ",
+        "take a note that ",
+        "make a note that ",
+        "make a note of ",
+        "keep in mind that ",
+        "dont forget that ",
+        "don't forget that "
     };
 
     for (const char* pfx : prefixes) {
@@ -416,6 +530,21 @@ static String extractMemoryFact(const String& prompt) {
         }
     }
     return "";
+}
+
+bool LLMClient::addMemory(const String& memoryContent, WiFiManager& netMgr) {
+    String owBaseUrl = extractOpenWebUIBaseUrl(_apiUrl);
+    if (owBaseUrl.length() == 0) {
+        Serial.println("[Memory] Cannot add memory: Open-WebUI base URL could not be derived from " + _apiUrl);
+        return false;
+    }
+    return postAddMemory(owBaseUrl, _apiKey, memoryContent, netMgr);
+}
+
+String LLMClient::getMemories(WiFiManager& netMgr) {
+    String owBaseUrl = extractOpenWebUIBaseUrl(_apiUrl);
+    if (owBaseUrl.length() == 0) return "Error: Open-WebUI base URL could not be derived from " + _apiUrl;
+    return fetchMemoryContext(owBaseUrl, _apiKey, netMgr);
 }
 
 String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
@@ -468,15 +597,18 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
                 String confirmMsg = "I have saved that to your memory: " + memoryFact + ".";
                 display.showResponse(confirmMsg);
                 lv_timer_handler();
-                JsonObject uMsg = _history.add<JsonObject>();
-                uMsg["role"] = "user";
-                uMsg["content"] = prompt;
                 JsonObject aMsg = _history.add<JsonObject>();
                 aMsg["role"] = "assistant";
                 aMsg["content"] = confirmMsg;
                 return confirmMsg;
             } else {
-                Serial.println("[Memory] Direct save failed, falling back to chat completion.");
+                String errMsg = "I was unable to save that to your Open-WebUI memory. Please check your API key or permissions.";
+                display.showResponse(errMsg);
+                lv_timer_handler();
+                JsonObject aMsg = _history.add<JsonObject>();
+                aMsg["role"] = "assistant";
+                aMsg["content"] = errMsg;
+                return errMsg;
             }
         }
     }

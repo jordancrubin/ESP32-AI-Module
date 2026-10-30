@@ -2452,11 +2452,30 @@ void handleSerialCommands() {
           Serial.println("/debug_aec      - Toggle AEC debug stats");
           Serial.println("/aec_delay <n>  - Set AEC delay samples");
           Serial.println("/aec_gain <n>   - Set AEC gain multiplier");
-          Serial.println("/aec_invert     - Toggle AEC phase inversion");
+          Serial.println("/test_mem <text>- Test saving a fact to Open-WebUI memory");
+          Serial.println("/get_mem        - Fetch and display all saved memories from Open-WebUI");
           Serial.println("<text>          - Send prompt to AI");
           Serial.println("/factory_reset  - Erase all settings and reboot");
           Serial.println("/reboot         - Restart the device");
           Serial.println("--------------------------\n");
+        } else if (inputBuffer.startsWith("/test_mem ")) {
+          String fact = inputBuffer.substring(10);
+          fact.trim();
+          Serial.println("Testing memory add to Open-WebUI: \"" + fact + "\"");
+          if (llm.addMemory(fact, network)) {
+            Serial.println("Result: SUCCESS (Memory was written to Open-WebUI database)");
+          } else {
+            Serial.println("Result: FAILED (Check response and Open-WebUI logs above)");
+          }
+        } else if (inputBuffer == "/get_mem") {
+          Serial.println("Fetching user memories from Open-WebUI...");
+          String mems = llm.getMemories(network);
+          if (mems.length() > 0) {
+            Serial.println("--- Current Open-WebUI Memories ---");
+            Serial.println(mems);
+          } else {
+            Serial.println("No memories returned (empty or not supported).");
+          }
         } else if (inputBuffer == "/settings") {
           Serial.println("\n--- Current Settings (v" FIRMWARE_VERSION ") ---");
           Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());

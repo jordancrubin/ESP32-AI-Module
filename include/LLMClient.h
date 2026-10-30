@@ -17,6 +17,8 @@ public:
     void setSystemPrompt(const char* prompt);
     bool downloadTTS(String text, WiFiManager& netMgr, const char* filename, String voice = "alloy", ProgressCallback cb = nullptr);
     String transcribeAudio(uint8_t* audioData, size_t size, WiFiManager& netMgr);
+    bool addMemory(const String& memoryContent, WiFiManager& netMgr);
+    String getMemories(WiFiManager& netMgr);
 
 private:
     String getTtsBaseUrl();
