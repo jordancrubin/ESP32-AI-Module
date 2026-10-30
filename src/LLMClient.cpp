@@ -269,6 +269,66 @@ static String fetchWebSearchContext(const String& baseUrl, const String& apiKey,
     return (count > 0) ? result : "";
 }
 
+static String s_cachedMemoryContext = "";
+static unsigned long s_lastMemoryFetch = 0;
+
+static String fetchMemoryContext(const String& baseUrl, const String& apiKey, WiFiManager& netMgr) {
+    String memUrl = baseUrl + "/api/v1/memories/";
+    String resolved = netMgr.resolveHost(memUrl);
+    if (resolved == "") return "";
+
+    WiFiClient client;
+    HTTPClient http;
+    client.setTimeout(4000);
+    http.setTimeout(4000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    if (!http.begin(client, resolved)) return "";
+    http.addHeader("Authorization", "Bearer " + apiKey);
+    int code = http.GET();
+    if (code != 200) {
+        http.end();
+        return "";
+    }
+
+    JsonDocument filter;
+    filter[0]["content"] = true;
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+    http.end();
+    if (err || !doc.is<JsonArray>()) return "";
+
+    JsonArray items = doc.as<JsonArray>();
+    if (items.size() == 0) return "";
+
+    String result = "[USER MEMORIES & PERSONAL CONTEXT:\n";
+    int count = 0;
+    for (JsonObject mem : items) {
+        const char* content = mem["content"] | "";
+        if (strlen(content) == 0) continue;
+        result += "- ";
+        result += content;
+        result += "\n";
+        count++;
+        if (count >= 25) break; // Limit to 25 facts to keep context clean
+    }
+    result += "]\nUse the above user memories and personal facts to answer conversationally.";
+    return (count > 0) ? result : "";
+}
+
+static String getMemoryContext(const String& baseUrl, const String& apiKey, WiFiManager& netMgr) {
+    if (s_cachedMemoryContext.length() > 0 && (millis() - s_lastMemoryFetch < 60000)) {
+        return s_cachedMemoryContext;
+    }
+    String fetched = fetchMemoryContext(baseUrl, apiKey, netMgr);
+    if (fetched.length() > 0) {
+        s_cachedMemoryContext = fetched;
+        s_lastMemoryFetch = millis();
+    }
+    return s_cachedMemoryContext;
+}
+
 String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     if (!netMgr.isConnected()) return "Error: WiFi not connected";
 
@@ -368,6 +428,16 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
         }
     }
 
+    // 3. User Memories Pre-injection
+    if (settings.enableMemory && owBaseUrl.length() > 0) {
+        if (settings.debugMode) Serial.println("Fetching user memories from OpenWebUI...");
+        String memContext = getMemoryContext(owBaseUrl, _apiKey, netMgr);
+        if (memContext.length() > 0) {
+            contextInjection += "\n\n" + memContext;
+            if (settings.debugMode) Serial.println("Injected user memory context.");
+        }
+    }
+
     // Attach pre-injected context to user message for this request
     if (contextInjection.length() > 0) {
         userMsg["content"] = prompt + contextInjection;
@@ -383,7 +453,7 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     doc["chat_id"] = "";
     doc["session_id"] = "";
 
-    // 3. Attach OpenWebUI Knowledge Collection (RAG) if configured
+    // Attach OpenWebUI Knowledge Collection (RAG) if configured
     if (strlen(settings.knowledgeId) > 0) {
         JsonArray filesArr = doc["files"].to<JsonArray>();
         JsonObject fObj = filesArr.add<JsonObject>();
@@ -391,6 +461,16 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
         fObj["id"] = settings.knowledgeId;
         doc["metadata"]["files"] = doc["files"];
         if (settings.debugMode) Serial.printf("Attached Knowledge Collection ID: %s\n", settings.knowledgeId);
+    }
+
+    // OpenWebUI Feature Flags (unlocks server-side memory tool / web search if supported)
+    if (owBaseUrl.length() > 0) {
+        if (settings.enableMemory) {
+            doc["features"]["memory"] = true;
+        }
+        if (settings.enableWebSearch) {
+            doc["features"]["web_search"] = true;
+        }
     }
 
     // Serialize to PSRAM to save Internal RAM
@@ -910,6 +990,7 @@ String LLMClient::getVoices(WiFiManager& netMgr) {
 void LLMClient::clearHistory() {
     _historyDoc.clear();
     _history = _historyDoc.to<JsonArray>();
+    s_lastMemoryFetch = 0; // Force refresh of user memories on new session
     
     // Re-add system prompt if it exists
     if (_systemPrompt) {
