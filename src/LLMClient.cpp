@@ -329,6 +329,95 @@ static String getMemoryContext(const String& baseUrl, const String& apiKey, WiFi
     return s_cachedMemoryContext;
 }
 
+static bool postAddMemory(const String& baseUrl, const String& apiKey, const String& memoryContent, WiFiManager& netMgr) {
+    if (memoryContent.length() == 0) return false;
+    String addUrl = baseUrl + "/api/v1/memories/add";
+    String resolved = netMgr.resolveHost(addUrl);
+    if (resolved == "") return false;
+
+    WiFiClient client;
+    HTTPClient http;
+    client.setTimeout(6000);
+    http.setTimeout(6000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    if (!http.begin(client, resolved)) return false;
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", "Bearer " + apiKey);
+
+    JsonDocument doc;
+    doc["content"] = memoryContent;
+    String reqBody;
+    serializeJson(doc, reqBody);
+
+    int code = http.POST(reqBody);
+    http.end();
+
+    if (code == 200 || code == 201) {
+        Serial.println("[Memory] Successfully saved memory to Open-WebUI: " + memoryContent);
+        s_lastMemoryFetch = 0; // Invalidate cache so next retrieval includes this new memory
+        return true;
+    } else {
+        Serial.printf("[Memory] Failed to add memory. HTTP code: %d\n", code);
+        return false;
+    }
+}
+
+static String extractMemoryFact(const String& prompt) {
+    String lower = prompt;
+    lower.toLowerCase();
+    lower.trim();
+
+    const char* prefixes[] = {
+        "please remember that ",
+        "please remember this: ",
+        "please remember this ",
+        "please remember to ",
+        "please remember ",
+        "can you please remember that ",
+        "can you remember that ",
+        "remember that ",
+        "remember this: ",
+        "remember this ",
+        "remember to ",
+        "remember ",
+        "add to memory that ",
+        "add to my memory that ",
+        "add to memory: ",
+        "add to my memory: ",
+        "add to memory ",
+        "add to my memory ",
+        "add this to memory: ",
+        "add this to your memory: ",
+        "add this to memory ",
+        "add this to your memory ",
+        "save to memory that ",
+        "save to my memory that ",
+        "save to memory: ",
+        "save to my memory: ",
+        "save to memory ",
+        "save to my memory ",
+        "save this to memory: ",
+        "save this to your memory: ",
+        "save this to memory ",
+        "save this to your memory ",
+        "note that "
+    };
+
+    for (const char* pfx : prefixes) {
+        if (lower.startsWith(pfx)) {
+            String fact = prompt.substring(strlen(pfx));
+            fact.trim();
+            while (fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
+                fact.remove(fact.length() - 1);
+                fact.trim();
+            }
+            if (fact.length() > 0) return fact;
+        }
+    }
+    return "";
+}
+
 String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     if (!netMgr.isConnected()) return "Error: WiFi not connected";
 
@@ -366,10 +455,35 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
     userMsg["role"] = "user";
     userMsg["content"] = prompt;
 
+    String owBaseUrl = extractOpenWebUIBaseUrl(_apiUrl);
+
+    // Direct Memory Addition Interception (Instant Open-WebUI memory saving)
+    if (settings.enableMemory && owBaseUrl.length() > 0) {
+        String memoryFact = extractMemoryFact(prompt);
+        if (memoryFact.length() > 0) {
+            Serial.println("[Memory] Intercepted memory addition: \"" + memoryFact + "\"");
+            display.showStatus("Saving Memory...");
+            lv_timer_handler();
+            if (postAddMemory(owBaseUrl, _apiKey, memoryFact, netMgr)) {
+                String confirmMsg = "I have saved that to your memory: " + memoryFact + ".";
+                display.showResponse(confirmMsg);
+                lv_timer_handler();
+                JsonObject uMsg = _history.add<JsonObject>();
+                uMsg["role"] = "user";
+                uMsg["content"] = prompt;
+                JsonObject aMsg = _history.add<JsonObject>();
+                aMsg["role"] = "assistant";
+                aMsg["content"] = confirmMsg;
+                return confirmMsg;
+            } else {
+                Serial.println("[Memory] Direct save failed, falling back to chat completion.");
+            }
+        }
+    }
+
     String lowerPrompt = prompt;
     lowerPrompt.toLowerCase();
     String contextInjection = "";
-    String owBaseUrl = extractOpenWebUIBaseUrl(_apiUrl);
 
     // 1. Calendar Events Pre-injection
     if (settings.enableCalendar && owBaseUrl.length() > 0) {
@@ -463,11 +577,8 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
         if (settings.debugMode) Serial.printf("Attached Knowledge Collection ID: %s\n", settings.knowledgeId);
     }
 
-    // OpenWebUI Feature Flags (unlocks server-side memory tool / web search if supported)
+    // OpenWebUI Feature Flags
     if (owBaseUrl.length() > 0) {
-        if (settings.enableMemory) {
-            doc["features"]["memory"] = true;
-        }
         if (settings.enableWebSearch) {
             doc["features"]["web_search"] = true;
         }
@@ -504,6 +615,8 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
             full_response.reserve(2048); // Pre-allocate to prevent heap fragmentation
             
             String streamBuffer = "";
+            String toolCallName = "";
+            String toolCallArgs = "";
 
             while (http.connected() || stream->available()) {
                 if (stream->available()) {
@@ -530,9 +643,27 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
                                     JsonDocument chunkDoc;
                                     DeserializationError err = deserializeJson(chunkDoc, jsonStr);
                                     if (!err) {
+                                        // 1. Check for API error
+                                        if (!chunkDoc["error"].isNull()) {
+                                            const char* errM = chunkDoc["error"]["message"] | chunkDoc["error"]["detail"] | "API error";
+                                            full_response = "Error: " + String(errM);
+                                            break;
+                                        }
+
+                                        // 2. Extract content
                                         const char* content = chunkDoc["choices"][0]["delta"]["content"];
                                         if (!content) content = chunkDoc["message"]["content"];
                                         if (content) full_response += content;
+
+                                        // 3. Catch streamed tool_calls (fallback if model invokes a tool)
+                                        JsonArray tc = chunkDoc["choices"][0]["delta"]["tool_calls"];
+                                        if (!tc.isNull() && tc.size() > 0) {
+                                            JsonObject fn = tc[0]["function"];
+                                            const char* fnName = fn["name"];
+                                            if (fnName && strlen(fnName) > 0) toolCallName += fnName;
+                                            const char* fnArgs = fn["arguments"];
+                                            if (fnArgs && strlen(fnArgs) > 0) toolCallArgs += fnArgs;
+                                        }
                                     }
                                 }
                             }
@@ -542,6 +673,20 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
                 else {
                     flushAecBuffer(); // Prevent AEC buffer overflow while blocked by network
                     delay(2); // Yield to watchdogs while waiting for next network packet
+                }
+            }
+
+            // Fallback for tool_calls if no content was streamed
+            if (full_response.length() == 0 && toolCallName.length() > 0) {
+                Serial.printf("[ToolCall] Captured tool call in stream: %s args: %s\n", toolCallName.c_str(), toolCallArgs.c_str());
+                if (toolCallName.indexOf("memory") != -1 && owBaseUrl.length() > 0) {
+                    JsonDocument argDoc;
+                    deserializeJson(argDoc, toolCallArgs);
+                    const char* memFact = argDoc["content"] | argDoc["memory"] | argDoc["text"] | "";
+                    if (strlen(memFact) > 0) {
+                        postAddMemory(owBaseUrl, _apiKey, String(memFact), netMgr);
+                    }
+                    full_response = "I have saved that to your memory.";
                 }
             }
             
@@ -563,6 +708,7 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
                 assistantMsg["content"] = result;
             }
             else {
+                Serial.println("[LLM] Stream ended with 0 content bytes. Raw stream buffer: " + streamBuffer);
                 result = "Error: Empty stream response";
             }
         }
