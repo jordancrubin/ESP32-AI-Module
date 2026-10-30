@@ -42,6 +42,7 @@ extern float g_currentIndoorTemp;
 extern float g_currentIndoorHum;
 extern int vocAlarmThreshold;
 extern bool clockFormat12h;
+extern bool isWebServerActive;
 static String g_lastVoice = "alloy";
 static int g_lastVolume = 21;
 static String g_voiceOptions = "alloy";
@@ -699,8 +700,8 @@ static void clock_click_cb(lv_event_t * e) {
 //////////////////////////////////////////////////////////////////////////
 // Callback to check for inactivity
 static void idle_timer_cb(lv_timer_t * t) {
-    // Prevent clock screen during active interactions
-    if (isProcessing || isSpeaking) {
+    // Prevent clock screen during active interactions, Web Config mode, or sub-menus
+    if (isProcessing || isSpeaking || isWebServerActive || g_isSubMenuActive) {
         lv_disp_trig_activity(NULL);
         return;
     }
@@ -1784,16 +1785,15 @@ void DisplayManager::showWebConfig(String ip, String hostname) {
     lv_obj_set_style_text_color(baud_lbl, lv_color_make(150, 150, 150), 0);
     lv_obj_align_to(baud_lbl, sw, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
 
-    // Close Button
-    if (!incomplete) {
-        lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
-        lv_obj_set_size(btnClose, 80, 40);
-        lv_obj_align(btnClose, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
-        lv_obj_t *lblClose = lv_label_create(btnClose);
-        lv_label_set_text(lblClose, "Return");
-        lv_obj_center(lblClose);
-        lv_obj_add_event_cb(btnClose, closeSetupEventHandler, LV_EVENT_CLICKED, this);
-    }
+    // Exit Web UI Button on LCD Screen
+    lv_obj_t *btnClose = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btnClose, 100, 40);
+    lv_obj_align(btnClose, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(btnClose, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_t *lblClose = lv_label_create(btnClose);
+    lv_label_set_text(lblClose, "Exit UI");
+    lv_obj_center(lblClose);
+    lv_obj_add_event_cb(btnClose, closeSetupEventHandler, LV_EVENT_CLICKED, this);
 }
 
 //////////////////////////////////////////////////////////////////////////

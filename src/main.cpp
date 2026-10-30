@@ -719,9 +719,12 @@ void handleWebRoot() {
     html += "});";
     html += "</script>";
     html += "</head><body>";
-    html += "<div id='saveModal' class='modal'><div class='modal-content'><h3 id='modalTitle'></h3><p id='modalText'></p><button class='close-btn' id='modalClose' onclick='document.getElementById(\"saveModal\").style.display=\"none\"'>OK</button></div></div>";
+    html += "<div id='saveModal' class='modal'><div class='modal-content'><h3 id='modalTitle'></h3><p id='modalText'></p><div style='display:flex;justify-content:center;gap:10px;margin-top:15px;'><button class='close-btn' id='modalClose' onclick='document.getElementById(\"saveModal\").style.display=\"none\"'>OK</button><button class='close-btn' id='modalExit' style='background:#28a745;' onclick='window.location.href=\"/exit_config\"'>Exit Web UI</button></div></div></div>";
     html += "<div class='container'>";
-    html += "<h2><img src='/logo.png' style='height:40px; vertical-align:middle; margin-right:15px;' onerror='this.style.display=\"none\"'>ESP32 AI Configuration <span style='font-size:0.45em; vertical-align:middle; background:#e9ecef; color:#495057; padding:3px 8px; border-radius:12px; font-weight:normal;'>v" FIRMWARE_VERSION "</span></h2>";
+    html += "<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:15px;'>";
+    html += "<h2 style='margin:0;border:none;padding:0;'><img src='/logo.png' style='height:40px; vertical-align:middle; margin-right:15px;' onerror='this.style.display=\"none\"'>ESP32 AI Configuration <span style='font-size:0.45em; vertical-align:middle; background:#e9ecef; color:#495057; padding:3px 8px; border-radius:12px; font-weight:normal;'>v" FIRMWARE_VERSION "</span></h2>";
+    html += "<a href='/exit_config' class='btn' style='background:#d32f2f;color:#fff;text-decoration:none;padding:9px 18px;border-radius:6px;font-weight:bold;font-size:0.9em;' onclick=\"return confirm('Exit Web UI mode and return the device to voice listening standby?');\">Exit Web UI</a>";
+    html += "</div>";
 
     // Tabs
     html += "<div class='tabs'>";
@@ -956,7 +959,10 @@ void handleWebRoot() {
     html += "</div>";
     html += "</div>";
 
-    html += "<div id='saveBtnContainer'><input type='submit' value='Save & Verify Configuration' class='btn'></div>";
+    html += "<div id='saveBtnContainer' style='display:flex;gap:12px;align-items:center;flex-wrap:wrap;'>";
+    html += "<input type='submit' value='Save & Verify Configuration' class='btn'>";
+    html += "<a href='/exit_config' class='btn' style='background:#6c757d;color:#fff;text-decoration:none;display:inline-block;padding:12px 24px;border-radius:4px;font-weight:bold;' onclick=\"return confirm('Exit Web UI mode and return the device to voice listening standby?');\">Exit Web UI</a>";
+    html += "</div>";
     html += "</form>";
 
     // TAB: Diagnostics & Tools (Outside form)
@@ -1353,12 +1359,36 @@ void updateVoiceList() {
         if (modelOptions.length() > 0) {
             voiceOptions += "||" + modelOptions;
         }
-        // Update UI with new options, keeping current voice and volume
-        display.showMainUI(ttsVoice, settings.volume, voiceOptions);
+        // Only switch UI if we are NOT actively in web setup mode!
+        // If web server is active, keep displaying Web Config screen so user is not interrupted.
+        if (!isWebServerActive) {
+            display.showMainUI(ttsVoice, settings.volume, voiceOptions);
+        }
         if (settings.debugMode) Serial.println("Voice list updated in dropdown.");
     } else {
         if (settings.debugMode) Serial.println("No matching voices found.");
     }
+}
+
+void handleExitWebConfig() {
+    if (settings.debugMode) Serial.println("Web Request: /exit_config");
+    String html = "<!DOCTYPE html><html><head><title>ESP32 AI Assistant</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f0f2f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}";
+    html += ".card{background:#fff;padding:35px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.1);text-align:center;max-width:480px;}";
+    html += "h2{color:#28a745;margin-top:0;}p{color:#555;line-height:1.6;font-size:1.05em;}";
+    html += "</style></head><body>";
+    html += "<div class='card'>";
+    html += "<h2>Configuration Mode Closed</h2>";
+    html += "<p>The web server has stopped and your device has returned to <strong>voice standby mode</strong>.</p>";
+    html += "<p>Wake word listening is now active.<br><br><small style='color:#777;'>To re-enter Web UI mode at any time, tap the Setup icon on the screen or say <em>'Enter config mode'</em>.</small></p>";
+    html += "</div></body></html>";
+    server.send(200, "text/html", html);
+
+    delay(100);
+    onSetupMode(false);
+    display.showMainUI(ttsVoice, settings.volume, voiceOptions);
+    display.showStatus("Ready");
 }
 
 void testAEC() {
@@ -3265,6 +3295,8 @@ void setup() {
   // Start Web Server
   server.on("/", handleWebRoot);
   server.on("/save", HTTP_POST, handleWebSave);
+  server.on("/exit_config", HTTP_GET, handleExitWebConfig);
+  server.on("/exit_config", HTTP_POST, handleExitWebConfig);
   server.onNotFound([]() {
       server.send(404, "text/plain", "Not Found");
   });
@@ -3283,7 +3315,7 @@ void setup() {
       html += "Firmware: <input type='file' name='firmware' accept='.bin'><br><br>";
       html += "Filesystem: <input type='file' name='filesystem' accept='.bin'><br><br>";
       html += "<input type='submit' value='Upload & Update'></form>";
-      html += "<br><a href='/'>&larr; Back to Configuration</a></body></html>";
+      html += "<br><a href='/'>&larr; Back to Configuration</a> &nbsp;|&nbsp; <a href='/exit_config' style='color:#d32f2f;font-weight:bold;'>Exit Web UI</a></body></html>";
       server.send(200, "text/html", html);
   });
 
