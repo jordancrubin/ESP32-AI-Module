@@ -375,6 +375,32 @@ static bool postAddMemory(const String& baseUrl, const String& apiKey, const Str
     }
 }
 
+static String cleanExtractedFact(String fact) {
+    fact.trim();
+    while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(":") || fact.startsWith(",")) {
+        fact = fact.substring(1);
+        fact.trim();
+    }
+    while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?") || fact.endsWith(",") || fact.endsWith(";")) {
+        fact.remove(fact.length() - 1);
+        fact.trim();
+    }
+    String fLower = fact;
+    fLower.toLowerCase();
+    if (fLower.endsWith(" as well")) {
+        fact = fact.substring(0, fact.length() - 8);
+        fact.trim();
+    } else if (fLower.endsWith(" too")) {
+        fact = fact.substring(0, fact.length() - 4);
+        fact.trim();
+    }
+    while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?") || fact.endsWith(",") || fact.endsWith(";")) {
+        fact.remove(fact.length() - 1);
+        fact.trim();
+    }
+    return fact;
+}
+
 static String extractMemoryFact(const String& prompt) {
     if (prompt.length() == 0) return "";
     
@@ -390,39 +416,42 @@ static String extractMemoryFact(const String& prompt) {
     String lower = clean;
     lower.toLowerCase();
 
-    // 2. Strip conversational wake fillers (e.g., "Hal, ", "Hey Hal, ", "Excuse me Hal, ") and conjunctions
+    // 2. Iteratively strip conversational wake fillers, politeness words, and conjunctions
     const char* leadFillers[] = {
-        "excuse me hal, ",
-        "excuse me hal ",
-        "hey hal, ",
-        "hey hal ",
-        "okay hal, ",
-        "okay hal ",
-        "ok hal, ",
-        "ok hal ",
-        "hal, ",
-        "hal ",
-        "hey, ",
-        "hey ",
-        "please, ",
-        "also, ",
-        "also ",
-        "and, ",
-        "and ",
-        "oh, ",
-        "oh ",
-        "so, ",
-        "so "
+        "excuse me hal, ", "excuse me hal ",
+        "hey hal, ", "hey hal ",
+        "okay hal, ", "okay hal ",
+        "ok hal, ", "ok hal ",
+        "hal, ", "hal ",
+        "hey, ", "hey ",
+        "please, ", "please ",
+        "and also, ", "and also ",
+        "and, ", "and ",
+        "also, ", "also ",
+        "oh, ", "oh ",
+        "so, ", "so ",
+        "next, ", "next ",
+        "now, ", "now ",
+        "then, ", "then ",
+        "again, ", "again ",
+        "one more thing, ", "one more thing ",
+        "another thing, ", "another thing "
     };
-    for (const char* lf : leadFillers) {
-        if (lower.startsWith(lf)) {
-            clean = clean.substring(strlen(lf));
-            clean.trim();
-            lower = clean;
-            lower.toLowerCase();
-            break;
+    bool stripped = true;
+    while (stripped) {
+        stripped = false;
+        for (const char* lf : leadFillers) {
+            if (lower.startsWith(lf)) {
+                clean = clean.substring(strlen(lf));
+                clean.trim();
+                lower = clean;
+                lower.toLowerCase();
+                stripped = true;
+                break;
+            }
         }
     }
+    if (clean.length() == 0) return "";
 
     // 3. Do not intercept questions / queries about memory
     const char* queryPrefixes[] = {
@@ -450,54 +479,110 @@ static String extractMemoryFact(const String& prompt) {
         }
     }
 
-    // 4. Check for fact-first statements: "<fact>, remember that", "<fact>, add that to memory"
+    // 4. Check for fact-first statements: "<fact>, remember that", "<fact>, add that to memory" (including "too" and "as well")
     const char* trailingActions[] = {
+        ", can you please remember that too", " can you please remember that too",
+        ", can you please remember that as well", " can you please remember that as well",
         ", can you please remember that", " can you please remember that",
+        ", could you please remember that too", " could you please remember that too",
+        ", could you please remember that as well", " could you please remember that as well",
         ", could you please remember that", " could you please remember that",
+        ", please remember that too", " please remember that too",
+        ", please remember that as well", " please remember that as well",
         ", please remember that", " please remember that",
+        ", please remember this too", " please remember this too",
+        ", please remember this as well", " please remember this as well",
         ", please remember this", " please remember this",
+        ", can you also remember that", " can you also remember that",
+        ", can you remember that too", " can you remember that too",
+        ", can you remember that as well", " can you remember that as well",
         ", can you remember that", " can you remember that",
+        ", could you also remember that", " could you also remember that",
+        ", could you remember that too", " could you remember that too",
+        ", could you remember that as well", " could you remember that as well",
         ", could you remember that", " could you remember that",
+        ", would you remember that too", " would you remember that too",
+        ", would you remember that as well", " would you remember that as well",
         ", would you remember that", " would you remember that",
+        ", add that to my memory too", " add that to my memory too",
+        ", add that to my memory as well", " add that to my memory as well",
         ", add that to my memory", " add that to my memory",
+        ", add that to your memory too", " add that to your memory too",
+        ", add that to your memory as well", " add that to your memory as well",
         ", add that to your memory", " add that to your memory",
+        ", add that to memory too", " add that to memory too",
+        ", add that to memory as well", " add that to memory as well",
         ", add that to memory", " add that to memory",
+        ", add this to my memory too", " add this to my memory too",
+        ", add this to my memory as well", " add this to my memory as well",
         ", add this to my memory", " add this to my memory",
+        ", add this to your memory too", " add this to your memory too",
+        ", add this to your memory as well", " add this to your memory as well",
         ", add this to your memory", " add this to your memory",
+        ", add this to memory too", " add this to memory too",
+        ", add this to memory as well", " add this to memory as well",
         ", add this to memory", " add this to memory",
+        ", save that to memory too", " save that to memory too",
+        ", save that to memory as well", " save that to memory as well",
         ", save that to memory", " save that to memory",
+        ", save this to memory too", " save this to memory too",
+        ", save this to memory as well", " save this to memory as well",
         ", save this to memory", " save this to memory",
+        ", put that in memory too", " put that in memory too",
+        ", put that in memory as well", " put that in memory as well",
         ", put that in memory", " put that in memory",
+        ", remember that too", " remember that too",
+        ", remember that as well", " remember that as well",
         ", remember that", " remember that",
+        ", remember this too", " remember this too",
+        ", remember this as well", " remember this as well",
         ", remember this", " remember this",
+        ", dont forget that too", " dont forget that too",
+        ", dont forget that as well", " dont forget that as well",
         ", dont forget that", " dont forget that",
+        ", don't forget that too", " don't forget that too",
+        ", don't forget that as well", " don't forget that as well",
         ", don't forget that", " don't forget that",
+        ", keep that in mind too", " keep that in mind too",
+        ", keep that in mind as well", " keep that in mind as well",
         ", keep that in mind", " keep that in mind"
     };
     for (const char* act : trailingActions) {
         if (lower.endsWith(act)) {
             String fact = clean.substring(0, clean.length() - strlen(act));
-            fact.trim();
-            while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(",")) fact = fact.substring(1);
-            fact.trim();
-            while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
-                fact.remove(fact.length() - 1);
-                fact.trim();
-            }
+            fact = cleanExtractedFact(fact);
             if (fact.length() > 0) return fact;
         }
     }
 
-    // 5. Check for suffix: "... to memory", "... to my memory", "... in memory", "... into memory"
+    // 5. Check for suffix: "... to memory", "... to my memory", "... in memory", "... into memory" (with optional "too" / "as well")
     const char* suffixes[] = {
+        " to my memory too",
+        " to my memory as well",
         " to my memory",
+        " to your memory too",
+        " to your memory as well",
         " to your memory",
+        " to memory too",
+        " to memory as well",
         " to memory",
+        " in my memory too",
+        " in my memory as well",
         " in my memory",
+        " in your memory too",
+        " in your memory as well",
         " in your memory",
+        " in memory too",
+        " in memory as well",
         " in memory",
+        " into my memory too",
+        " into my memory as well",
         " into my memory",
+        " into your memory too",
+        " into your memory as well",
         " into your memory",
+        " into memory too",
+        " into memory as well",
         " into memory"
     };
 
@@ -515,6 +600,12 @@ static String extractMemoryFact(const String& prompt) {
                 "could you please add ",
                 "would you please add that ",
                 "would you please add ",
+                "can you also add that ",
+                "can you also add ",
+                "could you also add that ",
+                "could you also add ",
+                "would you also add that ",
+                "would you also add ",
                 "can you add that ",
                 "can you add ",
                 "could you add that ",
@@ -523,6 +614,12 @@ static String extractMemoryFact(const String& prompt) {
                 "would you add ",
                 "please add that ",
                 "please add ",
+                "also please add that ",
+                "also please add ",
+                "also add that ",
+                "also add ",
+                "and add that ",
+                "and add ",
                 "i want you to add that ",
                 "i want you to add ",
                 "i need you to add that ",
@@ -547,20 +644,34 @@ static String extractMemoryFact(const String& prompt) {
                 "can you please save ",
                 "could you please save that ",
                 "could you please save ",
+                "can you also save that ",
+                "can you also save ",
+                "could you also save that ",
+                "could you also save ",
                 "can you save that ",
                 "can you save ",
                 "could you save that ",
                 "could you save ",
                 "please save that ",
                 "please save ",
+                "also save that ",
+                "also save ",
+                "and save that ",
+                "and save ",
                 "save that ",
                 "save ",
                 "can you please put that ",
                 "can you please put ",
+                "can you also put that ",
+                "can you also put ",
                 "can you put that ",
                 "can you put ",
                 "please put that ",
                 "please put ",
+                "also put that ",
+                "also put ",
+                "and put that ",
+                "and put ",
                 "put that ",
                 "put ",
                 "store that ",
@@ -580,35 +691,18 @@ static String extractMemoryFact(const String& prompt) {
             for (const char* spfx : startPfxs) {
                 if (subLower.startsWith(spfx)) {
                     String fact = sub.substring(strlen(spfx));
-                    fact.trim();
-                    while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(":")) {
-                        fact = fact.substring(1);
-                        fact.trim();
-                    }
-                    while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
-                        fact.remove(fact.length() - 1);
-                        fact.trim();
-                    }
+                    fact = cleanExtractedFact(fact);
                     if (fact.length() > 0) return fact;
                 }
             }
 
             // Fallback for suffix: user said "<fact> to memory" without leading verb
-            String fact = sub;
-            fact.trim();
-            while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(":")) {
-                fact = fact.substring(1);
-                fact.trim();
-            }
-            while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
-                fact.remove(fact.length() - 1);
-                fact.trim();
-            }
+            String fact = cleanExtractedFact(sub);
             if (fact.length() > 0) return fact;
         }
     }
 
-    // 5. Check for prefixes: "remember ...", "add to memory ...", "save to memory ..."
+    // 6. Check for prefixes: "remember ...", "add to memory ...", "save to memory ..."
     const char* prefixes[] = {
         // Polite forms + remember
         "can you please remember that ",
@@ -623,6 +717,22 @@ static String extractMemoryFact(const String& prompt) {
         "could you please remember ",
         "would you please remember that ",
         "would you please remember ",
+        "can you also remember that ",
+        "can you also remember this: ",
+        "can you also remember this ",
+        "can you also remember to ",
+        "can you also remember ",
+        "could you also remember that ",
+        "could you also remember this: ",
+        "could you also remember this ",
+        "could you also remember to ",
+        "could you also remember ",
+        "would you also remember that ",
+        "would you also remember ",
+        "also can you remember that ",
+        "also can you remember ",
+        "also could you remember that ",
+        "also could you remember ",
         "can you remember that ",
         "can you remember this: ",
         "can you remember this ",
@@ -637,6 +747,10 @@ static String extractMemoryFact(const String& prompt) {
         "please remember this ",
         "please remember to ",
         "please remember ",
+        "also please remember that ",
+        "also please remember ",
+        "and please remember that ",
+        "and please remember ",
         "i want you to remember that ",
         "i want you to remember ",
         "i need you to remember that ",
@@ -645,6 +759,26 @@ static String extractMemoryFact(const String& prompt) {
         "id like you to remember that ",
         "i'd like you to remember ",
         "id like you to remember ",
+        "also remember that ",
+        "also remember this: ",
+        "also remember this ",
+        "also remember to ",
+        "also remember, ",
+        "also remember ",
+        "and remember that ",
+        "and remember this: ",
+        "and remember this ",
+        "and remember to ",
+        "and remember, ",
+        "and remember ",
+        "another thing to remember is that ",
+        "another thing to remember is ",
+        "one more thing to remember is that ",
+        "one more thing to remember is ",
+        "one more thing, remember that ",
+        "one more thing, remember ",
+        "another thing, remember that ",
+        "another thing, remember ",
         "remember that ",
         "remember this: ",
         "remember this ",
@@ -659,6 +793,19 @@ static String extractMemoryFact(const String& prompt) {
         "can you please add to memory that ",
         "can you please add to memory: ",
         "can you please add to memory ",
+        "can you also add to my memory that ",
+        "can you also add to my memory: ",
+        "can you also add to my memory ",
+        "can you also add to your memory that ",
+        "can you also add to your memory: ",
+        "can you also add to your memory ",
+        "can you also add to memory that ",
+        "can you also add to memory: ",
+        "can you also add to memory ",
+        "can you also add that ",
+        "can you also add ",
+        "could you also add to memory that ",
+        "could you also add to memory ",
         "can you add to my memory that ",
         "can you add to my memory: ",
         "can you add to my memory ",
@@ -690,6 +837,25 @@ static String extractMemoryFact(const String& prompt) {
         "lets add to memory that ",
         "let's add to memory ",
         "lets add to memory ",
+        "also add to my memory that ",
+        "also add to my memory: ",
+        "also add to my memory ",
+        "also add to your memory that ",
+        "also add to your memory: ",
+        "also add to your memory ",
+        "also add to memory that ",
+        "also add to memory: ",
+        "also add to memory ",
+        "also add that to memory ",
+        "also add that to my memory ",
+        "also add that ",
+        "also add ",
+        "and add to my memory that ",
+        "and add to my memory ",
+        "and add to memory that ",
+        "and add to memory ",
+        "and add that ",
+        "and add ",
         "add to my memory that ",
         "add to my memory: ",
         "add to my memory ",
@@ -710,6 +876,22 @@ static String extractMemoryFact(const String& prompt) {
         "add a memory ",
 
         // Save to memory
+        "can you please save to memory that ",
+        "can you please save to memory: ",
+        "can you please save to memory ",
+        "can you please save to my memory that ",
+        "can you please save to my memory: ",
+        "can you please save to my memory ",
+        "can you also save to memory that ",
+        "can you also save to memory: ",
+        "can you also save to memory ",
+        "can you also save to my memory that ",
+        "can you also save to my memory: ",
+        "can you also save to my memory ",
+        "can you also save that ",
+        "can you also save ",
+        "could you also save to memory that ",
+        "could you also save to memory ",
         "can you save to memory that ",
         "can you save to memory: ",
         "can you save to memory ",
@@ -725,6 +907,17 @@ static String extractMemoryFact(const String& prompt) {
         "please save to memory that ",
         "please save to memory: ",
         "please save to memory ",
+        "also save to memory that ",
+        "also save to memory: ",
+        "also save to memory ",
+        "also save to my memory that ",
+        "also save to my memory ",
+        "also save that ",
+        "also save ",
+        "and save to memory that ",
+        "and save to memory ",
+        "and save that ",
+        "and save ",
         "save to my memory that ",
         "save to my memory: ",
         "save to my memory ",
@@ -762,22 +955,17 @@ static String extractMemoryFact(const String& prompt) {
         "make a note that ",
         "make a note of ",
         "keep in mind that ",
+        "keep in mind ",
         "dont forget that ",
-        "don't forget that "
+        "don't forget that ",
+        "dont forget ",
+        "don't forget "
     };
 
     for (const char* pfx : prefixes) {
         if (lower.startsWith(pfx)) {
             String fact = clean.substring(strlen(pfx));
-            fact.trim();
-            while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(":")) {
-                fact = fact.substring(1);
-                fact.trim();
-            }
-            while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
-                fact.remove(fact.length() - 1);
-                fact.trim();
-            }
+            fact = cleanExtractedFact(fact);
             if (fact.length() > 0) return fact;
         }
     }
@@ -934,6 +1122,7 @@ String LLMClient::sendPrompt(String prompt, WiFiManager& netMgr) {
             contextInjection += "\n\n" + memContext;
             if (settings.debugMode) Serial.println("Injected user memory context.");
         }
+        contextInjection += "\n\n[PERSISTENT MEMORY NOTE: You cannot autonomously save facts to long-term memory. If the user asks you to remember something or add to memory, do not falsely claim you saved it unless it appears in the memories above. Instead, remind them conversationally to say 'Remember that <fact>' or 'Add <fact> to memory'.]";
     }
 
     // Attach pre-injected context to user message for this request
