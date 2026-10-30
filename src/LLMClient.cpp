@@ -390,7 +390,7 @@ static String extractMemoryFact(const String& prompt) {
     String lower = clean;
     lower.toLowerCase();
 
-    // 2. Strip conversational wake fillers (e.g., "Hal, ", "Hey Hal, ", "Excuse me Hal, ")
+    // 2. Strip conversational wake fillers (e.g., "Hal, ", "Hey Hal, ", "Excuse me Hal, ") and conjunctions
     const char* leadFillers[] = {
         "excuse me hal, ",
         "excuse me hal ",
@@ -404,7 +404,15 @@ static String extractMemoryFact(const String& prompt) {
         "hal ",
         "hey, ",
         "hey ",
-        "please, "
+        "please, ",
+        "also, ",
+        "also ",
+        "and, ",
+        "and ",
+        "oh, ",
+        "oh ",
+        "so, ",
+        "so "
     };
     for (const char* lf : leadFillers) {
         if (lower.startsWith(lf)) {
@@ -442,7 +450,45 @@ static String extractMemoryFact(const String& prompt) {
         }
     }
 
-    // 4. Check for suffix: "... to memory", "... to my memory", "... in memory", "... into memory"
+    // 4. Check for fact-first statements: "<fact>, remember that", "<fact>, add that to memory"
+    const char* trailingActions[] = {
+        ", can you please remember that", " can you please remember that",
+        ", could you please remember that", " could you please remember that",
+        ", please remember that", " please remember that",
+        ", please remember this", " please remember this",
+        ", can you remember that", " can you remember that",
+        ", could you remember that", " could you remember that",
+        ", would you remember that", " would you remember that",
+        ", add that to my memory", " add that to my memory",
+        ", add that to your memory", " add that to your memory",
+        ", add that to memory", " add that to memory",
+        ", add this to my memory", " add this to my memory",
+        ", add this to your memory", " add this to your memory",
+        ", add this to memory", " add this to memory",
+        ", save that to memory", " save that to memory",
+        ", save this to memory", " save this to memory",
+        ", put that in memory", " put that in memory",
+        ", remember that", " remember that",
+        ", remember this", " remember this",
+        ", dont forget that", " dont forget that",
+        ", don't forget that", " don't forget that",
+        ", keep that in mind", " keep that in mind"
+    };
+    for (const char* act : trailingActions) {
+        if (lower.endsWith(act)) {
+            String fact = clean.substring(0, clean.length() - strlen(act));
+            fact.trim();
+            while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(",")) fact = fact.substring(1);
+            fact.trim();
+            while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
+                fact.remove(fact.length() - 1);
+                fact.trim();
+            }
+            if (fact.length() > 0) return fact;
+        }
+    }
+
+    // 5. Check for suffix: "... to memory", "... to my memory", "... in memory", "... into memory"
     const char* suffixes[] = {
         " to my memory",
         " to your memory",
@@ -481,6 +527,16 @@ static String extractMemoryFact(const String& prompt) {
                 "i want you to add ",
                 "i need you to add that ",
                 "i need you to add ",
+                "i want to add that ",
+                "i want to add ",
+                "can i add that ",
+                "can i add ",
+                "could i add that ",
+                "could i add ",
+                "let's add that ",
+                "lets add that ",
+                "let's add ",
+                "lets add ",
                 "i'd like you to add that ",
                 "id like you to add that ",
                 "i'd like you to add ",
@@ -619,11 +675,21 @@ static String extractMemoryFact(const String& prompt) {
         "please add to my memory: ",
         "please add to my memory ",
         "please add to your memory that ",
-        "please add to your memory: ",
-        "please add to your memory ",
         "please add to memory that ",
         "please add to memory: ",
         "please add to memory ",
+        "i want to add to my memory that ",
+        "i want to add to my memory ",
+        "i want to add to memory that ",
+        "i want to add to memory ",
+        "can i add to my memory that ",
+        "can i add to my memory ",
+        "can i add to memory that ",
+        "can i add to memory ",
+        "let's add to memory that ",
+        "lets add to memory that ",
+        "let's add to memory ",
+        "lets add to memory ",
         "add to my memory that ",
         "add to my memory: ",
         "add to my memory ",
