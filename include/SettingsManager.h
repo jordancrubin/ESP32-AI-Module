@@ -53,6 +53,8 @@ public:
     int aecAttenuation;
     int aecCutoff;
     int aecIgnore;
+    int bargeStreak;  // Consecutive loud frames for yell trigger (default: 5 frames / ~80ms)
+    int bargeDensity; // Active frames out of 24 for speech density trigger (default: 8 frames / ~384ms)
     char knowledgeId[64];
     bool alarmEnabled;
     int alarmHour;

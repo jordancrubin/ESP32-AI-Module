@@ -37,6 +37,8 @@ SettingsManager::SettingsManager() {
     aecAttenuation = 55; // Default 55% attenuation during voice playback
     aecCutoff = 3000; // Default 3000 cutoff (comfortably above residual speaker bleed, easily triggered by loud voice/tap)
     aecIgnore = 1000; // Default 1000ms ignore window (allows Speex AEC filter to fully converge)
+    bargeStreak = 5; // Default 5 frames (~80ms consecutive streak for yells)
+    bargeDensity = 8; // Default 8 frames (~384ms window for conversational speech)
     strlcpy(knowledgeId, "", sizeof(knowledgeId));
     alarmEnabled = false;
     alarmHour = 7;
@@ -78,6 +80,8 @@ void SettingsManager::load() {
     aecAttenuation = prefs.getInt("aec_att", aecAttenuation);
     aecCutoff = prefs.getInt("aec_cut", aecCutoff);
     aecIgnore = prefs.getInt("aec_ign", aecIgnore);
+    bargeStreak = prefs.getInt("barge_strk", bargeStreak);
+    bargeDensity = prefs.getInt("barge_dens", bargeDensity);
     if (prefs.isKey("know_id")) prefs.getString("know_id", knowledgeId, sizeof(knowledgeId));
     alarmEnabled = prefs.getBool("alrm_en", alarmEnabled);
     alarmHour = prefs.getInt("alrm_hr", alarmHour);
@@ -118,6 +122,8 @@ void SettingsManager::save() {
     prefs.putInt("aec_att", aecAttenuation);
     prefs.putInt("aec_cut", aecCutoff);
     prefs.putInt("aec_ign", aecIgnore);
+    prefs.putInt("barge_strk", bargeStreak);
+    prefs.putInt("barge_dens", bargeDensity);
     prefs.putString("know_id", knowledgeId);
     prefs.putBool("alrm_en", alarmEnabled);
     prefs.putInt("alrm_hr", alarmHour);

@@ -2293,6 +2293,78 @@ static void showMicAecConfig() {
         }
     }, LV_EVENT_ALL, kb);
 
+    // Barge-in Yell Streak (Frames)
+    lv_obj_t * label_strk = lv_label_create(cont);
+    lv_label_set_text(label_strk, "Barge-in Yell Streak (Frames)");
+    lv_obj_set_style_text_color(label_strk, lv_color_make(200, 200, 200), 0);
+    lv_obj_t * ta_strk = lv_textarea_create(cont);
+    lv_textarea_set_one_line(ta_strk, true);
+    lv_textarea_set_accepted_chars(ta_strk, "0123456789");
+    lv_textarea_set_text(ta_strk, String(settings.bargeStreak).c_str());
+    lv_obj_set_width(ta_strk, 270);
+    lv_obj_add_event_cb(ta_strk, [](lv_event_t * e){
+        lv_event_code_t code = lv_event_get_code(e);
+        lv_obj_t * ta = lv_event_get_target(e);
+        lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
+        lv_obj_t * cont = lv_obj_get_parent(ta);
+
+        if (code == LV_EVENT_FOCUSED) {
+            lv_keyboard_set_textarea(kb, ta);
+            lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(kb);
+            lv_obj_set_height(cont, 90);
+            lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
+            lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+        }
+        else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+            lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_height(cont, 170);
+            lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
+            if (code == LV_EVENT_READY) lv_obj_clear_state(ta, LV_STATE_FOCUSED);
+            int val = String(lv_textarea_get_text(ta)).toInt();
+            if (val < 2) val = 2;
+            if (val > 20) val = 20;
+            settings.bargeStreak = val;
+            lv_textarea_set_text(ta, String(val).c_str());
+        }
+    }, LV_EVENT_ALL, kb);
+
+    // Barge-in Density (Frames out of 24)
+    lv_obj_t * label_dens = lv_label_create(cont);
+    lv_label_set_text(label_dens, "Barge-in Density (Frames/24)");
+    lv_obj_set_style_text_color(label_dens, lv_color_make(200, 200, 200), 0);
+    lv_obj_t * ta_dens = lv_textarea_create(cont);
+    lv_textarea_set_one_line(ta_dens, true);
+    lv_textarea_set_accepted_chars(ta_dens, "0123456789");
+    lv_textarea_set_text(ta_dens, String(settings.bargeDensity).c_str());
+    lv_obj_set_width(ta_dens, 270);
+    lv_obj_add_event_cb(ta_dens, [](lv_event_t * e){
+        lv_event_code_t code = lv_event_get_code(e);
+        lv_obj_t * ta = lv_event_get_target(e);
+        lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
+        lv_obj_t * cont = lv_obj_get_parent(ta);
+
+        if (code == LV_EVENT_FOCUSED) {
+            lv_keyboard_set_textarea(kb, ta);
+            lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(kb);
+            lv_obj_set_height(cont, 90);
+            lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 50);
+            lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+        }
+        else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+            lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_height(cont, 170);
+            lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, -10);
+            if (code == LV_EVENT_READY) lv_obj_clear_state(ta, LV_STATE_FOCUSED);
+            int val = String(lv_textarea_get_text(ta)).toInt();
+            if (val < 3) val = 3;
+            if (val > 24) val = 24;
+            settings.bargeDensity = val;
+            lv_textarea_set_text(ta, String(val).c_str());
+        }
+    }, LV_EVENT_ALL, kb);
+
     // AEC Attenuation (%)
     lv_obj_t * label_att = lv_label_create(cont);
     lv_label_set_text(label_att, "AEC Attenuation (%)");

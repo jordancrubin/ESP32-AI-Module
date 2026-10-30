@@ -886,15 +886,19 @@ void handleWebRoot() {
     html += "<div style='margin-top:12px;'><a href='/tune_resonance' class='btn' style='background:#00897b;display:inline-block;padding:8px 16px;color:#fff;text-decoration:none;border-radius:4px;'>Auto-Tune Speaker Resonance</a></div>";
     html += "</div>";
 
-    html += "<div class='card'><h3>Acoustic Echo Cancellation (AEC)</h3>";
+    html += "<div class='card'><h3>Acoustic Echo Cancellation (AEC) & Voice Barge-in</h3>";
     html += "<div class='checkbox-group'><input type='checkbox' id='interrupt' name='interrupt' value='1'" + String(settings.enableInterrupt ? " checked" : "") + "><label for='interrupt'>Enable Voice Barge-in (Interrupt AI)</label></div>";
-    html += "<small style='margin-top:-5px;'>Allows you to interrupt the AI by speaking over it.</small><br>";
+    html += "<small style='margin-top:-5px;'>Allows you to interrupt the AI by speaking or shouting over it.</small><br>";
+    html += "<label>AEC Barge-in Cutoff [Base at 50% Vol]</label><input type='number' name='aecCutoff' value='" + String(settings.aecCutoff) + "' min='0' max='32767'>";
+    html += "<small>Base amplitude threshold at 50% vol (Default: 3000). Lower values (e.g. 2000-2500) let you break in more easily with normal/raised voice. Higher values require louder shouting.</small>";
+    html += "<label>Barge-in Yell Streak (Consecutive Frames)</label><input type='number' name='bargeStreak' value='" + String(settings.bargeStreak) + "' min='2' max='15'>";
+    html += "<small>Consecutive loud frames needed to trigger on a sharp shout/yell (Default: 5 frames = ~80ms). Lower values (3-4) trigger on faster or softer shouts.</small>";
+    html += "<label>Barge-in Speech Density (Frames out of 24)</label><input type='number' name='bargeDensity' value='" + String(settings.bargeDensity) + "' min='3' max='20'>";
+    html += "<small>Voiced frames in a ~384ms window for conversational phrases like 'Excuse me' (Default: 8 frames = ~33%). Lower values make conversational interruption easier.</small>";
+    html += "<label>AEC Attenuation (%) [Base at 50% Vol]</label><input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='0' max='100'>";
+    html += "<small>Base attenuation at 50% vol (Default: 55%). Automatically scales dynamically with volume slider.</small>";
     html += "<label>AEC Target Delay (Samples)</label><input type='number' name='aecDelay' value='" + String(settings.aecDelay) + "' step='10' min='0' max='3200'>";
     html += "<small>Echo alignment. Best tuned via /tune_aec command.</small>";
-    html += "<label>AEC Attenuation (%) [Base at 50% Vol]</label><input type='number' name='aecAttenuation' value='" + String(settings.aecAttenuation) + "' min='0' max='100'>";
-    html += "<small>Base attenuation at 50% vol (e.g. 55%). Automatically scales dynamically with volume slider.</small>";
-    html += "<label>AEC Barge-in Cutoff [Base at 50% Vol]</label><input type='number' name='aecCutoff' value='" + String(settings.aecCutoff) + "' min='0' max='32767'>";
-    html += "<small>Base cutoff threshold at 50% vol (e.g. 3000). Automatically scales dynamically with volume slider.</small>";
     html += "<label>AEC Interrupt Ignore (ms) [Base at 50% Vol]</label><input type='number' name='aecIgnore' value='" + String(settings.aecIgnore) + "' min='0' max='10000' step='100'>";
     html += "<small>Initial ignore window while Speex filter converges. Automatically scales dynamically with volume slider.</small>";
     html += "<div style='margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;'>";
@@ -1202,6 +1206,20 @@ void handleWebSave() {
         int val = server.arg("aecIgnore").toInt();
         if (val >= 0 && val <= 10000) {
             settings.aecIgnore = val;
+        }
+    }
+
+    if (server.hasArg("bargeStreak")) {
+        int val = server.arg("bargeStreak").toInt();
+        if (val >= 2 && val <= 20) {
+            settings.bargeStreak = val;
+        }
+    }
+
+    if (server.hasArg("bargeDensity")) {
+        int val = server.arg("bargeDensity").toInt();
+        if (val >= 3 && val <= 24) {
+            settings.bargeDensity = val;
         }
     }
 
@@ -3449,9 +3467,9 @@ void setup() {
   setAecDelay(settings.aecDelay); // Apply the saved tuning
   setAecAttenuation(settings.aecAttenuation);
   setAecCutoff(settings.aecCutoff);
-  Serial.printf("[Barge-in] Status: %s | Base Cutoff: %d | Base Atten: %d%% | Base Ignore: %dms (Volume: %d/21 -> Eff Cutoff: %d, Eff Atten: %d%%, Eff Ignore: %lums)\n",
+  Serial.printf("[Barge-in] Status: %s | Base Cutoff: %d | Streak: %d | Density: %d/24 | Base Atten: %d%% | Base Ignore: %dms (Volume: %d/21 -> Eff Cutoff: %d, Eff Atten: %d%%, Eff Ignore: %lums)\n",
                 settings.enableInterrupt ? "ENABLED" : "DISABLED",
-                settings.aecCutoff, settings.aecAttenuation, settings.aecIgnore,
+                settings.aecCutoff, settings.bargeStreak, settings.bargeDensity, settings.aecAttenuation, settings.aecIgnore,
                 settings.volume, getEffectiveAecCutoff(), getEffectiveAecAttenuation(), getEffectiveAecIgnore());
   display.showStatus("Speech Init|OK");
 
