@@ -10,3 +10,6 @@ compile_commands.json
 
 # Secrets
 include/Secrets.h
+
+# Compiled binaries
+*.bin
