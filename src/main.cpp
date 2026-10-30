@@ -721,7 +721,7 @@ void handleWebRoot() {
     html += "</head><body>";
     html += "<div id='saveModal' class='modal'><div class='modal-content'><h3 id='modalTitle'></h3><p id='modalText'></p><button class='close-btn' id='modalClose' onclick='document.getElementById(\"saveModal\").style.display=\"none\"'>OK</button></div></div>";
     html += "<div class='container'>";
-    html += "<h2><img src='/logo.png' style='height:40px; vertical-align:middle; margin-right:15px;' onerror='this.style.display=\"none\"'>ESP32 AI Configuration</h2>";
+    html += "<h2><img src='/logo.png' style='height:40px; vertical-align:middle; margin-right:15px;' onerror='this.style.display=\"none\"'>ESP32 AI Configuration <span style='font-size:0.45em; vertical-align:middle; background:#e9ecef; color:#495057; padding:3px 8px; border-radius:12px; font-weight:normal;'>v" FIRMWARE_VERSION "</span></h2>";
 
     // Tabs
     html += "<div class='tabs'>";
@@ -2458,7 +2458,7 @@ void handleSerialCommands() {
           Serial.println("/reboot         - Restart the device");
           Serial.println("--------------------------\n");
         } else if (inputBuffer == "/settings") {
-          Serial.println("\n--- Current Settings ---");
+          Serial.println("\n--- Current Settings (v" FIRMWARE_VERSION ") ---");
           Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
           Serial.printf("CPU Freq:   %d MHz\n", getCpuFrequencyMhz());
           Serial.printf("RSSI:       %d dBm\n", network.getSignalStrength());

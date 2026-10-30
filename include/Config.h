@@ -42,7 +42,7 @@ extern const char* OPENWEBUI_URL;
 extern const char* OPENWEBUI_KEY;
 extern const char* LLM_MODEL;
 
-#define FIRMWARE_VERSION "0.0.2A"
+#define FIRMWARE_VERSION "1.0.1"
 
 // RGB LED Pin (ESP32-S3 DevKitC-1)
 #define RGB_LED_PIN 48
