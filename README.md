@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="data/logo.png" alt="ESP32 AI Module Logo" width="250" />
+  <img src="data/logo.png" alt="ESP32 AI Module Logo" height="160" />
 </p>
 
 # ESP32 AI Module Firmware (AI Interactor)

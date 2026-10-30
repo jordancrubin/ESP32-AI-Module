@@ -420,7 +420,7 @@ CommandResult CommandProcessor::processCommand(const String& text) {
                 int tempF = (int)((temp * 1.8f) + 32.5f);
 
                 String msg = "The indoor air quality is " + quality + 
-                             ", with a gas resistance of " + String(vocInt) + " kilohms.";
+                             ", with a gas resistance of " + String(vocInt) + " kilo ohms.";
                 if (tempC > 0) {
                     msg += " The indoor temperature is " + String(tempF) + " degrees Fahrenheit, or " + String(tempC) + " degrees Celsius, with " + String(humInt) + " percent humidity.";
                 }
