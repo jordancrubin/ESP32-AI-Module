@@ -2,112 +2,158 @@
   <img src="data/logo.png" alt="ESP32 AI Module Logo" height="160" />
 </p>
 
-# ESP32 AI Module Firmware (AI Interactor)
+# ESP32 AI Module (AI Interactor) — v1.0.1
 
-A powerful, fully-featured AI Voice Assistant built on the ESP32-S3. This project seamlessly integrates Large Language Models (LLMs), Text-to-Speech (TTS), Wake Word detection, and Acoustic Echo Cancellation (AEC) into a standalone hardware module with a beautiful touch UI.
+[![Release](https://img.shields.io/badge/version-1.0.1-blue.svg)](https://github.com/jordancrubin/ESP32-AI-Module/releases)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Platform: ESP32-S3](https://img.shields.io/badge/Platform-ESP32--S3-red.svg)](https://www.espressif.com/en/products/socs/esp32-s3)
+[![Framework: Arduino / PlatformIO](https://img.shields.io/badge/Framework-Arduino%20%7C%20PlatformIO-orange.svg)](https://platformio.org/)
+
+A powerful, standalone AI Voice Assistant appliance built for the **ESP32-S3**. This project unites on-device Machine Learning wake word detection, Acoustic Echo Cancellation (AEC) with voice barge-in, streaming Large Language Models (LLMs), high-fidelity Text-to-Speech (TTS), long-term memory persistence, live web search/calendar RAG, and an LVGL touch interface into a dedicated desktop hardware unit.
 
 Created by **Jordan Rubin** ([Rubintech](https://www.youtube.com/@rubin-tech)).
 
 ---
 
-## 🌟 Features
+## 📸 Interface & Hardware Showcase
 
-- **Always-Listening Wake Word:** Powered by microWakeWord machine learning (`Excuse me Hal`).
-- **Acoustic Echo Cancellation (AEC):** Uses SpeexDSP to cancel out the device's own speaker audio, allowing you to interrupt the AI while it is speaking (Voice Barge-in).
-- **LLM Integration:** Compatible with any OpenAI-format API endpoint (OpenWebUI, Local LLaMA, GPT-4, etc.).
-- **Text-to-Speech (TTS):** Streams high-quality audio responses directly to an I2S speaker using Kokoro/OpenWebUI or direct URL providers.
-- **LVGL Touch Interface:** Rich graphical user interface featuring a status display, VU meters, settings menus, and dynamic clock/weather screens.
-- **Web Configuration Portal:** A built-in captive portal and admin web server to manage API keys, WiFi, AEC tuning, and OTA updates without recompiling.
-- **Diagnostic Suite:** Built-in serial commands and web tools to generate sine sweeps, test microphone harmonics, and auto-tune the AEC alignment.
+<p align="center">
+  <img src="images/ui_main.jpg" alt="Main Interactor UI" width="31%" />
+  <img src="images/ui_clock.jpg" alt="Clock and Weather UI" width="31%" />
+  <img src="images/web_config.jpg" alt="Web Configuration Portal" width="31%" />
+</p>
 
 ---
 
-## 🛠️ Hardware Requirements
+## 🌟 Key Features
 
-- **Microcontroller:** ESP32-S3 (Recommended: 16MB Flash, 8MB PSRAM like `esp32-s3-devkitc1-n16r8`).
-- **Microphone:** I2S MEMS Microphone (e.g., ICS-43434 or INMP441).
-- **Speaker/DAC:** I2S Amplifier/DAC (e.g., MAX98357A) connected to a 4Ω/8Ω speaker.
-- **Display:** SPI/Parallel TFT Display with Touch (Code natively supports ILI9481 via `Arduino_GFX` and XPT2046 for touch).
-- **Status LED:** WS2812B / NeoPixel RGB LED.
-
----
-
-## ⚙️ Software & Dependencies
-
-This project is built using **PlatformIO** and the Arduino framework.
-
-### Core Libraries:
-- `lvgl/lvgl` (^8.3.11) - Graphics library
-- `bblanchon/ArduinoJson` - JSON parsing
-- `moononournation/GFX Library for Arduino` - Display drivers
-- `paulstoffregen/XPT2046_Touchscreen` - Touch controller
-- `rjsachse/ESP32-SpeexDSP` - Hardware-accelerated AEC and noise suppression
-- `pschatzmann/arduino-libhelix` - MP3 audio decoding
-- `microWakeWord` - On-device streaming wake word engine ("Excuse me Hal") using TensorFlow Lite Micro & `esp-micro-speech-features`
+- **On-Device Wake Word Engine:** Always-listening neural wake word detection (`"Excuse me Hal"`) running locally via TensorFlow Lite Micro and `microWakeWord` with pre-boot synthetic self-diagnostics.
+- **Acoustic Echo Cancellation (AEC) & Voice Barge-in:** Hardware-accelerated SpeexDSP AEC isolates microphone input from the device's own speaker output, allowing you to interrupt the AI mid-sentence.
+- **Open-WebUI Long-Term Memory:** Seamlessly remembers personal facts across multi-turn dialogues (*"Remember that I have a cat named Spot"*, followed by *"And also remember his nickname is Spotty"*). Automatically commits memories via Open-WebUI REST API and retrieves them into contextual prompts.
+- **Real-Time Calendar & Web Search RAG:** Dynamically queries upcoming calendar events and live Google/DuckDuckGo web snippets via Open-WebUI to answer schedule and real-time questions conversationally.
+- **Streaming LLM Client:** Full Server-Sent Events (SSE) streaming client with automatic model fallback, chunked TTS synthesis, and prompt caching.
+- **Rich LVGL Touch GUI:** Interactive 320x240 color display featuring dynamic audio VU meters, animated thinking states, model selection drawer, volume slider, clock/weather screen, and on-device touch calibration.
+- **Captive Web Configuration Portal:** Out-of-the-box AP fallback mode (`http://aiesp.local`) to configure Wi-Fi credentials, API endpoints, knowledge collection IDs, TTS providers, and OTA firmware updates without re-compiling.
+- **Audio Diagnostics & Auto-Tuning Suite:** Automated sine sweep generators, microphone harmonic resonance tests, and automated AEC delay/attenuation calibration.
 
 ---
 
-## 🚀 Installation & Setup
+## 🔌 Hardware Pinout & Wiring
 
-1. **Clone the Repository:**
-   ```bash
-   git clone https://github.com/yourusername/ESP32-AI-Module.git
-   cd ESP32-AI-Module
-   ```
-2. **Open in PlatformIO:**
-   Open the folder in VSCode with the PlatformIO extension installed.
-3. **Upload Filesystem Image:**
-   Upload the LittleFS filesystem image to flash required assets like `chime.mp3`.
-   *In PlatformIO: Click the Alien icon -> `esp32-s3-devkitc1-n16r8` -> Platform -> Build Filesystem Image -> Upload Filesystem Image.*
-4. **Compile and Upload:**
-   Build and upload the firmware to your ESP32-S3.
+Designed for the **ESP32-S3 DevKitC-1 N16R8** (16MB Flash Quad, 8MB PSRAM Octal).
 
-### Initial Configuration
-On first boot, the device will host a WiFi access point. 
-1. Connect to the setup WiFi network.
-2. Navigate to `http://aiesp.local` or the displayed IP address.
-3. Set up your local WiFi credentials, API keys, and LLM endpoint.
-4. (Optional) Run the Touch Calibration if prompted on the screen.
+| Component / Function | Pin Name | ESP32-S3 GPIO | Details |
+|---|---|---|---|
+| **Display (ILI9481 SPI)** | SCK / CLK | `GPIO 12` | High-speed SPI clock |
+| | MOSI / SDI | `GPIO 11` | Display data in |
+| | MISO / SDO | `GPIO 13` | Display data out |
+| | CS | `GPIO 10` | Chip Select |
+| | DC / RS | `GPIO 9` | Command / Data selection |
+| | RST | `GPIO 46` | Hardware Reset |
+| **Touch Screen (XPT2046)**| TOUCH_CS | `GPIO 14` | Touch Chip Select |
+| | TOUCH_IRQ | `255` | Polling mode (disabled interrupt) |
+| **Microphone (ICS-43434 / INMP441)** | I2S_SCK (BCLK) | `GPIO 42` | Serial clock |
+| | I2S_WS (LRCL) | `GPIO 41` | Word select (left/right clock) |
+| | I2S_SD (DOUT) | `GPIO 40` | Serial audio data |
+| **Speaker / DAC (MAX98357A)** | SPEAKER_SCK | `GPIO 7` | Bit clock |
+| | SPEAKER_WS | `GPIO 6` | Word select / LRC |
+| | SPEAKER_SD | `GPIO 5` | Serial audio data in (DIN) |
+| **Environmental Sensor (BME680)** | I2C SDA | `GPIO 8` | Temperature, humidity, pressure, gas |
+| | I2C SCL | `GPIO 3` | I2C clock |
+| **Status Indicator** | WS2812 NeoPixel | `GPIO 48` | On-board DevKit RGB LED |
+| **Factory Reset Trigger** | BOOT Button | `GPIO 0` | Hold for 3s during boot to reset NVS |
+
+---
+
+## 🗣️ Voice Commands & Easter Eggs
+
+In addition to open-ended LLM conversations, the appliance natively intercepts and executes local voice commands instantly:
+
+| Spoken Phrase | Action Performed |
+|---|---|
+| *"Excuse me Hal"* | Triggers wake word listener and glows status LED green. |
+| *"Remember that \<fact\>"* | Instantly saves \<fact\> to persistent Open-WebUI memory. |
+| *"And also remember that \<fact\>"* | Multi-turn conversational memory addition. |
+| *"What do you remember?"* | Queries and vocalizes user memories stored in Open-WebUI. |
+| *"Set a timer for \<N\> minutes"* | Starts an on-screen background countdown timer. |
+| *"Calibrate touch"* | Launches the 4-point on-screen touch screen calibration utility. |
+| *"Reboot system"* / *"Restart"* | Safely restarts the ESP32-S3 module. |
+| *"End conversation"* / *"Stop"* | Ends the voice session and returns to standby. |
+| *"Show Blue Screen of Death"* | Displays retro Windows BSOD diagnostic easter egg. |
+| *"Show Guru Meditation"* | Displays classic Amiga Guru Meditation easter egg. |
+
+---
+
+## 💻 Serial Monitor CLI Commands
+
+Connect via serial at **115200 baud** to access real-time diagnostics:
+
+| Command | Description |
+|---|---|
+| `/help` | List all available CLI commands. |
+| `/settings` | Print all saved NVS configuration values, thresholds, and audio tuning parameters. |
+| `/say <text>` | Bypasses the LLM and streams audio synthesis directly to the speaker. |
+| `/new` | Clears conversation history and invalidates the memory cache. |
+| `/calibrate` | Triggers the touch calibration routine. |
+| `/tune_aec` | Runs the automated Acoustic Echo Cancellation alignment and delay calculation. |
+| `/test_aec` | Records two 10-second audio clips (with and without AEC) to evaluate speaker isolation. |
+| `/test_mic` | Records a 5-second sample to LittleFS and plays it back. |
+| `/test_harmonic`| Plays a 20-second sine sweep to detect microphone enclosure resonance. |
+| `/factory_reset`| Wipes all NVRAM settings and restarts into captive portal mode. |
+
+---
+
+## 🚀 Installation & Getting Started
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/jordancrubin/ESP32-AI-Module.git
+cd ESP32-AI-Module
+```
+
+### 2. Open in PlatformIO
+Open the project directory in VSCode with the PlatformIO extension installed.
+
+### 3. Build & Upload the LittleFS Filesystem
+Assets such as `chime.mp3` and `logo.png` must be written to LittleFS flash:
+* **PlatformIO CLI:**
+  ```bash
+  pio run --target uploadfs --environment esp32-s3-devkitc1-n16r8
+  ```
+* **VSCode UI:** Click the PlatformIO Alien icon -> `esp32-s3-devkitc1-n16r8` -> **Platform** -> **Upload Filesystem Image**.
+
+### 4. Build & Upload Firmware
+* **PlatformIO CLI:**
+  ```bash
+  pio run --target upload --environment esp32-s3-devkitc1-n16r8
+  ```
+
+---
+
+## ⚙️ Initial Configuration (Captive Portal)
+
+1. On first boot (or after a factory reset), the device will broadcast an open Wi-Fi network named **`ESP32-AI-Setup`** (or prompt on the LCD).
+2. Connect your phone or computer to the setup network and navigate to `http://192.168.4.1` or `http://aiesp.local`.
+3. Enter your local Wi-Fi credentials, your Open-WebUI or OpenAI API URL, and API key.
+4. Tap **Save & Reboot**. The device will connect to your local network and initialize.
 
 ---
 
 ## 🎙️ AEC & Audio Tuning
 
-Because every speaker/microphone hardware combination has a different physical delay (distance + I2S latency), the Acoustic Echo Cancellation (AEC) must be tuned to your specific build.
+Because every physical enclosure, speaker placement, and microphone cavity introduces distinct acoustic delay and reflection, you should calibrate the AEC once after mounting hardware:
 
-You can easily auto-tune the AEC through the Web UI Diagnostics tab or via the Serial Monitor:
-
-1. Open the Serial Monitor (115200 baud).
-2. Send the command `/tune_aec`.
-3. The device will play test tones, record them, and mathematically calculate the exact delay, attenuation, and cutoff gate needed to prevent the AI from triggering its own wake word.
-
----
-
-## 💻 Serial Commands
-
-The firmware includes a robust serial CLI for debugging and diagnostics. Send these commands via the PlatformIO serial monitor:
-
-| Command | Description |
-|---------|-------------|
-| `/help` | List all available commands. |
-| `/settings` | Print all current NVRAM settings and thresholds. |
-| `/say <text>` | Bypasses the LLM and instantly plays the provided text via TTS. |
-| `/new` | Clears the current LLM conversation memory/history. |
-| `/calibrate` | Forces the touch screen calibration utility to run. |
-| `/tune_aec` | Runs the automated Acoustic Echo Cancellation tuning routine. |
-| `/test_aec` | Records two 10-second clips (with and without AEC) to test isolation. |
-| `/test_mic` | Records a 5-second clip to LittleFS and plays it back to verify hardware. |
-| `/test_harmonic` | Plays a 20-second sine sweep to test microphone clipping and resonance. |
-| `/factory_reset`| Wipes all NVRAM settings, clears WiFi, and reboots. |
-
-*Tip: You can also hold the physical `BOOT` button (GPIO 0) for 3 seconds during startup to trigger a factory reset.*
+1. Place the assembled unit in its final operating location.
+2. Open the Serial Monitor (115200 baud) or the Web UI Diagnostics tab.
+3. Send `/tune_aec`.
+4. The unit will play reference sweeps, measure microphone loopback, calculate the exact buffer delay, and save optimal cancellation parameters to non-volatile flash.
 
 ---
 
-## 📄 License
+## 📄 License & Credits
 
-This project is licensed under the **GNU General Public License v3.0** (GPLv3) — see the [LICENSE](LICENSE) file for the full text.
+This project is licensed under the **GNU General Public License v3.0** (GPLv3) — see the [LICENSE](LICENSE) file for details.
 
-This license applies to the project's own source code. The included third-party sub-libraries (LVGL, ArduinoJson, SpeexDSP, kissfft, etc.) remain under their own licenses; please respect their terms as well.
+Third-party dependencies (LVGL, ArduinoJson, SpeexDSP, microWakeWord, libhelix) remain under their respective open-source licenses.
 
-**Designed by Rubintech (2026)**
+**Designed and engineered by Rubintech (2026)**
