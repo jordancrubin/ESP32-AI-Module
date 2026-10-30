@@ -77,16 +77,16 @@ void setAecCutoff(int cutoff) { s_aec_cutoff = cutoff >= 0 ? cutoff : 0; }
 
 int getEffectiveAecAttenuation() {
   float v_norm = constrain((float)settings.volume / 21.0f, 0.0f, 1.0f);
-  int effective_atten = s_aec_attenuation + (int)roundf((v_norm - 0.5f) * 30.0f);
-  if (effective_atten < 30) effective_atten = 30;
-  if (effective_atten > 80) effective_atten = 80;
+  int effective_atten = s_aec_attenuation + (int)roundf((v_norm - 0.5f) * 12.0f);
+  if (effective_atten < 35) effective_atten = 35;
+  if (effective_atten > 60) effective_atten = 60;
   return effective_atten;
 }
 
 int32_t getEffectiveAecCutoff() {
   float v_norm = constrain((float)settings.volume / 21.0f, 0.0f, 1.0f);
-  int32_t effective_cutoff = (int32_t)roundf(s_aec_cutoff * (1.0f + (v_norm - 0.5f) * 0.85f));
-  if (effective_cutoff < 1500) effective_cutoff = 1500;
+  int32_t effective_cutoff = (int32_t)roundf(s_aec_cutoff * (1.0f + (v_norm - 0.5f) * 0.20f));
+  if (effective_cutoff < 1800) effective_cutoff = 1800;
   return effective_cutoff;
 }
 void setAecGain(int gain) {
@@ -828,11 +828,13 @@ bool SpeechManager::detectWakeWord(float threshold) {
   static bool s_was_audio_playing = false;
   static uint32_t s_barge_window = 0;
   static int s_active_density = 0;
+  static int s_consecutive_active = 0;
 
   if (!isAudioPlaying) {
     s_was_audio_playing = false;
     s_barge_window = 0;
     s_active_density = 0;
+    s_consecutive_active = 0;
   }
 
   if (isAudioPlaying) {
@@ -842,13 +844,14 @@ bool SpeechManager::detectWakeWord(float threshold) {
     if (!s_was_audio_playing) {
       s_barge_window = 0;
       s_active_density = 0;
+      s_consecutive_active = 0;
       s_was_audio_playing = true;
     }
 
     int effective_atten = getEffectiveAecAttenuation();
     int32_t effective_cutoff = getEffectiveAecCutoff();
     int32_t tap_eval_thresh = (effective_cutoff * 3) / 2;
-    if (tap_eval_thresh < 4500) tap_eval_thresh = 4500;
+    if (tap_eval_thresh < 4000) tap_eval_thresh = 4000;
 
     bool barge_triggered = false;
     int32_t burst_max_level = 0;
@@ -875,27 +878,49 @@ bool SpeechManager::detectWakeWord(float threshold) {
         if (settings.enableInterrupt && effective_cutoff > 0 && !barge_triggered) {
           // 1. Physical microphone tap fast-path (requires true hardware clipping/saturation: raw >= 18000)
           if (frame_max >= 18000 && frame_eval >= tap_eval_thresh) {
-            s_barge_window = 0;
-            s_active_density = 0;
             Serial.printf("\n>>> TAP BARGE-IN DETECTED: raw=%d, eval=%d (eff_att:%d%%) > thresh=%d (eff_cut=%d, vol=%d/21) <<<\n",
                           frame_max, frame_eval, effective_atten, tap_eval_thresh, effective_cutoff, settings.volume);
+            s_barge_window = 0;
+            s_active_density = 0;
+            s_consecutive_active = 0;
             barge_triggered = true;
           }
 
-          // 2. Rolling Density Voice Barge-In Filter
-          // 32-frame sliding window (~512 ms at 16 ms/frame).
-          // Requires ~65% active speech density (>= 20 active frames out of 32) to trigger,
-          // filtering out short transient spikes like coughs (3-6 frames), throat clears, or door clicks.
           bool frame_active = (frame_eval > effective_cutoff);
-          s_barge_window = (s_barge_window << 1) | (frame_active ? 1 : 0);
+
+          // Update consecutive loud frame streak (for sharp vocal shouts/commands)
+          if (frame_active) {
+            s_consecutive_active++;
+          } else {
+            s_consecutive_active = 0;
+          }
+
+          // Update 24-frame sliding window (~384 ms at 16 ms/frame) for multi-syllable conversational speech
+          s_barge_window = ((s_barge_window << 1) | (frame_active ? 1 : 0)) & 0x00FFFFFF;
           int active_count = __builtin_popcount(s_barge_window);
           s_active_density = active_count;
 
-          if (active_count >= 20) {
+          // 2. Vocal Yell / Shouted Command Streak Trigger:
+          // Requires 5 consecutive loud frames (~80 ms) above effective cutoff.
+          // Perfectly discriminates against transient clicks (1 frame) and coughs (2-4 frames, <60 ms),
+          // while triggering reliably on sharp vocal shouts ("STOP!", "HEY!", "HAL!").
+          if (s_consecutive_active >= 5) {
+            Serial.printf("\n>>> VOICE BARGE-IN DETECTED (Yell Streak): %d consecutive frames (~%d ms) | raw=%d, eval=%d > eff_cut=%d (vol=%d/21) <<<\n",
+                          s_consecutive_active, s_consecutive_active * 16, frame_max, frame_eval, effective_cutoff, settings.volume);
             s_barge_window = 0;
             s_active_density = 0;
-            Serial.printf("\n>>> VOICE BARGE-IN DETECTED (Density Filter): %d/32 active frames (~65%% over 512ms) | raw=%d, eval=%d > eff_cut=%d (vol=%d/21) <<<\n",
+            s_consecutive_active = 0;
+            barge_triggered = true;
+          }
+          // 3. Conversational Multi-Syllable Density Trigger:
+          // Requires >= 8 active frames out of 24 (~33% speech density over ~384 ms).
+          // Captures phrases like "Excuse me" or "Hold on" across natural consonant dips.
+          else if (active_count >= 8) {
+            Serial.printf("\n>>> VOICE BARGE-IN DETECTED (Density Filter): %d/24 active frames (~33%% over 384ms) | raw=%d, eval=%d > eff_cut=%d (vol=%d/21) <<<\n",
                           active_count, frame_max, frame_eval, effective_cutoff, settings.volume);
+            s_barge_window = 0;
+            s_active_density = 0;
+            s_consecutive_active = 0;
             barge_triggered = true;
           }
         }
@@ -912,10 +937,10 @@ bool SpeechManager::detectWakeWord(float threshold) {
     static unsigned long s_last_barge_log = 0;
     if (burst_max_level > 800 && (millis() - s_last_barge_log > 300)) {
       s_last_barge_log = millis();
-      Serial.printf("[Barge-In Mon] raw=%d, eval=%d | eff_cut=%d (base:%d), eff_att=%d%% (base:%d%%), vol=%d/21, int_en=%s, density=%d/32\n",
+      Serial.printf("[Barge-In Mon] raw=%d, eval=%d | eff_cut=%d (base:%d), eff_att=%d%% (base:%d%%), vol=%d/21, int_en=%s, streak=%d/5, density=%d/24\n",
                     burst_max_level, max_eval_level, effective_cutoff, s_aec_cutoff,
                     effective_atten, s_aec_attenuation, settings.volume,
-                    settings.enableInterrupt ? "ON" : "OFF", s_active_density);
+                    settings.enableInterrupt ? "ON" : "OFF", s_consecutive_active, s_active_density);
     }
 
     if (barge_triggered) {
