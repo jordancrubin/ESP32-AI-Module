@@ -376,11 +376,73 @@ static bool postAddMemory(const String& baseUrl, const String& apiKey, const Str
 }
 
 static String extractMemoryFact(const String& prompt) {
-    String lower = prompt;
-    lower.toLowerCase();
-    lower.trim();
+    if (prompt.length() == 0) return "";
+    
+    // 1. Strip leading and trailing whitespace and punctuation
+    String clean = prompt;
+    clean.trim();
+    while (clean.endsWith(".") || clean.endsWith("!") || clean.endsWith("?") || clean.endsWith(",") || clean.endsWith(";")) {
+        clean.remove(clean.length() - 1);
+        clean.trim();
+    }
+    if (clean.length() == 0) return "";
 
-    // 1. Check for suffix: "... to memory", "... to my memory", "... in memory", "... in your memory"
+    String lower = clean;
+    lower.toLowerCase();
+
+    // 2. Strip conversational wake fillers (e.g., "Hal, ", "Hey Hal, ", "Excuse me Hal, ")
+    const char* leadFillers[] = {
+        "excuse me hal, ",
+        "excuse me hal ",
+        "hey hal, ",
+        "hey hal ",
+        "okay hal, ",
+        "okay hal ",
+        "ok hal, ",
+        "ok hal ",
+        "hal, ",
+        "hal ",
+        "hey, ",
+        "hey ",
+        "please, "
+    };
+    for (const char* lf : leadFillers) {
+        if (lower.startsWith(lf)) {
+            clean = clean.substring(strlen(lf));
+            clean.trim();
+            lower = clean;
+            lower.toLowerCase();
+            break;
+        }
+    }
+
+    // 3. Do not intercept questions / queries about memory
+    const char* queryPrefixes[] = {
+        "what do you remember",
+        "what is in my memory",
+        "what is in your memory",
+        "what is in memory",
+        "do you remember",
+        "can you remember what",
+        "can you recall",
+        "do you recall",
+        "what did i tell you",
+        "tell me what you remember",
+        "tell me what is in my memory",
+        "list my memories",
+        "list memories",
+        "show my memories",
+        "show memories",
+        "what are my memories",
+        "what are your memories"
+    };
+    for (const char* qp : queryPrefixes) {
+        if (lower.startsWith(qp)) {
+            return "";
+        }
+    }
+
+    // 4. Check for suffix: "... to memory", "... to my memory", "... in memory", "... into memory"
     const char* suffixes[] = {
         " to my memory",
         " to your memory",
@@ -395,41 +457,79 @@ static String extractMemoryFact(const String& prompt) {
 
     for (const char* sfx : suffixes) {
         if (lower.endsWith(sfx)) {
-            String sub = prompt.substring(0, prompt.length() - strlen(sfx));
+            String sub = clean.substring(0, clean.length() - strlen(sfx));
+            sub.trim();
             String subLower = sub;
             subLower.toLowerCase();
-            subLower.trim();
 
             const char* startPfxs[] = {
                 "can you please add that ",
                 "can you please add ",
-                "can you add that ",
-                "can you add ",
                 "could you please add that ",
                 "could you please add ",
+                "would you please add that ",
+                "would you please add ",
+                "can you add that ",
+                "can you add ",
                 "could you add that ",
                 "could you add ",
+                "would you add that ",
+                "would you add ",
                 "please add that ",
                 "please add ",
                 "i want you to add that ",
                 "i want you to add ",
+                "i need you to add that ",
+                "i need you to add ",
+                "i'd like you to add that ",
+                "id like you to add that ",
+                "i'd like you to add ",
+                "id like you to add ",
                 "add that ",
                 "add ",
+                "can you please save that ",
+                "can you please save ",
+                "could you please save that ",
+                "could you please save ",
+                "can you save that ",
+                "can you save ",
+                "could you save that ",
+                "could you save ",
+                "please save that ",
+                "please save ",
                 "save that ",
                 "save ",
-                "store that ",
-                "store ",
+                "can you please put that ",
+                "can you please put ",
+                "can you put that ",
+                "can you put ",
+                "please put that ",
+                "please put ",
                 "put that ",
                 "put ",
+                "store that ",
+                "store ",
                 "keep that ",
-                "keep "
+                "keep ",
+                "commit that ",
+                "commit ",
+                "write down that ",
+                "write down ",
+                "write that ",
+                "write ",
+                "record that ",
+                "record "
             };
 
             for (const char* spfx : startPfxs) {
                 if (subLower.startsWith(spfx)) {
                     String fact = sub.substring(strlen(spfx));
                     fact.trim();
-                    while (fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
+                    while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(":")) {
+                        fact = fact.substring(1);
+                        fact.trim();
+                    }
+                    while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
                         fact.remove(fact.length() - 1);
                         fact.trim();
                     }
@@ -437,10 +537,14 @@ static String extractMemoryFact(const String& prompt) {
                 }
             }
 
-            // Fallback for suffix: if user said "<fact> to memory" without leading "add"
+            // Fallback for suffix: user said "<fact> to memory" without leading verb
             String fact = sub;
             fact.trim();
-            while (fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
+            while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(":")) {
+                fact = fact.substring(1);
+                fact.trim();
+            }
+            while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
                 fact.remove(fact.length() - 1);
                 fact.trim();
             }
@@ -448,13 +552,21 @@ static String extractMemoryFact(const String& prompt) {
         }
     }
 
-    // 2. Check for prefixes: "remember ...", "add to memory ...", "save to memory ..."
+    // 5. Check for prefixes: "remember ...", "add to memory ...", "save to memory ..."
     const char* prefixes[] = {
+        // Polite forms + remember
         "can you please remember that ",
         "can you please remember this: ",
         "can you please remember this ",
         "can you please remember to ",
         "can you please remember ",
+        "could you please remember that ",
+        "could you please remember this: ",
+        "could you please remember this ",
+        "could you please remember to ",
+        "could you please remember ",
+        "would you please remember that ",
+        "would you please remember ",
         "can you remember that ",
         "can you remember this: ",
         "can you remember this ",
@@ -462,19 +574,56 @@ static String extractMemoryFact(const String& prompt) {
         "can you remember ",
         "could you remember that ",
         "could you remember ",
-        "i want you to remember that ",
-        "i want you to remember ",
+        "would you remember that ",
+        "would you remember ",
         "please remember that ",
         "please remember this: ",
         "please remember this ",
         "please remember to ",
         "please remember ",
+        "i want you to remember that ",
+        "i want you to remember ",
+        "i need you to remember that ",
+        "i need you to remember ",
+        "i'd like you to remember that ",
+        "id like you to remember that ",
+        "i'd like you to remember ",
+        "id like you to remember ",
         "remember that ",
         "remember this: ",
         "remember this ",
         "remember to ",
         "remember, ",
         "remember ",
+
+        // Add to memory
+        "can you please add to my memory that ",
+        "can you please add to my memory: ",
+        "can you please add to my memory ",
+        "can you please add to memory that ",
+        "can you please add to memory: ",
+        "can you please add to memory ",
+        "can you add to my memory that ",
+        "can you add to my memory: ",
+        "can you add to my memory ",
+        "can you add to your memory that ",
+        "can you add to your memory: ",
+        "can you add to your memory ",
+        "can you add to memory that ",
+        "can you add to memory: ",
+        "can you add to memory ",
+        "could you add to memory that ",
+        "could you add to memory: ",
+        "could you add to memory ",
+        "please add to my memory that ",
+        "please add to my memory: ",
+        "please add to my memory ",
+        "please add to your memory that ",
+        "please add to your memory: ",
+        "please add to your memory ",
+        "please add to memory that ",
+        "please add to memory: ",
+        "please add to memory ",
         "add to my memory that ",
         "add to my memory: ",
         "add to my memory ",
@@ -490,6 +639,26 @@ static String extractMemoryFact(const String& prompt) {
         "add this to memory ",
         "add this to your memory ",
         "add this to my memory ",
+        "add a memory that ",
+        "add a memory: ",
+        "add a memory ",
+
+        // Save to memory
+        "can you save to memory that ",
+        "can you save to memory: ",
+        "can you save to memory ",
+        "can you save to my memory that ",
+        "can you save to my memory: ",
+        "can you save to my memory ",
+        "please save to my memory that ",
+        "please save to my memory: ",
+        "please save to my memory ",
+        "please save to your memory that ",
+        "please save to your memory: ",
+        "please save to your memory ",
+        "please save to memory that ",
+        "please save to memory: ",
+        "please save to memory ",
         "save to my memory that ",
         "save to my memory: ",
         "save to my memory ",
@@ -503,11 +672,24 @@ static String extractMemoryFact(const String& prompt) {
         "save this to your memory: ",
         "save this to memory ",
         "save this to your memory ",
-        "add a memory that ",
-        "add a memory: ",
-        "add a memory ",
+
+        // Put/store in memory
+        "put in memory that ",
+        "put in memory: ",
+        "put in memory ",
+        "put this in memory: ",
+        "put this in memory ",
+        "store in memory that ",
+        "store in memory: ",
+        "store in memory ",
+
+        // Commit/memorize/note
         "commit to memory that ",
+        "commit to memory: ",
         "commit to memory ",
+        "memorize that ",
+        "memorize this: ",
+        "memorize ",
         "note that ",
         "take note that ",
         "take a note that ",
@@ -520,9 +702,13 @@ static String extractMemoryFact(const String& prompt) {
 
     for (const char* pfx : prefixes) {
         if (lower.startsWith(pfx)) {
-            String fact = prompt.substring(strlen(pfx));
+            String fact = clean.substring(strlen(pfx));
             fact.trim();
-            while (fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
+            while (fact.startsWith("\"") || fact.startsWith("'") || fact.startsWith(":")) {
+                fact = fact.substring(1);
+                fact.trim();
+            }
+            while (fact.endsWith("\"") || fact.endsWith("'") || fact.endsWith(".") || fact.endsWith("!") || fact.endsWith("?")) {
                 fact.remove(fact.length() - 1);
                 fact.trim();
             }
