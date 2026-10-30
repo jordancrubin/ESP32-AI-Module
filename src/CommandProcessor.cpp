@@ -70,11 +70,11 @@ CommandResult CommandProcessor::processCommand(const String& text) {
     String lowerText = text;
     lowerText.toLowerCase();
 
-    // Check for exact "end conversation" interaction (ignoring punctuation and surrounding whitespace)
+    // Check for "end conversation" command and synonyms (catching substrings, Whisper "and conversation", and standalone exit words)
     String trimmedClean = "";
     for (unsigned int i = 0; i < lowerText.length(); i++) {
         char c = lowerText[i];
-        if (isalnum(c) || c == ' ') {
+        if (isalnum((unsigned char)c) || c == ' ') {
             trimmedClean += c;
         }
     }
@@ -83,8 +83,26 @@ CommandResult CommandProcessor::processCommand(const String& text) {
         trimmedClean.replace("  ", " ");
     }
 
-    if (trimmedClean == "end conversation" || trimmedClean == "end the conversation" || 
-        trimmedClean == "end conversation please" || trimmedClean == "please end conversation") {
+    if (lowerText.indexOf("end conversation") != -1 || 
+        lowerText.indexOf("end the conversation") != -1 || 
+        lowerText.indexOf("end this conversation") != -1 ||
+        lowerText.indexOf("end of conversation") != -1 ||
+        lowerText.indexOf("and conversation") != -1 ||
+        lowerText.indexOf("and the conversation") != -1 ||
+        lowerText.indexOf("stop conversation") != -1 ||
+        lowerText.indexOf("stop the conversation") != -1 ||
+        lowerText.indexOf("close conversation") != -1 ||
+        lowerText.indexOf("exit conversation") != -1 ||
+        lowerText.indexOf("quit conversation") != -1 ||
+        lowerText.indexOf("terminate conversation") != -1 ||
+        lowerText.indexOf("finish conversation") != -1 ||
+        trimmedClean == "goodbye" || trimmedClean == "bye" || trimmedClean == "bye bye" || 
+        trimmedClean == "bye now" || trimmedClean == "stop" || trimmedClean == "cancel" || 
+        trimmedClean == "exit" || trimmedClean == "quit" || trimmedClean == "done" || 
+        trimmedClean == "im done" || trimmedClean == "i am done" || 
+        trimmedClean == "thats all" || trimmedClean == "that is all" || 
+        trimmedClean == "never mind" || trimmedClean == "nevermind") {
+        Serial.println("[Cmd] End conversation triggered.");
         result.handled = true;
         result.endConversation = true;
         result.response = "";

@@ -288,12 +288,12 @@ void onVoiceChange(String voice) {
                     display.showStatus(text.c_str());
                     break; // Stop loop on error
                 } else {
-                    if (settings.debugMode) Serial.println("Transcription: " + text);
+                    Serial.println("[Voice] Transcription: \"" + text + "\"");
                     
                     // Process local commands
                     CommandResult cmd = CommandProcessor::processCommand(text);
                     if (cmd.endConversation) {
-                        if (settings.debugMode) Serial.println("Conversation ended by user command.");
+                        Serial.println("[Voice] Conversation ended by user command.");
                         llm.clearHistory();
                         display.showStatus("Ready");
                         break;
