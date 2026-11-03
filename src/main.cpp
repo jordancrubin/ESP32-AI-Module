@@ -3011,6 +3011,22 @@ void setup() {
     while (!Serial && (millis() - start < 3000));
 
   Serial.printf("System Starting at %d MHz...\n", getCpuFrequencyMhz());
+  esp_reset_reason_t rst_reason = esp_reset_reason();
+  const char* rst_str = "Unknown";
+  switch (rst_reason) {
+      case ESP_RST_POWERON:   rst_str = "Power-on / Cold Boot"; break;
+      case ESP_RST_EXT:       rst_str = "External Pin / Hardware Reset"; break;
+      case ESP_RST_SW:        rst_str = "Software Reset (ESP.restart)"; break;
+      case ESP_RST_PANIC:     rst_str = "Exception / Kernel Panic Crash"; break;
+      case ESP_RST_INT_WDT:   rst_str = "Interrupt Watchdog Timeout"; break;
+      case ESP_RST_TASK_WDT:  rst_str = "Task Watchdog Timeout (Hang/Block)"; break;
+      case ESP_RST_WDT:       rst_str = "Other Watchdog Reset"; break;
+      case ESP_RST_DEEPSLEEP: rst_str = "Deep Sleep Wakeup"; break;
+      case ESP_RST_BROWNOUT:  rst_str = "Brownout (Voltage Sag below 2.8V!)"; break;
+      case ESP_RST_SDIO:      rst_str = "SDIO Reset"; break;
+      default: break;
+  }
+  Serial.printf("\n========================================\n>>> Last Reset Reason: [%d] %s <<<\n========================================\n\n", (int)rst_reason, rst_str);
   // Initialize File System
   if (!LittleFS.begin(true)) {
       Serial.println("LittleFS Mount Failed");
