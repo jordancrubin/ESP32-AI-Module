@@ -96,6 +96,240 @@ extern void updateAecTuningUI(int percent, const char* msg);
 extern void showHelpScreen();
 extern void flushAecBuffer();
 
+// Dying Gasp & Crash Telemetry
+#define DYING_GASP_MAGIC 0xD1E09A5F
+struct PreResetState {
+    uint32_t magic;
+    uint32_t uptime_sec;
+    uint32_t free_heap;
+    uint32_t free_psram;
+    char last_activity[32];
+};
+RTC_NOINIT_ATTR static PreResetState s_pre_reset_state;
+
+void updateDyingGaspActivity(const char* activity) {
+    s_pre_reset_state.magic = DYING_GASP_MAGIC;
+    s_pre_reset_state.uptime_sec = millis() / 1000;
+    s_pre_reset_state.free_heap = ESP.getFreeHeap();
+    s_pre_reset_state.free_psram = ESP.getFreePsram();
+    if (activity && strlen(activity) > 0) {
+        strlcpy(s_pre_reset_state.last_activity, activity, sizeof(s_pre_reset_state.last_activity));
+    }
+}
+
+const char* getResetReasonName(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "Power-on / Cold Boot";
+        case ESP_RST_EXT:       return "External Pin Reset";
+        case ESP_RST_SW:        return "Software Reset (ESP.restart)";
+        case ESP_RST_PANIC:     return "Kernel Panic / Crash";
+        case ESP_RST_INT_WDT:   return "Interrupt Watchdog";
+        case ESP_RST_TASK_WDT:  return "Task Watchdog Timeout";
+        case ESP_RST_WDT:       return "Other Watchdog";
+        case ESP_RST_DEEPSLEEP: return "Deep Sleep Wakeup";
+        case ESP_RST_BROWNOUT:  return "Brownout (Voltage Sag below 2.8V!)";
+        case ESP_RST_SDIO:      return "SDIO Reset";
+        default:                return "Unknown";
+    }
+}
+
+void recordDyingGasp() {
+    esp_reset_reason_t reason = esp_reset_reason();
+    
+    // Check RTC pre-reset state
+    bool had_rtc = (s_pre_reset_state.magic == DYING_GASP_MAGIC);
+    uint32_t pre_uptime = had_rtc ? s_pre_reset_state.uptime_sec : 0;
+    uint32_t pre_heap = had_rtc ? s_pre_reset_state.free_heap : 0;
+    uint32_t pre_psram = had_rtc ? s_pre_reset_state.free_psram : 0;
+    String pre_act = had_rtc ? String(s_pre_reset_state.last_activity) : String("Cold Boot / Unset");
+    if (pre_act.length() == 0) pre_act = "Unknown";
+
+    // Format pre-uptime
+    char uptimeBuf[32];
+    unsigned int hrs = pre_uptime / 3600;
+    unsigned int mins = (pre_uptime % 3600) / 60;
+    unsigned int secs = pre_uptime % 60;
+    if (hrs > 0) snprintf(uptimeBuf, sizeof(uptimeBuf), "%uh %um %us", hrs, mins, secs);
+    else if (mins > 0) snprintf(uptimeBuf, sizeof(uptimeBuf), "%um %us", mins, secs);
+    else snprintf(uptimeBuf, sizeof(uptimeBuf), "%us", secs);
+
+    // Read existing dying gasp history from LittleFS
+    JsonDocument doc;
+    JsonArray history;
+    if (LittleFS.exists("/dying_gasp.json")) {
+        File f = LittleFS.open("/dying_gasp.json", "r");
+        if (f) {
+            deserializeJson(doc, f);
+            f.close();
+        }
+    }
+    if (doc.is<JsonArray>()) {
+        history = doc.as<JsonArray>();
+    } else {
+        history = doc.to<JsonArray>();
+    }
+
+    // Get current local time string if available
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    char timeBuf[32] = "Not Synced";
+    if (timeinfo.tm_year > 100) {
+        strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    }
+
+    // Create new entry
+    JsonObject entry = history.add<JsonObject>();
+    entry["reason_code"] = (int)reason;
+    entry["reason"] = getResetReasonName(reason);
+    entry["pre_uptime"] = uptimeBuf;
+    entry["pre_uptime_sec"] = pre_uptime;
+    entry["pre_activity"] = pre_act;
+    entry["pre_heap"] = pre_heap;
+    entry["pre_psram"] = pre_psram;
+    entry["time"] = timeBuf;
+    entry["boot_heap"] = ESP.getFreeHeap();
+
+    // Keep only last 10 entries (remove oldest from index 0)
+    while (history.size() > 10) {
+        history.remove(0);
+    }
+
+    // Write back to LittleFS
+    File fOut = LittleFS.open("/dying_gasp.json", "w");
+    if (fOut) {
+        serializeJson(doc, fOut);
+        fOut.close();
+    }
+
+    // Initialize RTC state for this current boot session
+    updateDyingGaspActivity("Boot Completed");
+}
+
+void printDyingGaspSerial() {
+    Serial.println("\n==================================== DYING GASP HISTORY ====================================");
+    if (!LittleFS.exists("/dying_gasp.json")) {
+        Serial.println("No dying gasp events recorded yet.");
+        Serial.println("============================================================================================\n");
+        return;
+    }
+    File f = LittleFS.open("/dying_gasp.json", "r");
+    if (!f) {
+        Serial.println("Failed to read /dying_gasp.json");
+        Serial.println("============================================================================================\n");
+        return;
+    }
+    JsonDocument doc;
+    deserializeJson(doc, f);
+    f.close();
+
+    JsonArray history = doc.as<JsonArray>();
+    if (history.size() == 0) {
+        Serial.println("No dying gasp events recorded yet.");
+        Serial.println("============================================================================================\n");
+        return;
+    }
+
+    Serial.printf("%-4s | %-34s | %-12s | %-22s | %-10s\n", "#", "Reset Reason", "Pre-Uptime", "Pre-Activity", "Pre-Heap");
+    Serial.println("-----+------------------------------------+--------------+------------------------+-----------");
+    int idx = 1;
+    for (JsonObject entry : history) {
+        int code = entry["reason_code"] | 0;
+        const char* reason = entry["reason"] | "Unknown";
+        const char* uptime = entry["pre_uptime"] | "0s";
+        const char* act = entry["pre_activity"] | "Unknown";
+        uint32_t heap = entry["pre_heap"] | 0;
+        char reasonFmt[36];
+        snprintf(reasonFmt, sizeof(reasonFmt), "[%d] %s", code, reason);
+        Serial.printf("%-4d | %-34s | %-12s | %-22s | %u KB\n", idx++, reasonFmt, uptime, act, (unsigned int)(heap / 1024));
+    }
+    Serial.println("============================================================================================\n");
+}
+
+void handleWebDyingGasp() {
+    if (adminPassword.length() > 0 && !server.authenticate("admin", adminPassword.c_str())) {
+        server.sendHeader("WWW-Authenticate", "Basic realm=\"Login Required\"");
+        server.send(401, "text/html", "Unauthorized\n");
+        return;
+    }
+
+    JsonDocument doc;
+    if (LittleFS.exists("/dying_gasp.json")) {
+        File f = LittleFS.open("/dying_gasp.json", "r");
+        if (f) {
+            deserializeJson(doc, f);
+            f.close();
+        }
+    }
+    JsonArray history = doc.as<JsonArray>();
+
+    String html = "<!DOCTYPE html><html><head><title>ESP32 AI Assistant - Dying Gasp Log</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>";
+    html += "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background:#f4f6f9; color:#333; margin:0; padding:20px; }";
+    html += ".card { max-width:850px; margin:0 auto; background:#fff; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.08); padding:24px; }";
+    html += "h2 { margin-top:0; color:#2c3e50; border-bottom:2px solid #eee; padding-bottom:12px; }";
+    html += "table { width:100%; border-collapse:collapse; margin-top:16px; font-size:14px; }";
+    html += "th, td { text-align:left; padding:10px 12px; border-bottom:1px solid #e9ecef; }";
+    html += "th { background:#f8f9fa; font-weight:600; color:#495057; }";
+    html += ".badge { display:inline-block; padding:4px 8px; border-radius:6px; font-size:12px; font-weight:600; }";
+    html += ".badge-brownout { background:#f8d7da; color:#721c24; }";
+    html += ".badge-panic { background:#fff3cd; color:#856404; }";
+    html += ".badge-wdt { background:#e2e3e5; color:#383d41; }";
+    html += ".badge-power { background:#d4edda; color:#155724; }";
+    html += ".badge-sw { background:#cce5ff; color:#004085; }";
+    html += ".btn { display:inline-block; margin-top:16px; padding:9px 18px; background:#007bff; color:#fff; text-decoration:none; border-radius:6px; font-weight:600; font-size:14px; border:none; cursor:pointer; }";
+    html += ".btn-danger { background:#dc3545; }";
+    html += "</style></head><body><div class='card'>";
+    html += "<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px;'>";
+    html += "<h2 style='margin:0;border:none;'>☠️ Dying Gasp &amp; Crash Log (Last 10 Reboots)</h2>";
+    html += "<a class='btn' href='/' style='margin:0;'>&larr; Return to Configuration</a>";
+    html += "</div>";
+    html += "<p style='color:#6c757d;margin-top:0;'>Survives brownout power sags and crashes via RTC slow memory to capture uptime and activity right before death.</p>";
+
+    if (history.size() == 0) {
+        html += "<p style='color:#6c757d; font-style:italic;'>No reboot events recorded yet.</p>";
+    } else {
+        html += "<div style='overflow-x:auto;'><table><thead><tr><th>#</th><th>Reset Reason</th><th>Pre-Uptime</th><th>Last Activity</th><th>Pre-Heap</th><th>Pre-PSRAM</th><th>Boot Time</th></tr></thead><tbody>";
+        int idx = 1;
+        for (int i = (int)history.size() - 1; i >= 0; i--) {
+            JsonObject entry = history[i];
+            int code = entry["reason_code"] | 0;
+            const char* reason = entry["reason"] | "Unknown";
+            const char* uptime = entry["pre_uptime"] | "0s";
+            const char* act = entry["pre_activity"] | "Unknown";
+            uint32_t heap = entry["pre_heap"] | 0;
+            uint32_t psram = entry["pre_psram"] | 0;
+            const char* t = entry["time"] | "Not Synced";
+
+            const char* badgeClass = "badge-wdt";
+            if (code == 9) badgeClass = "badge-brownout";
+            else if (code == 4) badgeClass = "badge-panic";
+            else if (code == 1) badgeClass = "badge-power";
+            else if (code == 3) badgeClass = "badge-sw";
+
+            html += "<tr>";
+            html += "<td>" + String(idx++) + "</td>";
+            html += "<td><span class='badge " + String(badgeClass) + "'>[" + String(code) + "] " + String(reason) + "</span></td>";
+            html += "<td>" + String(uptime) + "</td>";
+            html += "<td>" + String(act) + "</td>";
+            html += "<td>" + String(heap / 1024) + " KB</td>";
+            html += "<td>" + String(psram / 1024) + " KB</td>";
+            html += "<td style='color:#6c757d;font-size:12px;'>" + String(t) + "</td>";
+            html += "</tr>";
+        }
+        html += "</tbody></table></div>";
+    }
+
+    html += "<div style='display:flex;justify-content:space-between;align-items:center;margin-top:20px;flex-wrap:wrap;gap:10px;'>";
+    html += "<form method='POST' action='/clear_dying_gasp' onsubmit=\"return confirm('Clear all dying gasp logs?');\"><button type='submit' class='btn btn-danger'>Clear History</button></form>";
+    html += "<a class='btn' href='/'>&larr; Return to Configuration</a>";
+    html += "</div>";
+    html += "</div></body></html>";
+    server.send(200, "text/html", html);
+}
+
 // Forward declarations
 void testAEC();
 void testHarmonic();
@@ -268,6 +502,7 @@ void onVoiceChange(String voice) {
         while (!stopRequested) {
             // 1. Record
             display.showStatus("Listening...");
+            updateDyingGaspActivity("Listening / Recording");
             setLedColor(0, 255, 0); // Green while recording
             lv_timer_handler(); // Force UI update
             
@@ -279,6 +514,7 @@ void onVoiceChange(String voice) {
             if (wavData && wavSize > 0) {
                 // 2. Transcribe
                 display.showStatus("Transcribing...");
+                updateDyingGaspActivity("Transcribing Audio");
                 lv_timer_handler();
                 String text = llm.transcribeAudio(wavData, wavSize, network);
                 free(wavData); // Free PSRAM immediately
@@ -323,6 +559,7 @@ void onVoiceChange(String voice) {
                     } else {
                         // 3. Send to LLM
                         display.showStatus("Thinking...");
+                        updateDyingGaspActivity("LLM Thinking");
                         lv_timer_handler();
                         
                         answer = llm.sendPrompt(text, network);
@@ -335,6 +572,7 @@ void onVoiceChange(String voice) {
                     } else {
                         display.showStatus("Speaking...");
                     }
+                    updateDyingGaspActivity("TTS Playback");
 
                     if (!enableTTSChunking && answer != "Interrupted by user") {
                         const char* speechFile = getSpeechFilename();
@@ -1005,6 +1243,7 @@ void handleWebRoot() {
 
     html += "<div class='card'><h3>System Tools</h3>";
     html += "<a href='/update' class='btn' style='display:block;text-align:center;text-decoration:none;box-sizing:border-box;'>OTA Firmware/Filesystem Update</a>";
+    html += "<a href='/dying_gasp' class='btn' style='display:block;text-align:center;text-decoration:none;box-sizing:border-box;margin-top:10px;background:#c0392b;'>☠️ Dying Gasp &amp; Crash History</a>";
     html += "</div>";
 
     html += "</div>";
@@ -1083,6 +1322,7 @@ void handleWebRoot() {
     html += "<tr><td><span class='cmd-badge'>/wake_thresh &lt;n&gt;</span></td><td>Adjust wake word sensitivity (0.05 to 1.00).</td></tr>";
     html += "<tr><td><span class='cmd-badge'>/calibrate</span></td><td>Start touch calibration.</td></tr>";
     html += "<tr><td><span class='cmd-badge'>/fs</span></td><td>Show LittleFS storage usage and files.</td></tr>";
+    html += "<tr><td><span class='cmd-badge'>/dying_gasp</span></td><td>Show crash &amp; brownout reboot history (last 10).</td></tr>";
     html += "<tr><td><span class='cmd-badge'>/reboot</span></td><td>Restart the ESP32 module.</td></tr>";
     html += "</tbody></table></div>";
 
@@ -2503,6 +2743,7 @@ void handleSerialCommands() {
           Serial.println("/test_mem <text>- Test saving a fact to Open-WebUI memory");
           Serial.println("/get_mem        - Fetch and display all saved memories from Open-WebUI");
           Serial.println("<text>          - Send prompt to AI");
+          Serial.println("/dying_gasp     - Show crash & brownout reboot history (last 10)");
           Serial.println("/factory_reset  - Erase all settings and reboot");
           Serial.println("/reboot         - Restart the device");
           Serial.println("--------------------------\n");
@@ -2707,6 +2948,8 @@ void handleSerialCommands() {
           Serial.println("Rebooting now...");
           delay(1000);
           ESP.restart();
+        } else if (inputBuffer == "/dying_gasp" || inputBuffer == "/crashes") {
+          printDyingGaspSerial();
         } else if (inputBuffer.startsWith("/say ")) {
           String textToSay = inputBuffer.substring(5);
           textToSay.trim();
@@ -3030,6 +3273,8 @@ void setup() {
   // Initialize File System
   if (!LittleFS.begin(true)) {
       Serial.println("LittleFS Mount Failed");
+  } else {
+      recordDyingGasp();
   }
   // Load Settings
   settings.begin();
@@ -3313,6 +3558,13 @@ void setup() {
   server.on("/save", HTTP_POST, handleWebSave);
   server.on("/exit_config", HTTP_GET, handleExitWebConfig);
   server.on("/exit_config", HTTP_POST, handleExitWebConfig);
+  server.on("/dying_gasp", HTTP_GET, handleWebDyingGasp);
+  server.on("/clear_dying_gasp", HTTP_POST, []() {
+      if (adminPassword.length() > 0 && !server.authenticate("admin", adminPassword.c_str())) return server.requestAuthentication();
+      if (LittleFS.exists("/dying_gasp.json")) LittleFS.remove("/dying_gasp.json");
+      server.sendHeader("Location", "/dying_gasp");
+      server.send(303);
+  });
   server.onNotFound([]() {
       server.send(404, "text/plain", "Not Found");
   });
@@ -3646,6 +3898,7 @@ void loop() {
   // Hourly Weather Update
   if (!isSpeaking && strlen(settings.openWeatherKey) > 0 && network.isConnected()) {
       if (millis() - lastWeatherUpdate > 3600000) { // 1 hour
+          updateDyingGaspActivity("Fetching Weather");
           getWeather();
           lastWeatherUpdate = millis();
       }
@@ -3654,6 +3907,7 @@ void loop() {
   static unsigned long lastBmeRead = 0;
   if (!isSpeaking && bmeReady && (millis() - lastBmeRead > 60000 || (lastBmeRead == 0 && millis() > 3000))) {
       lastBmeRead = millis();
+      updateDyingGaspActivity("Reading BME680");
       if (bme.performReading()) {
           g_currentVocKOhms = bme.gas_resistance / 1000.0;
           g_currentIndoorTemp = bme.temperature;
@@ -3857,6 +4111,14 @@ void loop() {
           display.showStatus(waitMsg.c_str());
       }
   }
+
+  // Periodic Dying Gasp Heartbeat telemetry update (every 2s)
+  static unsigned long lastDyingGaspHeartbeat = 0;
+  if (millis() - lastDyingGaspHeartbeat > 2000) {
+      lastDyingGaspHeartbeat = millis();
+      updateDyingGaspActivity(isSpeaking ? "TTS Playback" : (isWebServerActive ? "Web Config Mode" : "Standby Idle"));
+  }
+
   handleSerialCommands();
   if (isWebServerActive) {
       server.handleClient();
