@@ -207,7 +207,6 @@ void SpeakerManager::begin() {
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = 512; // 8 * 512 = 4096 frames (170ms at 24kHz) ensures zero buffer underruns from LittleFS reads
     chan_cfg.auto_clear_after_cb = true;
-    chan_cfg.auto_clear_before_cb = true;
     i2s_new_channel(&chan_cfg, &tx_handle, NULL);
 
     s_i2s_std_cfg = { // Initialize the static config struct
@@ -527,27 +526,13 @@ bool SpeakerManager::isRunning() {
 
 void SpeakerManager::audioTask(void* parameter) {
     SpeakerManager* manager = static_cast<SpeakerManager*>(parameter);
-    static int16_t idle_silence[256] = {0};
     while (true) {
         if (manager->isRunning() && !s_is_interrupted) {
             manager->loop();
             // No delay here to keep I2S buffer full (prevents stuttering)
         }
         else {
-            // Actively stream pure digital zeros into I2S DMA while idle.
-            // This prevents TX DMA underflows and APB bus noise while keeping
-            // BCLK/WS continuously active to keep the MAX98357A PLL locked.
-            if (s_tx_handle && s_i2s_enabled) {
-                if (xSemaphoreTakeRecursive(manager->_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-                    size_t written = 0;
-                    i2s_channel_write(s_tx_handle, idle_silence, sizeof(idle_silence), &written, pdMS_TO_TICKS(20));
-                    xSemaphoreGiveRecursive(manager->_mutex);
-                } else {
-                    vTaskDelay(pdMS_TO_TICKS(5));
-                }
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(10)); // Sleep when idle
-            }
+            vTaskDelay(pdMS_TO_TICKS(10)); // Sleep when idle
         }
     }
 }
