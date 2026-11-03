@@ -1,0 +1,12 @@
+# PROJECT CONTEXT & AGENT INSTRUCTIONS — ESP32-AI-Module
+
+## Build & Output Rule
+- When building this project, always place / copy the resulting `firmware.bin` into the project root directory:
+  `./firmware.bin` (replacing the old one).
+
+## Build Locations
+1. **PlatformIO Default Build Artifact:**
+   `.pio/build/esp32-s3-devkitc1-n16r8/firmware.bin`
+2. **Project Root Target (Replaced on each build):**
+   `./firmware.bin`
+

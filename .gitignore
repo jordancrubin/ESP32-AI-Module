@@ -13,3 +13,4 @@ include/Secrets.h
 
 # Compiled binaries
 *.bin
+*.code-workspace
