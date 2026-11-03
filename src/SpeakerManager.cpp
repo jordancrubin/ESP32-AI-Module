@@ -207,6 +207,7 @@ void SpeakerManager::begin() {
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = 512; // 8 * 512 = 4096 frames (170ms at 24kHz) ensures zero buffer underruns from LittleFS reads
     chan_cfg.auto_clear_after_cb = true;
+    chan_cfg.auto_clear_before_cb = true;
     i2s_new_channel(&chan_cfg, &tx_handle, NULL);
 
     s_i2s_std_cfg = { // Initialize the static config struct
@@ -227,10 +228,8 @@ void SpeakerManager::begin() {
     };
 
     i2s_channel_init_std_mode(tx_handle, &s_i2s_std_cfg);
-    // Keep I2S TX channel disabled until audio playback actually starts.
-    // This allows the MAX98357A to stay in ultra-low-power hardware shutdown mode (<1 uA)
-    // during idle standby, eliminating idle crackling, Wi-Fi RF noise pickup, and hiss.
-    s_i2s_enabled = false;
+    i2s_channel_enable(tx_handle);
+    s_i2s_enabled = true;
     
     s_tx_handle = tx_handle; // Save to static for callback
     
@@ -361,13 +360,6 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
         if (!s_i2s_enabled) {
             i2s_channel_enable(tx_handle);
             s_i2s_enabled = true;
-            // Write a short pre-roll of digital silence so the MAX98357A PLL locks cleanly
-            // before audio samples hit the DAC, preventing startup pops.
-            int16_t silence[256] = {0};
-            size_t written = 0;
-            for (int p = 0; p < 3; p++) {
-                i2s_channel_write(tx_handle, silence, sizeof(silence), &written, pdMS_TO_TICKS(100));
-            }
         }
     }
     
@@ -392,23 +384,14 @@ void SpeakerManager::stop() {
         mp3.end(); // Clear internal decoder buffers (flushes remainder) immediately on stop
         s_mp3_started = false;
     }
+    // Do NOT disable I2S here!
+    // With auto_clear_after_cb = true, I2S DMA automatically streams digital silence (zeros).
+    // Keeping BCLK and WS active prevents MAX98357A amplifier shutdown/wakeup pops.
     if (audioFile) audioFile.close();
     _isPlaying = false;
     s_is_interrupted = false; // Reset flag
     s_hpf.reset();            // Clear filter states
     speech.resetAec();        // Clear reference buffer when playback stops
-
-    // Power down I2S to put MAX98357A into silent hardware shutdown mode
-    if (s_tx_handle && s_i2s_enabled) {
-        // Stream trailing digital silence to cleanly ramp DC to zero
-        int16_t silence[256] = {0};
-        size_t written = 0;
-        i2s_channel_write(s_tx_handle, silence, sizeof(silence), &written, pdMS_TO_TICKS(50));
-        vTaskDelay(pdMS_TO_TICKS(20)); // Allow silence to drain through DMA before cutting clocks
-        i2s_channel_disable(s_tx_handle);
-        s_i2s_enabled = false;
-    }
-
     xSemaphoreGiveRecursive(_mutex);
 }
 
@@ -522,28 +505,16 @@ void SpeakerManager::loop() {
 
             if (done) {
                 // End of file
+                _isPlaying = false;
+                
                 if (s_mp3_started) {
                     mp3.end(); // Clean up buffer on natural finish (flushes remaining audio)
                     s_mp3_started = false;
                 }
 
+                // Do NOT disable I2S! With auto_clear_after_cb = true, DMA automatically outputs digital zeros.
                 if (audioFile) audioFile.close();
                 speech.resetAec(); // Clear reference buffer on natural finish
-
-                // Flush remaining audio from DMA buffer by feeding trailing silence, then disable I2S
-                // to put MAX98357A into silent hardware shutdown mode during idle standby.
-                if (tx_handle && s_i2s_enabled) {
-                    int16_t silence[512] = {0};
-                    size_t written = 0;
-                    for (int p = 0; p < 2; p++) {
-                        i2s_channel_write(tx_handle, silence, sizeof(silence), &written, pdMS_TO_TICKS(100));
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(50)); // Allow trailing silence to reach DAC
-                    i2s_channel_disable(tx_handle);
-                    s_i2s_enabled = false;
-                }
-
-                _isPlaying = false;
             }
         }
         xSemaphoreGiveRecursive(_mutex);
@@ -556,13 +527,27 @@ bool SpeakerManager::isRunning() {
 
 void SpeakerManager::audioTask(void* parameter) {
     SpeakerManager* manager = static_cast<SpeakerManager*>(parameter);
+    static int16_t idle_silence[256] = {0};
     while (true) {
         if (manager->isRunning() && !s_is_interrupted) {
             manager->loop();
             // No delay here to keep I2S buffer full (prevents stuttering)
         }
         else {
-            vTaskDelay(pdMS_TO_TICKS(10)); // Sleep when idle
+            // Actively stream pure digital zeros into I2S DMA while idle.
+            // This prevents TX DMA underflows and APB bus noise while keeping
+            // BCLK/WS continuously active to keep the MAX98357A PLL locked.
+            if (s_tx_handle && s_i2s_enabled) {
+                if (xSemaphoreTakeRecursive(manager->_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                    size_t written = 0;
+                    i2s_channel_write(s_tx_handle, idle_silence, sizeof(idle_silence), &written, pdMS_TO_TICKS(20));
+                    xSemaphoreGiveRecursive(manager->_mutex);
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(5));
+                }
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(10)); // Sleep when idle
+            }
         }
     }
 }
