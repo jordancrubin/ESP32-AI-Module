@@ -14,6 +14,8 @@ public:
     void stop();
     void loop();
     bool isRunning();
+    void playTone(int freqHz, int durationMs);
+    void resetI2S();
 
 private:
     static void audioTask(void* parameter);

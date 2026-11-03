@@ -2743,6 +2743,8 @@ void handleSerialCommands() {
           Serial.println("/test_mem <text>- Test saving a fact to Open-WebUI memory");
           Serial.println("/get_mem        - Fetch and display all saved memories from Open-WebUI");
           Serial.println("<text>          - Send prompt to AI");
+          Serial.println("/test_speaker   - Play 440Hz test sine tone directly through I2S");
+          Serial.println("/reset_i2s      - Force re-enable and re-initialize I2S TX channel");
           Serial.println("/dying_gasp     - Show crash & brownout reboot history (last 10)");
           Serial.println("/factory_reset  - Erase all settings and reboot");
           Serial.println("/reboot         - Restart the device");
@@ -2950,6 +2952,10 @@ void handleSerialCommands() {
           ESP.restart();
         } else if (inputBuffer == "/dying_gasp" || inputBuffer == "/crashes") {
           printDyingGaspSerial();
+        } else if (inputBuffer == "/test_speaker" || inputBuffer == "/beep") {
+          speaker.playTone(440, 1000);
+        } else if (inputBuffer == "/reset_i2s") {
+          speaker.resetI2S();
         } else if (inputBuffer.startsWith("/say ")) {
           String textToSay = inputBuffer.substring(5);
           textToSay.trim();

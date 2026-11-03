@@ -188,6 +188,10 @@ void dataCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void*) {
                 src += bytes_written;
                 bytes_to_write -= bytes_written;
             } else {
+                Serial.printf("[Speaker] MP3 i2s_channel_write error: %s (%d)\n", esp_err_to_name(err), err);
+                if (err == ESP_ERR_INVALID_STATE) {
+                    i2s_channel_enable(s_tx_handle);
+                }
                 break;
             }
         }
@@ -206,7 +210,8 @@ void SpeakerManager::begin() {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = 512; // 8 * 512 = 4096 frames (170ms at 24kHz) ensures zero buffer underruns from LittleFS reads
-    chan_cfg.auto_clear_after_cb = true;
+    chan_cfg.auto_clear_before_cb = true; // Auto-clear DMA TX buffer to 0 before transmission on underflow
+    chan_cfg.auto_clear_after_cb = true;  // Auto-clear DMA TX buffer to 0 after transmission
     i2s_new_channel(&chan_cfg, &tx_handle, NULL);
 
     s_i2s_std_cfg = { // Initialize the static config struct
@@ -279,10 +284,8 @@ void SpeakerManager::playSpeechFromFile(const char* filename) {
     if (audioFile) audioFile.close();
     audioFile = LittleFS.open(filename, "r");
     if (!audioFile || audioFile.size() < 44) {
-        if (settings.debugMode) {
-            if (!audioFile) Serial.printf("SpeakerManager: Failed to open audio file: %s\n", filename);
-            else Serial.printf("SpeakerManager: File too small (%u bytes), skipping: %s\n", (unsigned int)audioFile.size(), filename);
-        }
+        if (!audioFile) Serial.printf("[Speaker] Failed to open audio file: %s\n", filename);
+        else Serial.printf("[Speaker] Audio file too small (%u bytes), skipping: %s\n", (unsigned int)audioFile.size(), filename);
         if (audioFile) audioFile.close();
         _isPlaying = false;
         xSemaphoreGiveRecursive(_mutex);
@@ -487,6 +490,10 @@ void SpeakerManager::loop() {
                                     src += bytes_written;
                                     bytes_to_write -= bytes_written;
                                 } else {
+                                    Serial.printf("[Speaker] WAV i2s_channel_write error: %s (%d)\n", esp_err_to_name(err), err);
+                                    if (err == ESP_ERR_INVALID_STATE) {
+                                        i2s_channel_enable(tx_handle);
+                                    }
                                     break;
                                 }
                             }
@@ -522,6 +529,73 @@ void SpeakerManager::loop() {
 
 bool SpeakerManager::isRunning() {
     return _isPlaying;
+}
+
+void SpeakerManager::resetI2S() {
+    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    if (tx_handle) {
+        if (s_i2s_enabled) {
+            i2s_channel_disable(tx_handle);
+            s_i2s_enabled = false;
+        }
+        i2s_channel_reconfig_std_clock(tx_handle, &s_i2s_std_cfg.clk_cfg);
+        esp_err_t err = i2s_channel_enable(tx_handle);
+        s_i2s_enabled = (err == ESP_OK);
+        Serial.printf("[Speaker] I2S Reset result: %s (%d)\n", esp_err_to_name(err), err);
+    }
+    xSemaphoreGiveRecursive(_mutex);
+}
+
+void SpeakerManager::playTone(int freqHz, int durationMs) {
+    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    if (!tx_handle) {
+        Serial.println("[Speaker] Cannot play tone: tx_handle is NULL");
+        xSemaphoreGiveRecursive(_mutex);
+        return;
+    }
+    if (!s_i2s_enabled) {
+        Serial.println("[Speaker] tx_handle was not enabled! Enabling now...");
+        i2s_channel_enable(tx_handle);
+        s_i2s_enabled = true;
+    }
+
+    uint32_t sampleRate = s_i2s_std_cfg.clk_cfg.sample_rate_hz;
+    if (sampleRate == 0) sampleRate = 24000;
+    size_t totalSamples = (sampleRate * durationMs) / 1000;
+
+    int16_t toneBuf[256];
+    float phase = 0.0f;
+    float phaseInc = (2.0f * (float)M_PI * (float)freqHz) / (float)sampleRate;
+    size_t samplesRemaining = totalSamples;
+    size_t totalBytesWritten = 0;
+
+    Serial.printf("[Speaker] Playing test tone: %d Hz for %d ms (Sample Rate: %d Hz)...\n", freqHz, durationMs, sampleRate);
+
+    while (samplesRemaining > 0) {
+        size_t chunk = (samplesRemaining < 256) ? samplesRemaining : 256;
+        for (size_t i = 0; i < chunk; i++) {
+            float s = sinf(phase);
+            phase += phaseInc;
+            if (phase >= 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+            int32_t val = (int32_t)(s * 16000.0f * (float)s_volume_int / 192.0f);
+            if (val > 32767) val = 32767;
+            else if (val < -32768) val = -32768;
+            toneBuf[i] = (int16_t)val;
+        }
+
+        size_t bytesToWrite = chunk * sizeof(int16_t);
+        size_t bytesWritten = 0;
+        esp_err_t err = i2s_channel_write(tx_handle, toneBuf, bytesToWrite, &bytesWritten, pdMS_TO_TICKS(500));
+        if (err != ESP_OK) {
+            Serial.printf("[Speaker] Tone i2s_channel_write FAILED: %s (%d)\n", esp_err_to_name(err), err);
+            break;
+        }
+        totalBytesWritten += bytesWritten;
+        samplesRemaining -= chunk;
+    }
+
+    Serial.printf("[Speaker] Tone finished. Total bytes sent to I2S DMA: %u bytes\n", (unsigned int)totalBytesWritten);
+    xSemaphoreGiveRecursive(_mutex);
 }
 
 void SpeakerManager::audioTask(void* parameter) {
